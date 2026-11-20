@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import pytest
@@ -163,8 +164,16 @@ def test_owner_aliases_siblings_and_symlinks_share_physical_boundary(tmp_path, p
     assert expected.allowed
     assert path_access_policy.delegable_path_decision(scope, alias / "f", purpose=purpose) == expected
     if sys.platform == "darwin":
-        through_tmp = Path("/tmp") / project.resolve().relative_to("/private/tmp") / "f"
-        assert path_access_policy.delegable_path_decision(scope, through_tmp, purpose=purpose) == expected
+        with TemporaryDirectory(dir="/private/tmp") as scratch:
+            physical = Path(scratch).resolve()
+            alias_scope = path_access_policy.freeze_delegable_scope(
+                {"allowed_write_roots": [str(physical)]}, owner,
+                owner_id="local/main", task_id="alias-task", run_id="alias-run",
+            )
+            through_tmp = Path("/tmp") / physical.relative_to("/private/tmp") / "f"
+            direct = path_access_policy.delegable_path_decision(alias_scope, physical / "f", purpose=purpose)
+            assert direct.allowed
+            assert path_access_policy.delegable_path_decision(alias_scope, through_tmp, purpose=purpose) == direct
     spill = tmp_path / "project-other"
     spill.mkdir()
     for destination in (spill, owner):

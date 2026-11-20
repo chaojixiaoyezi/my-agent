@@ -105,6 +105,7 @@ from .stream_writer import BufferedChunkStreamWriter, open_chunk_stream, write_h
 if TYPE_CHECKING:
     from ...core import SimpleAgent
     from ..path_access_policy import DelegableScope
+    from ..tooling.registry_workspace import WorkspaceRef
 
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
 logger = logging.getLogger(__name__)
@@ -221,6 +222,7 @@ class _GatewayRunParamsRequest:
     carried_archive_tool_calls: tuple[dict[str, object], ...] = ()
     carried_active_turn_user_inputs: tuple[dict[str, object], ...] = ()
     delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False)
+    workspace_ref: WorkspaceRef | None = field(default=None, kw_only=True, repr=False)
 
 
 @dataclass
@@ -353,6 +355,11 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "channel_delivery": public_delivery,
         }
     )
+    evidence = getattr(result, "tool_runtime_evidence", None)
+    if isinstance(evidence, dict):
+        for key in ("declared_file_delivery", "foreground_work"):
+            if isinstance(evidence.get(key), dict):
+                response[key] = evidence[key]
     response.update(gateway_model_response_error_projection(result))
 
 
@@ -821,6 +828,7 @@ def _run_gateway_turn_with_conversation_compact(
     presentation_evaluated = False
     bot_guard = None
     delegable_scope = None
+    workspace_ref = None
     stage_timing = getattr(observer, "model_request_stage_timing", None)
 
     # LLM: 回调只由原运行/Compact同步调用；不持久化或改活快照，清旧值后仍保留本turn已评估事实。
@@ -848,9 +856,11 @@ def _run_gateway_turn_with_conversation_compact(
                 tuple(carried_archive_tool_calls),
                 tuple(carried_active_turn_user_inputs),
                 delegable_scope=delegable_scope,
+                workspace_ref=workspace_ref,
             )
         )
         delegable_scope = run_params.delegable_scope
+        workspace_ref = run_params.workspace_ref
         run_params.runtime_rejected_actions = runtime_rejected_actions
         run_params.native_compact_carry = native_compact_carry
         run_params.conversation_turn_id = context.request_id
@@ -1248,6 +1258,12 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
     delegable_scope = inputs.delegable_scope
     if delegable_scope is None:
         delegable_scope = _gateway_delegable_scope(inputs, attrs, boundary, task_id)
+    workspace_ref = inputs.workspace_ref or _gateway_workspace_ref(inputs, boundary, delegable_scope)
+    task_binding = request_binding.GatewayTaskBindingWriter(
+        context.request_path, context.request_id, context.request,
+        str(request.get("execution_attempt_id") or "").strip() or context.request_id,
+        delegable_scope=delegable_scope, workspace_ref=workspace_ref,
+    )
     return params_type(
         **({"bot_execution_policy": bot_policy} if bot_policy is not None else {}),
         stages=context.stages,
@@ -1256,6 +1272,8 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
         allowed_tools=allowed_tools,
         write_boundary=boundary,
         delegable_scope=delegable_scope,
+        workspace_ref=workspace_ref,
+        delivery_contract=task_binding.staged_delivery_contract(),
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,
@@ -1292,13 +1310,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
             work_scope=request_binding.gateway_message_work_scope(request),
         ),
         compact_context=conversation.compact_context,
-        conversation_task_binding_callback=request_binding.GatewayTaskBindingWriter(
-            context.request_path,
-            context.request_id,
-            context.request,
-            str(request.get("execution_attempt_id") or "").strip() or context.request_id,
-            delegable_scope=delegable_scope,
-        ),
+        conversation_task_binding_callback=task_binding,
         partial_turn_callback=partial(request_history.persist_gateway_partial_result, context, conversation),
     )
 
@@ -1348,6 +1360,38 @@ def _gateway_message_references(request, conversation):
 
 # LLM: 会话属性只投影线程、task 与 cwd，认证身份由独立的宿主参数携带，不能放回模型可写属性。
 # 函数用途: 生成本轮业务会话范围，有准确执行权时进入原目录，否则由工作工具懒建。
+def _gateway_workspace_ref(inputs, boundary, delegable_scope):
+    from ..tooling.registry_workspace import freeze_workspace_ref, read_workspace_ref
+
+    agent = inputs.context.agent
+    authority = request_binding.gateway_runtime_authority(inputs.request, inputs.context.request_id)
+    if "workspace_ref" in authority:
+        workspace = read_workspace_ref(authority["workspace_ref"])
+        if workspace is None:
+            raise ConversationPersistenceError("本轮工作目录快照不可读取，请核对原请求后恢复。")
+        return workspace
+    if boundary and boundary.get("execution_cwd"):
+        return freeze_workspace_ref(boundary["execution_cwd"], roots=boundary.get("allowed_write_roots", ()))
+
+    from ..conversation.workspace_context import validated_main_workspace_roots
+    from ..user_space.owner_access import is_local_admin_owner
+
+    conversation = inputs.conversation
+    declared = [str(root) for root in (conversation.runtime_workspace_roots or (conversation.cwd,)) if root]
+    mode = str(getattr(getattr(agent, "config", None), "access_mode", "") or "").lower().replace("_", "-")
+    roots = validated_main_workspace_roots(agent, declared,
+        allow_home_ancestor=is_local_admin_owner(getattr(agent, "home_paths", None)) and mode == "full-access")
+    fallback = getattr(agent, "effective_workspace_root", None) or getattr(agent, "root", None)
+    cwd = conversation.cwd
+    if cwd and roots and any(Path(cwd).is_relative_to(Path(root)) for root in roots):
+        return freeze_workspace_ref(cwd, roots=roots)
+    if roots:
+        return freeze_workspace_ref(roots[0], roots=roots)
+    if cwd and delegable_scope is not None and delegable_scope.owner_root is not None and Path(cwd).is_relative_to(delegable_scope.owner_root):
+        return freeze_workspace_ref(cwd)
+    return freeze_workspace_ref(fallback)
+
+
 def _gateway_delegable_scope(inputs, attrs, boundary, task_id):
     from ..conversation.workspace_context import validated_main_workspace_roots
     from ..path_access_policy import (

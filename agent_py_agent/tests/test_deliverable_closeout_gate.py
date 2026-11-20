@@ -1,7 +1,6 @@
 """LLM: 交付清单收口门的合同单测。
 
-规则（2026-09-11 真机证据驱动）：子代理在**宿主声明过**交付物的情况下，缺产物不能直接收口；
-主代理用户会话永不生效；阻断有界（超限放行）；来源只能是结构化 attributes，不读正文。
+主回合和子任务均检查宿主的明确文件声明；修复次数有界，超限按未交付收口。
 本文件同时覆盖"门本身"与"收口路径真的调用了它"两层，避免出现"写了门但没人用"。
 """
 
@@ -54,10 +53,13 @@ def test_existing_deliverable_passes(tmp_path):
     assert deliverable_closeout_block(params) is None
 
 
-def test_main_conversation_never_blocked(tmp_path):
+def test_main_conversation_only_checks_required_files(tmp_path):
     target = tmp_path / "core.go"
-    params = _params(tmp_path, scope="default", declared=[str(target)])
+    params = _params(tmp_path, scope="default")
+    params.task_attributes["output_refs"] = [str(target)]
     assert deliverable_closeout_block(params) is None
+    params.task_attributes["required_file_refs"] = [str(target)]
+    assert str(target) in deliverable_closeout_block(params)
 
 
 def test_no_declaration_no_block(tmp_path):
@@ -107,8 +109,6 @@ def test_no_tool_calls_decision_continues_when_deliverable_missing(tmp_path):
     assert any("deliverable-closeout-blocked" in str(item) for item in params.tool_context)
 
 
-# LLM: 主代理用户会话与"没声明交付物"的子代理都必须保持原行为（EXEC-38 撤销的推断式产物门
-#   不能被这次收窄复活）。
 # 函数用途: 验证没有声明交付物时收口路径照常 break。
 def test_no_tool_calls_decision_breaks_without_declaration(tmp_path):
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
@@ -117,7 +117,7 @@ def test_no_tool_calls_decision_breaks_without_declaration(tmp_path):
         _NoToolCallsRequest,
     )
 
-    params = _params(tmp_path, scope="default", declared=[str(tmp_path / "core.go")])
+    params = _params(tmp_path, scope="default")
     params.tool_context = []
     params.executed_tools = []
     response = types.SimpleNamespace(

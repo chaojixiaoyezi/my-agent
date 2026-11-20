@@ -1341,7 +1341,9 @@ class DelegationDecision:
                 pass
         return {
             "code": self.code, "staging_required": self.staging_required,
+            "target_path": str(target),
             "staging_location": str(task_dir / "output") if task_dir is not None else "",
+            "staging_ref": str(task_dir / "output" / (relative or target.name)) if task_dir is not None else "",
             "expected_relative_location": relative or target.name,
             "parent_apply_tool": "assets.versions.accept",
             "side_effect": "not_started",

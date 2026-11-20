@@ -235,6 +235,8 @@ class SubAgentRunnerContextService:
             boundary["prohibited_actions"] = prohibited_actions
         if task.delegable_scope_record is not None:
             boundary["delegable_scope"] = task.delegable_scope_record
+        if task.workspace_ref_record is not None:
+            boundary["workspace_ref"] = task.workspace_ref_record
         if task.initiating_request_id:
             boundary["delegation_lineage"] = {
                 "initiating_request_id": task.initiating_request_id,

@@ -627,6 +627,7 @@ def _subagent_compact_model_surface(
             write_boundary=deepcopy(run_params.write_boundary), request_id=run_params.request_id,
             run_id=run_params.run_id, task_id=run_params.task_id,
             task_attributes=deepcopy(run_params.task_attributes), source="conversation_compact_summary", save=False,
+            workspace_ref=run_params.workspace_ref,
         ) if run_params is not None else None),
         capability_presentation=run_params.capability_presentation if run_params is not None else None,
         capability_presentation_turn_id=run_params.capability_presentation_turn_id if run_params is not None else "",

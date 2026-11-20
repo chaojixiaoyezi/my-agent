@@ -2394,6 +2394,13 @@ def _build_business_accept_model_spec(spec):
         _model_business_schema(spec.native_request_schema),
         action_name=spec.action,
     )
+    schema['properties']['staged_file'] = {
+        'type': 'object', 'additionalProperties': False,
+        'description': '可选。落地直属子任务已写的暂存文件；按其清单提供原 child_run_id 和精确 destination。',
+        'required': ['child_run_id', 'destination'],
+        'properties': {'child_run_id': {'type': 'string', 'minLength': 1},
+                       'destination': {'type': 'string', 'minLength': 1}},
+    }
     example = {
         'action': 'assets.versions.accept',
         'request_id': 'accept-asset-0001',
@@ -2410,6 +2417,7 @@ def _build_business_accept_model_spec(spec):
         description=(
             '正式采用业务空间内指定资产版本（assets.versions.accept）；必须携带准确的 space_id、asset_id、'
             'version_ref、当前 expected_revision 与幂等键，且每次执行均须经当前真实人类确认。'
+            '交付子任务暂存文件时同时提交 staged_file，父回合会按批准版本校验并落地。'
         ),
         input_schema=schema,
         hints=ToolModelHints(
@@ -2635,6 +2643,8 @@ def _inspect_business_tool_receipt(tool, request):
     if not isinstance(request, dict):
         raise HostAPIError('INVALID_SCHEMA')
     action = request.get('action')
+    if action == 'assets.versions.accept' and isinstance(tool, _RegisterBusinessToolsBusinessAcceptTool):
+        request = tool._native_request(request)
     specs_by_action = getattr(tool, '_specs_by_action', None)
     if isinstance(specs_by_action, dict):
         if type(action) is not str or action not in specs_by_action:
@@ -2848,12 +2858,65 @@ class _RegisterBusinessToolsBusinessAcceptTool(BaseTool):
     def operation_identity_for(self, arguments):
         return 'business_assets_versions_accept'
 
+    @staticmethod
+    def _native_request(params):
+        if isinstance(params, dict) and 'staged_file' in params:
+            return {key: value for key, value in params.items() if key != 'staged_file'}
+        return params
+
+    def _remember_staged_delivery(self, request, invocation):
+        from ..runtime_context import current_subagent_run_id
+
+        host = self._business_host
+        current = host._current_run_params
+        binder = getattr(current, 'conversation_task_binding_callback', None)
+        remember = getattr(binder, 'remember_staged_delivery', None)
+        proof = getattr(invocation, 'human_approval_check', None)
+        phase = request['staged_file']
+        if not callable(remember) or not callable(proof) or current_subagent_run_id(host):
+            raise PermissionError('暂存落地需要原 Gateway 父回合与原用户确认')
+        proof()
+        try:
+            child = host.subagents.load(phase['child_run_id'])
+        except (FileNotFoundError, ValueError, KeyError) as error:
+            raise PermissionError('暂存清单指向的直属子任务不可读取') from error
+        if child.owner != host.home_paths.owner_id or child.parent_id not in (current.run_id, current.request_id):
+            raise PermissionError('暂存清单不属于本轮父任务')
+        row = next((row for row in child.staged_workspace_outputs()
+                    if row['destination'] == phase['destination'] and row['files_written']), None)
+        if row is None:
+            raise PermissionError('未找到子任务清单中已写入的对应暂存文件')
+        remember({**request['params'], **{key: row[key] for key in (
+            'child_run_id', 'staging_ref', 'destination', 'sha256')}})
+
+    def accepted_workspace_version(self, *, space_id, asset_id, version_ref):
+        """从原业务账核对当前已采用版本，返回原内容哈希和上传预算。"""
+        from .business_artifacts_http import UPLOAD_MAX_BYTES
+
+        try:
+            context, services = local_business_context(self._business_host, model=True)
+            actor = services.actor(context)
+            view = services.spaces.call('assets.get', {'space_id': space_id, 'asset_id': asset_id}, actor=actor)
+            if view['accepted_version'] != version_ref:
+                return None
+            project_ref = view['asset']['project_ref']
+            content = services.spaces.reference('artifact_version', version_ref, actor=actor,
+                space_id=space_id, project_ref=project_ref)
+            if content.get('state') != 'available' or content.get('version_ref') != version_ref:
+                return None
+            digest = content.get('content_sha256')
+            if isinstance(digest, str) and re.fullmatch(r'[a-f0-9]{64}', digest):
+                return digest, UPLOAD_MAX_BYTES
+        except (BusinessError, HostAPIError) as error:
+            raise PermissionError(error.code) from error
+        return None
+
     def validate_invocation(self, params, context):
         return _validate_business_invocation_request(
             self.model_spec.name,
             self._specs_by_action,
             self._ready_specs,
-            params,
+            self._native_request(params),
         )
 
     def execute(self, params):
@@ -2863,19 +2926,30 @@ class _RegisterBusinessToolsBusinessAcceptTool(BaseTool):
         return self._execute(params, invocation)
 
     def _execute(self, params, invocation=None):
+        from ..tooling.models import ToolHandlerOutcome
+        from .request_errors import ConversationPersistenceError
+
+        native_request = self._native_request(params)
         rejected = _validate_business_invocation_request(
             self.model_spec.name,
             self._specs_by_action,
             self._ready_specs,
-            params,
+            native_request,
         )
         if rejected is not None:
             return rejected
+        if 'staged_file' in params:
+            try:
+                self._remember_staged_delivery(params, invocation)
+            except (PermissionError, ConversationPersistenceError) as error:
+                return ToolHandlerOutcome(self.model_spec.name, False,
+                    f'暂存清单未登记，原采用未执行。{error}。请核对子任务回执及工作区后重新发起。',
+                    error_code='CAPABILITY_DENIED', effect_outcome='not_started')
         return _execute_registered_business_request(
             self._business_host,
             self.model_spec.name,
             self._ready_specs[0],
-            params,
+            native_request,
             invocation,
         )
 

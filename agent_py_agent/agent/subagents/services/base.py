@@ -36,6 +36,7 @@ from ...path_access_policy import (
     recorded_delegable_scope,
 )
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
+from ...tooling.registry_workspace import WorkspaceRef, read_workspace_ref
 from ..authorization_gate import (
     OperationRequest,
     authorize_operation,
@@ -89,6 +90,7 @@ class CreateRunParams:
     business_context: BusinessExecutionContext | None = field(default=None, kw_only=True)
     parent_delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False)
     initiating_request_id: str = field(default="", kw_only=True)
+    workspace_ref: WorkspaceRef | None = field(default=None, kw_only=True, repr=False)
 
 
 # LLM: task 是同一待提交对象；模型建议和包入口初始化均为宿主 typed 材料，只供新 thread 使用，不进 attrs，不赋予权限。
@@ -603,12 +605,25 @@ class SubAgentBaseService:
         paths = (self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
                  if scope is None else self.manager._build_work_order_paths(
                      run_id, extra_write_roots=roots, parent_delegable_scope=scope))
+        ref = params.workspace_ref
+        if ref is None and parent_task is not None:
+            ref = read_workspace_ref(parent_task.workspace_ref_record)
+        if ref is not None:
+            allowed = tuple(Path(value) for value in paths["allowed_write_roots"])
+            if any(ref.root.is_relative_to(root) for root in allowed):
+                permitted = tuple((root, identity) for root, identity in zip(ref.roots, ref.root_identities)
+                                  if any(root.is_relative_to(base) for base in allowed))
+                ref = replace(ref, roots=tuple(root for root, _ in permitted),
+                              root_identities=tuple(identity for _, identity in permitted))
+            else:
+                ref = None
         return {
             "run_id": run_id,
             "paths": paths,
             "acceptance_checks": list(params.acceptance_checks or []),
             "now": time.time() if created_at is None else created_at,
             "parent_task": parent_task,
+            "workspace_ref": ref.to_record() if ref is not None else None,
             "delegable_scope": (child_delegable_scope(scope, paths["allowed_write_roots"][1:]).to_record()
                                 if scope is not None else None),
         }
@@ -650,6 +665,7 @@ class SubAgentBaseService:
             attributes=_task_attrs_for_create(self.manager, params),
             host_channel_actor=_creation_actor_record(self.manager, params, parent_task),
             delegable_scope_record=prepared["delegable_scope"],
+            workspace_ref_record=prepared.get("workspace_ref"),
             initiating_request_id=(params.initiating_request_id
                                    or (parent_task.initiating_request_id if parent_task is not None else "")),
             **prepared["paths"],

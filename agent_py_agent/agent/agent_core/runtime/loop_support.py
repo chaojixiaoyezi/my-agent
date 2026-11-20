@@ -62,6 +62,7 @@ from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import context_window_or_default
 from ...tooling.output_projection import project_tool_output_body, redact_tool_output_text
+from ...tooling.registry_workspace import WorkspaceRef as WorkspaceRef
 from ...tooling.runtime_facts import render_tool_runtime_facts
 from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
@@ -128,7 +129,7 @@ def _runtime_loop_params(
         resume_context_section=prepared.resume_context_section,
         allowed_tools=params.allowed_tools,
         prompt_files=params.prompt_files,
-        write_boundary=params.write_boundary,
+        write_boundary=workspace_boundary(params),
         task_attributes=params.task_attributes,
         delivery_contract=params.delivery_contract,
         system_prompt_override=params.system_prompt_override,
@@ -508,6 +509,19 @@ def _tool_snapshots_for_run(
 
 # LLM: 把本轮已定的运行事实投影成上下文包请求；记忆只传编号/版本/来源与发现码，不传正文；task_local 不建包。
 # 函数用途: 组装并保存主代理上下文包，供提示段引用和事后核对。
+def frozen_workspace_ref(run_params: object) -> WorkspaceRef | None:
+    frozen = getattr(run_params, "workspace_ref", None)
+    return frozen if isinstance(frozen, WorkspaceRef) else None
+
+
+def workspace_boundary(run_params: object) -> dict | None:
+    boundary = getattr(run_params, "write_boundary", None)
+    frozen = frozen_workspace_ref(run_params)
+    if frozen is None:
+        return boundary
+    return {**(boundary or {}), "workspace_ref": frozen.to_record()}
+
+
 def build_runtime_main_context_bundle(
     agent,
     request: RuntimeContextRequest,
@@ -521,8 +535,9 @@ def build_runtime_main_context_bundle(
 ):
     if task_local:
         return None
-    workspace_root = getattr(agent, "effective_workspace_root", agent.root)
-    workspace_roots = getattr(
+    frozen = frozen_workspace_ref(request)
+    workspace_root = frozen.root if frozen is not None else getattr(agent, "effective_workspace_root", agent.root)
+    workspace_roots = frozen.roots if frozen is not None else getattr(
         agent,
         "effective_workspace_roots",
         getattr(agent, "workspace_roots", [workspace_root]),
@@ -1068,6 +1083,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         final_prompt, final_response = loop_result.final_prompt, loop_result.final_response
         tool_rounds = loop_result.tool_rounds
         loop_params = loop_result.params
+        _record_foreground_wait(agent, loop_params, final_response)
         from ...conversation.compact_carry import capture_native_compact_carry
 
         native_carry = capture_native_compact_carry(agent, loop_params, final_response)
@@ -1189,6 +1205,29 @@ def _thinking_downgrade_diagnostics(live_state: dict[str, object]) -> dict[str, 
     return {"truncation_thinking_downgrades": rows} if rows else {}
 
 
+def _record_foreground_wait(agent, params, response) -> None:
+    if getattr(response, "runtime_status", "") in {"failed", "cancelled"}:
+        return
+    if getattr(response, "runtime_reason", "") == "SUBAGENTS_ACTIVE":
+        root = params.run_id if params.context_scope == "task_local" else params.task_id
+    elif params.context_scope == "conversation" and params.task_id and getattr(agent, "subagents", None):
+        from ...conversation.task_promotion import (
+            SubagentLineageUnreadable,
+            conversation_task_open_subagents_or_raise,
+        )
+
+        try:
+            root = params.task_id if conversation_task_open_subagents_or_raise(agent, params.task_id) else ""
+        except (SubagentLineageUnreadable, OSError):
+            return
+    else:
+        return
+    if root:
+        params.live_archive_state["foreground_work"] = {
+            "foreground_ended": True, "work_pending": True, "wakeable_root": root,
+        }
+
+
 def _tool_runtime_evidence(
     runtime_snapshot: object,
     protocol_snapshot: object,
@@ -1203,6 +1242,8 @@ def _tool_runtime_evidence(
     action_rows = [item.to_dict() for item in actions if callable(getattr(item, "to_dict", None))]
     final_status = str(getattr(final_response, "runtime_status", "") or "ok")
     open_count = sum(row.get("status") == "open" for row in action_rows)
+    delivery = live_state.get("declared_file_delivery")
+    foreground = live_state.get("foreground_work")
     return {
         "runtime_snapshot": {
             "run_id": str(getattr(runtime_snapshot, "run_id", "") or ""),
@@ -1238,12 +1279,15 @@ def _tool_runtime_evidence(
         ],
         # LLM: 对外诊断只在本次运行真的产生过降档决策时出现新字段；开关关闭或从未触发时保持旧结构。
         **_thinking_downgrade_diagnostics(live_state),
+        **({"declared_file_delivery": delivery} if isinstance(delivery, dict) else {}),
+        **({"foreground_work": foreground} if isinstance(foreground, dict) else {}),
         "completion_gate": {
             "status": final_status,
             "reason": str(getattr(final_response, "runtime_reason", "") or ""),
             "source": str(getattr(final_response, "runtime_source", "") or ""),
             "open_required_action_count": open_count,
-            "completed": open_count == 0 and final_status == "ok",
+            "completed": (open_count == 0 and final_status == "ok" and not foreground
+                          and (not isinstance(delivery, dict) or delivery.get("target_delivered") is True)),
         },
     }
 

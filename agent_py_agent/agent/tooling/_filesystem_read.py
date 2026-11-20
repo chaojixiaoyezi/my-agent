@@ -191,6 +191,7 @@ class FileSystemTool(BaseTool):
     # 说明前半段与三种读取范围的末句；没有声明的文件工具说明不随范围变化。
     path_scope_description_base: ClassVar[str] = ""
     path_scope_notes: ClassVar[Mapping[str, str] | None] = None
+    workspace_ref = None
 
     # LLM: 路径策略仍在构造时固定；诊断保留宿主配置引用，执行时现读，不创建每调用诊断状态。
     # 函数用途: 初始化文件访问策略、配额和诊断配置来源。
@@ -273,9 +274,14 @@ class FileSystemTool(BaseTool):
     def resolve_path(self, raw_path: str | Path) -> Path:
 
         raw_text = _required_path(raw_path)
+        frozen = self.workspace_ref
+        if frozen is not None and not frozen.is_current():
+            raise PathAccessError("本轮受理的工作目录已变化，请重新确认目录后开始新请求。", "PATH_OUTSIDE_WORKSPACE")
         candidate = Path(raw_text).expanduser()
         if not candidate.is_absolute():
-            candidate = self.workspace_root / candidate
+            candidate = (frozen.root if frozen is not None else self.workspace_root) / candidate
+        if frozen is not None and frozen.includes_replaced_root(candidate):
+            raise PathAccessError("本轮受理的附加工作目录已变化，请重新确认目录。", "PATH_OUTSIDE_WORKSPACE")
         try:
             candidate = candidate.resolve(strict=False)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -480,6 +486,11 @@ class ReadFileTool(FileSystemTool):
                     "type": "integer",
                     "minimum": 1,
                     "description": _READ_FILE_PARAMETER_DETAILS["max_chars"],
+                },
+                "checkpoint": {
+                    "type": "object",
+                    "description": "将上次编号读取返回的完整 decode_checkpoint 原样作为 checkpoint 传回；文件变化后请从新内容重新读取。",
+                    "additionalProperties": True,
                 },
             },
             "required": ["path"],
