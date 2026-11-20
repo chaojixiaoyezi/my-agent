@@ -556,23 +556,28 @@ class _WorkflowToolDispatcher:
         def execute():
             from ..conversation.business_context import business_execution_policy_scope
 
-            result = self.registry.execute_tool(call, write_boundary=self.boundary, runtime_snapshot=self.snapshot,
+            execution = self.registry.execute_tool(call, write_boundary=self.boundary, runtime_snapshot=self.snapshot,
                 business_effect=effect,
                 **business_execution_policy_scope(self.agent),
                 trusted_run_context={'interactive': callable(getattr(getattr(params, 'on_chunk', None), 'request_permission', None)),
                     'task_attributes': dict(getattr(params, 'task_attributes', None) or {}),
                     'run_scope': {'run_id': run_id, 'task_id': str(getattr(params, 'task_id', '') or ''),
                         'attempt_id': attempt_id}},
-                cancellation_token=getattr(params, 'cancellation_token', None)).result
+                cancellation_token=getattr(params, 'cancellation_token', None))
+            result = execution.result
             if effect is not None and result.operation is not None:
                 # 每次先走本轮Executor权限门；历史游标不是当前授权来源。
                 from ..workflows.step_watermarks import load_workflow_step_watermark
                 step.escalation_result['prior_watermark'] = load_workflow_step_watermark(
                     self.agent.home_paths.owner_home_dir, run.workflow_id, step.step_id, scope_key=effect.scope_key)
             from ..workflows.governance import bind_workflow_tool_operation
-            bind_workflow_tool_operation(self.agent.tools.operation_store, run, step, call,
+            source_operation = result.metadata.get('handler_details', {}).get('tool_operation')
+            if 'operation_reference' in result.metadata:
+                source_operation = {**(source_operation if isinstance(source_operation, dict) else {}),
+                    'operation_reference': result.metadata['operation_reference']}
+            bind_workflow_tool_operation(self.agent.tools.operation_store, run, step, execution.call,
                 result.operation, task_id=str(getattr(params, 'task_id', '') or ''),
-                business_effect=effect, source_operation=result.metadata.get('handler_details', {}).get('tool_operation'))
+                business_effect=effect, source_operation=source_operation)
             return {**result.to_dict(), 'ok': result.ok,
                 'operation_id': result.operation.operation_id if result.operation is not None else '',
                 'effect_outcome': result.effect_outcome, 'error_message': result.output if not result.ok else ''}
