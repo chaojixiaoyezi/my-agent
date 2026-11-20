@@ -39,6 +39,7 @@ from ..conversation.authority import (
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+    CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
     CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR,
     CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR,
     CONVERSATION_WORKSPACE_TASK_ID_ATTR,
@@ -103,6 +104,7 @@ from .stream_writer import BufferedChunkStreamWriter, open_chunk_stream, write_h
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
+    from ..path_access_policy import DelegableScope
 
 _EMPTY_PROMPT_MESSAGE = "gateway ask prompt/goal cannot be empty"
 logger = logging.getLogger(__name__)
@@ -218,6 +220,7 @@ class _GatewayRunParamsRequest:
     prompt: str
     carried_archive_tool_calls: tuple[dict[str, object], ...] = ()
     carried_active_turn_user_inputs: tuple[dict[str, object], ...] = ()
+    delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False)
 
 
 @dataclass
@@ -817,6 +820,7 @@ def _run_gateway_turn_with_conversation_compact(
     capability_presentation = None
     presentation_evaluated = False
     bot_guard = None
+    delegable_scope = None
     stage_timing = getattr(observer, "model_request_stage_timing", None)
 
     # LLM: 回调只由原运行/Compact同步调用；不持久化或改活快照，清旧值后仍保留本turn已评估事实。
@@ -843,8 +847,10 @@ def _run_gateway_turn_with_conversation_compact(
                 prompt,
                 tuple(carried_archive_tool_calls),
                 tuple(carried_active_turn_user_inputs),
+                delegable_scope=delegable_scope,
             )
         )
+        delegable_scope = run_params.delegable_scope
         run_params.runtime_rejected_actions = runtime_rejected_actions
         run_params.native_compact_carry = native_compact_carry
         run_params.conversation_turn_id = context.request_id
@@ -1239,6 +1245,9 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
         elif plugin_policy.get("tool_names"):
             raise RuntimeError("plugin chat request cannot enable tools on unrestricted worker")
     params_type = _BotGatewayRunParams if bot_policy is not None else _GatewayRunParams
+    delegable_scope = inputs.delegable_scope
+    if delegable_scope is None:
+        delegable_scope = _gateway_delegable_scope(inputs, attrs, boundary, task_id)
     return params_type(
         **({"bot_execution_policy": bot_policy} if bot_policy is not None else {}),
         stages=context.stages,
@@ -1246,6 +1255,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
         inject=injections,
         allowed_tools=allowed_tools,
         write_boundary=boundary,
+        delegable_scope=delegable_scope,
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,
@@ -1287,6 +1297,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
             context.request_id,
             context.request,
             str(request.get("execution_attempt_id") or "").strip() or context.request_id,
+            delegable_scope=delegable_scope,
         ),
         partial_turn_callback=partial(request_history.persist_gateway_partial_result, context, conversation),
     )
@@ -1337,6 +1348,45 @@ def _gateway_message_references(request, conversation):
 
 # LLM: 会话属性只投影线程、task 与 cwd，认证身份由独立的宿主参数携带，不能放回模型可写属性。
 # 函数用途: 生成本轮业务会话范围，有准确执行权时进入原目录，否则由工作工具懒建。
+def _gateway_delegable_scope(inputs, attrs, boundary, task_id):
+    from ..conversation.workspace_context import validated_main_workspace_roots
+    from ..path_access_policy import (
+        DelegableScope,
+        effective_owner_scope_root,
+        freeze_delegable_scope,
+        recorded_delegable_scope,
+    )
+    from ..user_space.owner_access import is_local_admin_owner
+
+    agent = inputs.context.agent
+    home = getattr(agent, "home_paths", None)
+    owner = str(getattr(home, "owner_id", "") or "")
+    owner_root = effective_owner_scope_root(agent, write_boundary=boundary) or getattr(home, "owner_home_dir", "")
+    if not owner or not owner_root:
+        return None
+    request_id = inputs.context.request_id
+    authority = request_binding.gateway_runtime_authority(inputs.request, request_id)
+    if "delegable_scope" in authority:
+        frozen = recorded_delegable_scope(authority["delegable_scope"], owner_scope=owner_root)
+        canonical_owner = Path(owner_root).expanduser().resolve(strict=False)
+        if frozen is not None and frozen.owner_id == owner and frozen.owner_root == canonical_owner:
+            return frozen
+        return DelegableScope(owner, task_id, request_id, (), "", owner_root=canonical_owner)
+    if boundary is None:
+        roots = getattr(getattr(agent, "config", None), "additional_write_roots", ())
+        roots = list(roots) if isinstance(roots, (tuple, list)) else []
+        if not (attrs or {}).get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR):
+            context = inputs.conversation
+            declared = [str(root) for root in (context.runtime_workspace_roots or (context.cwd,)) if root]
+            access = str(getattr(getattr(agent, "config", None), "access_mode", "") or "").lower().replace("_", "-")
+            roots.extend(validated_main_workspace_roots(
+                agent, declared, allow_home_ancestor=is_local_admin_owner(home) and access == "full-access",
+            ))
+        boundary = {"allowed_write_roots": roots}
+    return freeze_delegable_scope(boundary, owner_root, owner_id=owner, task_id=task_id,
+                                  run_id=str(authority.get("run_id") or request_id))
+
+
 def _gateway_task_attributes(conversation: request_context.GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:

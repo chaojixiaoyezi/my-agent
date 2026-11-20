@@ -245,6 +245,13 @@ def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_att
     _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_granted_execution_workspace_roots(merged, agent, params)
     _attach_managed_business_write_scope(merged, agent, params)
+    from ..path_access_policy import DelegableScope
+
+    scope = getattr(params, "delegable_scope", None)
+    if isinstance(scope, DelegableScope):
+        merged["delegable_scope"] = scope.to_record()
+        if "delegation_lineage" not in merged:
+            merged["delegation_lineage"] = {"initiating_request_id": _text(getattr(params, "request_id", ""))}
     attach_running_install_guard(merged, getattr(agent, "config", None))
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
@@ -465,7 +472,10 @@ def _attach_main_conversation_execution_cwd(boundary: dict[str, object], agent: 
     requested = [_text(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR)) or str(project),
         *_string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR)), *cli_roots]
     declared = bool(typed_cwd or cli_roots)
-    validated = _validated_main_workspace_roots(agent, requested) if declared else []
+    from ..conversation.workspace_context import validated_main_workspace_roots
+
+    validated = (validated_main_workspace_roots(agent, requested, allow_home_ancestor=_is_local_full_access(agent))
+                 if declared else [])
     owner_scope = _resolved_path(getattr(tools, "owner_scope_root", None))
     binding_home = owner_scope or _resolved_path(boundary.get("canonical_owner_home_root"))
     if declared and str(project) not in validated or (
@@ -487,34 +497,6 @@ def _attach_main_conversation_execution_cwd(boundary: dict[str, object], agent: 
     boundary["execution_workspace_roots"] = roots
     if owner_scope is None or any(not _is_relative_to(Path(root), owner_scope) for root in validated):
         boundary["allowed_write_roots"] = list(dict.fromkeys([*_string_list(boundary.get("allowed_write_roots")), *roots]))
-
-
-# LLM: owner宿主每次重验typed目录，Full Access仅复用原构造根的Home祖先；无owner独立库保留纯路径投影，已有owner墙缺Home仍拒绝，不制造管理员身份。
-# 函数用途: 保留实际项目执行位置并校验现存绑定；独立库的归档目录不替换宿主传入的显式工作目录。
-def _validated_main_workspace_roots(agent: object, roots: list[str]) -> list[str]:
-    from ..conversation.workspace_context import validate_workspace_directory
-    from ..user_space.owner_access import is_local_admin_owner
-
-    home = getattr(agent, "home_paths", None)
-    owner = _resolved_path(getattr(home, "owner_home_dir", None))
-    if home is None:
-        tools = getattr(agent, "tools", None)
-        return [] if _text(getattr(tools, "owner_scope_root", "")) else inheritable_declared_work_roots(roots)
-    if owner is None:
-        return []
-    startup_root = _resolved_path(getattr(agent, "root", None))
-    result: list[str] = []
-    for root in roots:
-        try:
-            resolved = validate_workspace_directory(root, owner_home=owner, is_admin=is_local_admin_owner(home),
-                home_root=getattr(home, "root", None), allow_home_ancestor=bool(
-                    _is_local_full_access(agent) and startup_root == _resolved_path(root)))
-            if Path(root).expanduser() != resolved:
-                continue
-        except ValueError:
-            continue
-        result.append(str(resolved))
-    return result
 
 
 # LLM: 子代理的产品写根在创建时就由宿主写进 allowed_write_roots；工具执行根必须从同一权威派生，
@@ -648,11 +630,18 @@ def _attach_owner_task_write_scope(
                     and _is_relative_to(own, declared_root)
                 ))):
             source_roots = [own]
+            from ..path_access_policy import DelegableScope, delegable_path_decision
+
+            scope_snapshot = getattr(params, "delegable_scope", None)
             for key in ("product_write_roots", "capability_write_roots"):
                 source_roots.extend(
                     root for raw in _string_list(boundary.get(key))
                     if (root := _resolved_path(raw)) is not None
-                    and root != owner_root and _is_relative_to(root, owner_root)
+                    and root != owner_root
+                    and (_is_relative_to(root, owner_root) or (
+                        isinstance(scope_snapshot, DelegableScope)
+                        and delegable_path_decision(scope_snapshot, root, purpose="write").allowed
+                    ))
                 )
             boundary["allowed_write_roots"] = list(dict.fromkeys(
                 str(root) for raw in _string_list(boundary.get("allowed_write_roots"))

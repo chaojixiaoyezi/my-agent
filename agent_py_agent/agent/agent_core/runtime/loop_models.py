@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...conversation.business_contracts import BusinessExecutionContext
 from ...memory_store.recall import MemoryRecallScope
+from ...path_access_policy import DelegableScope, recorded_delegable_scope
 
 if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
@@ -67,6 +68,7 @@ class RunParams:
     host_session_space: dict | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
     # 前台已受理空间的只读记忆范围；不代表SessionTask，也不授予工具/工作流权限。
     memory_recall_scope: MemoryRecallScope | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
+    delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
     # 仅当前认证入站请求的引用绑定；不写模型 attrs、不继承到新请求或子代理，不承担群授权。
     host_message_references: tuple[tuple[str, str], ...] = ()
     # 同一次认证入站的唯一typed输入；消息引用字段仅为其原只读投影，不从模型attrs构造。
@@ -146,6 +148,10 @@ class RunParams:
     )
 
     def __post_init__(self) -> None:
+        if self.delegable_scope is not None and type(self.delegable_scope) is not DelegableScope:
+            raise TypeError("delegable_scope 必须是宿主 DelegableScope 或 None")
+        if self.delegable_scope is None and self.context_scope == "task_local" and isinstance(self.write_boundary, dict):
+            self.delegable_scope = recorded_delegable_scope(self.write_boundary.get("delegable_scope"))
         if self.memory_recall_scope is not None and type(self.memory_recall_scope) is not MemoryRecallScope:
             raise TypeError("memory_recall_scope 必须是宿主 MemoryRecallScope 或 None")
         if self.business_context is not None and not isinstance(self.business_context, BusinessExecutionContext):

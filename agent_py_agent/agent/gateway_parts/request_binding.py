@@ -41,6 +41,7 @@ from .request_errors import (
 )
 
 if TYPE_CHECKING:
+    from ..path_access_policy import DelegableScope
     from . import request_context
 
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
@@ -151,6 +152,7 @@ class GatewayTaskBindingWriter:
     request_id: str
     request: dict | None = None
     execution_attempt_id: str = ""
+    delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False)
 
     # LLM: Publish the exact request/thread lane before acquiring its recoverable claim. This
     # write-ahead binding lets the sole terminalizer release it even after a crash before execution.
@@ -197,21 +199,28 @@ class GatewayTaskBindingWriter:
             isinstance(binding.get(k), str) and binding[k].strip() for k in keys
         ):
             return False
-        payload = {
+        payload: dict[str, object] = {
             "schema_version": "gateway_runtime_authority.v1",
             "request_id": self.request_id,
             "gateway_execution_attempt_id": self.execution_attempt_id,
             **{key: binding[key] for key in keys},
         }
+        if self.delegable_scope is not None:
+            payload["delegable_scope"] = self.delegable_scope.to_record()
 
         # LLM: T is held by the caller; the JSON lock preserves concurrent heartbeat fields.
         # 函数用途: 在当前回合锁内只更新执行绑定，不覆盖租约、停止标记或展示任务。
         def persist() -> bool:
-            update_json_file_atomic(
-                self.request_path,
-                lambda current: {**current, "runtime_authority": payload},
-                require_existing=True,
-            )
+            def update(current: dict) -> dict:
+                previous = current.get("runtime_authority")
+                if isinstance(previous, dict) and "delegable_scope" in previous:
+                    retained = previous["delegable_scope"]
+                    if "delegable_scope" in payload and payload["delegable_scope"] != retained:
+                        raise ConversationPersistenceError("恢复请求的可委派目录与原受理快照不一致")
+                    payload["delegable_scope"] = retained
+                return {**current, "runtime_authority": payload}
+
+            update_json_file_atomic(self.request_path, update, require_existing=True)
             if isinstance(self.request, dict):
                 self.request["runtime_authority"] = dict(payload)
             return True

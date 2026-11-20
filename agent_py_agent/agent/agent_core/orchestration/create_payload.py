@@ -253,15 +253,33 @@ def _next_action(
 # LLM: task_root 保留为内部运行定位符；普通相对文件只相对于同一宿主 execution_cwd。
 # 函数用途: 明确告诉父级孩子实际在哪工作，避免拿内部目录拼业务文件路径。
 def _task_payload(task: object) -> dict[str, object]:
-    return {
+    attrs = _task_attributes(task)
+    refusals = attrs.pop("delegation_path_refusals", None)
+    payload = {
         "id": _task_text(task, "id"),
         "goal": current_model_text(_task_text(task, "goal")),
         "status": _task_text(task, "status"),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
         "task_root_role": "internal_run_state",
         "execution_cwd": execution_cwd(task),
-        "attributes": _task_attributes(task),
+        "attributes": attrs,
     }
+    if source := _task_text(task, "initiating_request_id"):
+        payload.update(
+            initiating_request_id=source,
+            root_run_id=_task_text(task, "root_id") or _task_text(task, "id"),
+            parent_run_id=_task_text(task, "parent_id"),
+            attempt_id=_task_text(task, "runner_active_attempt_id"),
+        )
+    scope = getattr(task, "delegable_scope_record", None)
+    if isinstance(scope, dict):
+        payload["grant_revision"] = scope.get("permission_version", "")
+    if isinstance(refusals, list) and isinstance(scope, dict):
+        payload["delegation_path_refusals"] = [
+            {**row, "staging_location": current_model_ref(_task_text(task, "output_dir"))}
+            for row in refusals if isinstance(row, dict)
+        ]
+    return payload
 
 
 def _child_output_read_order(rows: list[dict[str, object]]) -> list[dict[str, object]]:

@@ -229,6 +229,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
                 selected_cards=list(record.get("capability_cards") or []), hit_count=0)
             scope = {**dict(params.request_scope or {}), "resolved_by": "resolve_capability_requests",
                      "parent_tool_authority": dict(record.get("parent_tool_authority") or {})}
+            if "delegation_lineage" in record:
+                scope["delegation_lineage"] = record["delegation_lineage"]
             grant = self.agent.subagents.lifecycle.record_capability_grant(
                 ctx.task.id, replace(params, tools=list(record.get("tools") or []),
                     mcp_tools=list(record.get("mcp_tools") or []), reason=ctx.reason,
@@ -241,14 +243,36 @@ class ResolveCapabilityRequestsTool(BaseTool):
     #   roots沿原scope builder的path_scope→cwd_scope优先序，显式write_roots仍优先；cwd-only也必须通过同一owner/父目录门。
     # 函数用途: 校验目录、工具和 Skill 上限并生成裁决记录，真正结清申请由后续原子落账完成。
     def _mark_grant(self, ctx: _ResolveContext, request: Any) -> dict[str, object]:
+        from ....path_access_policy import (
+            delegable_path_decision,
+            delegation_receipt,
+            recorded_delegable_scope,
+        )
+
+        scope = recorded_delegable_scope(getattr(ctx.task, "delegable_scope_record", None))
+        receipt = delegation_receipt(scope, {"delegation_lineage": {
+            "initiating_request_id": ctx.task.initiating_request_id,
+            "root_run_id": ctx.task.root_id, "parent_run_id": ctx.task.parent_id,
+        }}, run_id=ctx.task.id, attempt_id=ctx.task.runner_active_attempt_id) if scope is not None else None
         requested_roots = (_string_list(ctx.params.get("write_roots"))
                            or _string_list(getattr(request, "path_scope", []))
                            or _string_list(getattr(request, "cwd_scope", [])))
         allowed_roots, rejected_roots = self._partition_safe_roots(ctx.task, requested_roots)
         if requested_roots and not allowed_roots:
-            return _refusal(request.id, "PATH_OUTSIDE_WORKSPACE",
+            details = {"rejected_write_roots": rejected_roots}
+            code = "PATH_OUTSIDE_WORKSPACE"
+            if scope is not None and rejected_roots:
+                path = resolve_capability_scope_path(self.agent.subagents, ctx.task, rejected_roots[0])
+                if path is not None:
+                    decision = delegable_path_decision(scope, path, purpose="grant")
+                    if not decision.allowed:
+                        code = decision.code
+                        details.update(decision.refusal(path, task_dir=Path(ctx.task.task_dir)))
+            if receipt is not None:
+                details.update(receipt)
+            return _refusal(request.id, code,
                             "write_roots 全部越界（必须在任务工作区或主代理 workspace 内），未授权。",
-                            {"rejected_write_roots": rejected_roots})
+                            details)
         tools = _string_list(ctx.params.get("tools")) or _string_list(
             getattr(request, "requested_tools", [])
         )
@@ -293,6 +317,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
         }
         if rejected_roots:
             record["rejected_write_roots"] = rejected_roots
+        if receipt is not None:
+            record["delegation_lineage"] = receipt
         return record
 
     # LLM: 仅明确filesystem目录-only请求调用；重建child实际上下文及父原authority，不把raw allowed_tools或目录存在当工具授权。
@@ -307,6 +333,12 @@ class ResolveCapabilityRequestsTool(BaseTool):
     # the whole requested path set, preventing a misleading partial grant and retry loop.
     # 函数用途: 把申请目录按安全围栏分成可授权/越界两组。
     def _partition_safe_roots(self, task: Any, roots: list[str]) -> tuple[list[str], list[str]]:
+        from ....path_access_policy import (
+            delegable_path_decision,
+            in_delegation_owner_root,
+            recorded_delegable_scope,
+        )
+
         owner_decision = partition_capability_paths_by_owner(
             self.agent.subagents,
             task,
@@ -315,10 +347,18 @@ class ResolveCapabilityRequestsTool(BaseTool):
         if owner_decision.rejected_paths:
             return [], list(owner_decision.rejected_paths)
         safe_roots = _safe_grant_roots(self.agent, task)
+        scope = recorded_delegable_scope(getattr(task, "delegable_scope_record", None))
+        parent_scope = getattr(getattr(self.agent, "_current_run_params", None), "delegable_scope", None)
         allowed: list[str] = []
         rejected: list[str] = []
         for raw in owner_decision.allowed_paths:
             target = resolve_capability_scope_path(self.agent.subagents, task, raw)
+            if target is not None and scope is not None and not in_delegation_owner_root(scope, target):
+                granted = delegable_path_decision(scope, target, purpose="grant").allowed
+                if parent_scope is not None:
+                    granted = granted and delegable_path_decision(parent_scope, target, purpose="grant").allowed
+                (allowed if granted else rejected).append(raw)
+                continue
             bucket = (
                 allowed
                 if target is not None and any(_is_relative_to(target, base) for base in safe_roots)

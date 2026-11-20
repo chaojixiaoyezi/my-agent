@@ -28,7 +28,7 @@ from ..contracts.gates.tool_rate_limit import (
     ToolRateLimitFacts,
     evaluate_tool_rate_limit_gate,
 )
-from ..path_access_policy import data_root_from_boundary
+from ..path_access_policy import data_root_from_boundary, frozen_tool_external_roots
 from ..settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
 from .input_schema import normalize_tool_input, validate_tool_input
 from .models import (
@@ -429,11 +429,15 @@ def _path_url_command_decision(
         *_string_values(boundary.get("allowed_private_hosts")),
     )
     payload = {"tool": request.call.tool_name, **request.call.arguments}
+    roots = list(request.workspace_roots) or [request.workspace_root]
+    if "delegable_scope" in boundary:
+        roots = list(dict.fromkeys([*roots, *frozen_tool_external_roots(boundary, request.owner_scope_root,
+            purpose="shell" if request.call.tool_name in {"run_command", "terminal_session", "lsp"} else "write")]))
     decision = evaluate_path_url_command_gate(
         PathUrlCommandFacts(
             payload=payload,
             workspace_root=request.workspace_root,
-            workspace_roots=list(request.workspace_roots) or [request.workspace_root],
+            workspace_roots=roots,
             path_access_mode=request.path_access_mode,
             path_dangerous_roots=request.path_dangerous_roots,
             owner_scope_root=request.owner_scope_root,
@@ -478,6 +482,10 @@ def _task_boundary_decision(
     effect: str,
 ) -> ActionDecision | None:
     boundary = request.write_boundary
+    if boundary and "delegable_scope" in boundary:
+        denial = _delegation_decision(request, effect, boundary)
+        if denial is not None:
+            return denial
     write_error = validate_write_boundary(
         request.call.tool_name,
         request.call.arguments,
@@ -515,6 +523,18 @@ def _task_boundary_decision(
             evidence={"boundary_error": prohibited_error},
         )
     return None
+
+
+def _delegation_decision(request, effect, boundary):
+    from .registry_invoke import frozen_tool_path_refusal
+
+    call = request.call
+    details = frozen_tool_path_refusal(call.tool_name, call.arguments, boundary, request.workspace_root,
+                                       request.owner_scope_root, run_id=call.run_id, attempt_id=call.attempt_id)
+    if details is None:
+        return None
+    return _deny(str(details["code"]), effect=effect, evidence={"error_details": details,
+        "next_action": "请在任务输出目录准备文件，由父级核验后应用到原目标。"})
 
 
 def _prohibited_action_error(

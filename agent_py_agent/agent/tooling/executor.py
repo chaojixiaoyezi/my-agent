@@ -393,6 +393,14 @@ class ToolExecutor:
         from .plugin_gate_policy import tighten_plugin_decision
 
         decision = tighten_plugin_decision(request, call, decision)
+        boundary = request.write_boundary or {}
+        if "delegable_scope" in boundary:
+            from ..path_access_policy import delegation_receipt, recorded_delegable_scope
+
+            scope = recorded_delegable_scope(boundary["delegable_scope"], owner_scope=request.owner_scope_root)
+            if scope is not None:
+                lineage = delegation_receipt(scope, boundary, run_id=call.run_id, attempt_id=call.attempt_id)
+                decision = replace(decision, evidence={**decision.evidence, "delegation_lineage": lineage})
         if decision.status == "ask":
             decision = _precheck_before_approval(runtime, decision)
         states.extend(("validated", "authorized"))
@@ -1364,6 +1372,8 @@ def _invoke_request(
         on_handler_started=request.on_handler_started,
         owner_id=str(owner_id or ""),
         registry_owner_id=request.operation_owner_id,
+        run_id=call.run_id,
+        attempt_id=call.attempt_id,
     )
 
 
