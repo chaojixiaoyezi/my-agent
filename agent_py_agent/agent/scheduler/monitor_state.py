@@ -18,6 +18,22 @@ _DEFINITION_FIELDS = ('schedule', 'prompt', 'use_llm', 'tool', 'execution', 'exe
     'misfire_grace_seconds', 'notification_binding')
 
 
+# LLM: JSON 布尔与数字是不同类型，Python 却有 True == 1；用户把规则输入 1 改成 true 必须算改定义。JSON 只有一种数字，
+#   1 与 1.0 仍相等（schedule.anchor_at 读回为 float，按文本比会把整数旧值误判为修改）；对象键序无关，其余沿原相等语义
+#   （含容器比较的同一对象短路）。
+# 函数用途: 按 JSON 类型递归比较定义值，供定义代次判定与安装回执辨认共用一个口径。
+def same_definition_value(left, right):
+    if left is right:
+        return True
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(same_definition_value(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and type(left) is type(right):
+        return len(left) == len(right) and all(map(same_definition_value, left, right))
+    return left == right
+
+
 # LLM: 事件规则唯一权威仍是原 event_source_state.generation；普通旧记录缺字段显式适配为初始代。
 # 函数用途: 统一读取 job/rule 定义身份，拒绝损坏计数，不使用 version 或 claim_epoch。
 def definition_generation(view):
@@ -68,9 +84,10 @@ def sync_definition_generations(job, previous=None, *, retire=False):
                  else {'': previous} if previous else {})
     definitions = result.get('rules') or [result]
     retired = deepcopy((previous or {}).get('definition_generation_tombstones') or {})
-    active_keys = {str(rule.get('id') or '') for rule in definitions}
+    # 单任务身份是空键：单任务与复合规则互转时它与规则一样退出并留 tombstone，转回单任务不能从 1 复用旧代次。
+    active_keys = {str(rule.get('id') or '') for rule in definitions} if result.get('rules') else {''}
     for key, old_view in old_views.items():
-        if key and key not in active_keys and (old_view.get('schedule') or {}).get('kind') != 'event_source':
+        if key not in active_keys and (old_view.get('schedule') or {}).get('kind') != 'event_source':
             retired[key] = definition_generation(old_view) + 1
     for rule in definitions:
         key = str(rule.get('id') or '') if result.get('rules') else ''
@@ -79,7 +96,7 @@ def sync_definition_generations(job, previous=None, *, retire=False):
         # 单规则迁入 rule1 时沿用原定义身份，不重置为 1。
         if old is None and key == 'rule1' and previous and not previous.get('rules'):
             old = previous
-        changed = bool(old and (any(view.get(k) != old.get(k) for k in _DEFINITION_FIELDS)
+        changed = bool(old and (any(not same_definition_value(view.get(k), old.get(k)) for k in _DEFINITION_FIELDS)
                                 or result['status'] != previous['status']))
         seed = max(retired.pop(key, 1), int((result.get('event_source_state', {}).get(key) or {}).get('generation', 1)))
         generation = max(seed, definition_generation(old) + int(changed)) if old else seed
@@ -99,11 +116,14 @@ def sync_definition_generations(job, previous=None, *, retire=False):
 
 
 # LLM: 取消、旧代及暂停前预留只能收历史；暂停后显式手动试跑仍可结算同代策略，但不能恢复计划。
+#   代次只在同一身份内可比：冻结的规则身份（单任务为空）须与当前单元一致，跨形态覆盖后旧规则运行不能按单任务收口。
 # 函数用途: 比较冻结 run 的定义来源与当前 job/rule。
 def run_matches_definition(job, run):
     manual_paused = (job.get('status') == 'paused' and run.get('trigger') == 'manual'
                      and run.get('definition_status') == 'paused')
     if (job.get('status') != 'active' and not manual_paused) or not job.get('enabled', True) or run.get('cancel_requested_at'):
+        return False
+    if str(run.get('rule_id') or '') != str(job.get('rule_id') or ''):
         return False
     frozen = run.get('definition_generation', (run.get('event_source') or {}).get('generation', 1))
     return type(frozen) is int and frozen == definition_generation(job)

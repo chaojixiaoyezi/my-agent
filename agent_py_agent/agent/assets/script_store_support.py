@@ -583,11 +583,12 @@ def _delivery_monitor_thread(home, owner_id):
 
 
 # LLM: 新建载荷沿原校验器；只接收静态定义，强制目标ID/Owner/新线程/启停/代次，不复制源运行状态或通知目标。
+#   定义代次与原create/update同用调度器唯一写入器：覆盖既有任务时承接并推进其代次、退休原事件身份，旧运行晚到不能写回替换定义；
+#   既有行解析失败时不能承接身份，按新建处理。
 # 函数用途: 构造真实可解析的接收方Scheduler任务。
 def new_delivery_monitor_job(repo, descriptor, meta, store):
     from ..scheduler.event_source_lifecycle import validate_event_job
-    from ..scheduler.event_sources import sync_event_sources
-    from ..scheduler.monitor_state import next_alias
+    from ..scheduler.monitor_state import next_alias, sync_definition_generations
     from ..scheduler.repository import SchedulerJobCreateRequest, _new_job_payload
 
     home, now = repo.root.parent.parent, time.time()
@@ -606,7 +607,8 @@ def new_delivery_monitor_job(repo, descriptor, meta, store):
         paused_reason='' if descriptor.enabled else 'asset_delivery_disabled_by_default',
         paused_at=0.0 if descriptor.enabled else now,
         alias=previous.get('alias') or next_alias(store), version=int(previous.get('version', 0)) + 1)
-    job = sync_event_sources(job)
+    replaced = repo._parse_job(previous)[0] if previous else None
+    job = sync_definition_generations(job, replaced, retire=replaced is not None)
     validate_event_job(job)
     return job
 
@@ -812,28 +814,58 @@ def _scheduler_run_advanced(current, previous):
         or int(current.get('run_count') or 0) > int(previous.get('run_count') or 0))
 
 
+# LLM: 复合规则的开工计数与开工时间只在真实开工时推进，开工前终态（排队超期、Skill快照不可用等）只写终态状态与错误码；
+#   终态与安装快照不同即调度器在安装后新记下的结果，快照里已有的同一终态不能授权归一；不读写store。
+# 函数用途: 确认任务或规则在安装快照之后记下了新的终态，含开工前即结束的运行。
+def _scheduler_outcome_recorded(current, previous):
+    status = current.get('last_run_status')
+    return _scheduler_run_advanced(current, previous) or bool(status) and (
+        (status, current.get('last_error_code')) != (previous.get('last_run_status'), previous.get('last_error_code')))
+
+
+# LLM: 只认调度器按policy.failure_pause_after写入的暂停：本单元已配置阈值、最后一次为failed/unknown，且连续失败数自安装
+#   快照后增加并达到阈值（开工前失败同样计数，不看开工计数）；暂停原因文字本身不是证据，不读写store。
+# 函数用途: 辨认任务或规则因自身连续失败达到已配置阈值而被调度器暂停。
+def _scheduler_failure_paused(current, previous):
+    policy = current.get('policy')
+    limit = policy.get('failure_pause_after') if isinstance(policy, dict) else None
+    failures, before = current.get('consecutive_failures'), previous.get('consecutive_failures') or 0
+    return (type(limit) is int and limit > 0 and type(failures) is int and failures >= limit
+        and type(before) is int and failures > before and current.get('last_run_status') in {'failed', 'unknown'})
+
+
 # LLM: 单at须原生完成原因、下一次已耗尽且运行推进；全规则耗尽保原合同，manual_pause及其它显式暂停原因一律不归一。
+#   规则或单任务达已配置连续失败阈值的暂停同属调度器自然推进；复合监控末条at错过宽限时监控层无运行状态，以规则停止证据为准；
+#   单次规则已耗尽且安装后新记下终态即停止证据，开工前即结束（不推进开工计数）同样成立。
+#   投影含定义代次，用户暂停/启停/改定义必推进代次而不能被归一；事实按JSON类型比较，布尔不等于数字。
 # 函数用途: 辨认同一安装任务的自然运行推进，不把手动试跑后的用户暂停误补成已接受。
 def _scheduler_job_matches(job, expected):
+    from ..scheduler.monitor_state import same_definition_value
+
     current, target = scheduler_job_fact(job), scheduler_job_fact(expected)
     if current is None or target is None:
         return current == target
     rules = job.get('rules') or []
+    previous_rules = {rule['id']: rule for rule in expected.get('rules') or []}
+    stopped = False
+    for rule, raw in zip(current.get('rules') or [], rules):
+        previous = previous_rules.get(rule['id'], {})
+        if previous.get('enabled') is True and rule.get('enabled') is False and (
+                rule.get('schedule', {}).get('kind') == 'at' and float(raw.get('next_run_at') or 0) == 0
+                and _scheduler_outcome_recorded(raw, previous) or _scheduler_failure_paused(raw, previous)):
+            rule['enabled'] = True
+            stopped = True
     reason = job.get('paused_reason') or ''
     natural_reasons = {'one_shot_finished', 'misfire_grace_expired'}
     one_shot = ((job.get('schedule') or {}).get('kind') == 'at' and reason in natural_reasons
         and float(job.get('next_run_at') or 0) == 0)
-    exhausted = one_shot or bool(rules) and not any(rule['enabled'] for rule in rules)
+    failure_paused = reason == 'consecutive_failures' and _scheduler_failure_paused(job, expected)
+    exhausted = one_shot or failure_paused or bool(rules) and not any(rule['enabled'] for rule in rules)
     if (target['status'] == 'active' and current['status'] in {'paused', 'completed'}
-            and (not reason or reason in natural_reasons) and exhausted and _scheduler_run_advanced(job, expected)):
+            and (not reason or reason in natural_reasons or failure_paused) and exhausted
+            and (_scheduler_run_advanced(job, expected) or stopped)):
         current['status'] = 'active'
-    previous_rules = {rule['id']: rule for rule in expected.get('rules') or []}
-    for rule, raw in zip(current.get('rules') or [], job.get('rules') or []):
-        previous = previous_rules.get(rule['id'], {})
-        if (previous.get('enabled') is True and rule.get('enabled') is False
-                and rule.get('schedule', {}).get('kind') == 'at' and _scheduler_run_advanced(raw, previous)):
-            rule['enabled'] = True
-    return current == target
+    return same_definition_value(current, target)
 
 
 # LLM: 调用方持root/store锁且已核资产hash；before=None不能匹配存在任务；容正常调度推进，仅after匹配补due，不写store。

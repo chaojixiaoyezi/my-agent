@@ -101,11 +101,11 @@ def _delivery_notification(envelope):
 
 
 # LLM: 外层持quota，原root/store锁内冻结资产与单job/run前后态；due同步纳入journal清理前，保留事件退代与取消语义。
+#   启停与调度器pause/resume同用唯一定义代次写入器，启停前已开工的旧运行晚到只进历史，不能写回新启停状态。
 # 函数用途: 耐久启停监控绑定和准确调度任务，不以整库回滚覆盖其它正常调度写入。
 def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
     from ..scheduler.event_source_lifecycle import cancel_retired_event_runs
-    from ..scheduler.event_sources import sync_event_sources
-    from ..scheduler.monitor_state import resume_monitor
+    from ..scheduler.monitor_state import resume_monitor, sync_definition_generations
     from ..scheduler.repository import _resume_next_run
     from . import asset_root_lock
     from .descriptor import AssetDescriptor
@@ -146,7 +146,7 @@ def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
                 'paused_at': 0.0 if enabled else now, 'updated_at': now, 'version': int(job['version']) + 1}
             if enabled and not job.get('rules'):
                 updated['next_run_at'] = _resume_next_run(job, now)
-            updated = sync_event_sources(updated, job, retire=True)
+            updated = sync_definition_generations(updated, job, retire=True)
             store['jobs'][identifier] = cancel_retired_event_runs(store, updated, now=now)
             cancelled = repo._cancel_waiting_runs_unlocked(store, identifier, now, 'job_paused') if not enabled else []
             updates = {}
