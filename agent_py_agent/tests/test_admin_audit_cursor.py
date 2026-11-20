@@ -91,7 +91,9 @@ def test_exact_pending_is_not_silently_limited_to_24h(tmp_path):
 def test_cursor_rejects_projection_replacement_and_paths_before_io(tmp_path):
     paths = seed(tmp_path)
     page = GatewayHistoryIndex(paths).audit_page(query())
-    GatewayHistoryIndex(paths).append({"id": "new", "status": "done"})
+    replacement = paths.history.with_suffix(".replacement")
+    replacement.write_bytes(paths.history.read_bytes())
+    replacement.replace(paths.history)
     with pytest.raises(ValueError, match="generation"):
         GatewayHistoryIndex(paths).audit_page(query(cursor=page["next_cursor"]))
     with pytest.raises(ValueError):
