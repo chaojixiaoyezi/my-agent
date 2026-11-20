@@ -253,9 +253,14 @@ def test_foreground_paths_plumb_options(tmp_path, monkeypatch, sandboxed, thresh
     communicate = Mock(return_value=completed)
     monkeypatch.setattr(shell, "_communicate_process", communicate)
     if sandboxed:
+        starts = []
         monkeypatch.setattr(shell, "_sandbox_exec", lambda *_args, **_kwargs: (["synthetic"], False))
-        monkeypatch.setattr(shell, "_start_attempt_shell_process", lambda *_args: proc)
+        monkeypatch.setattr(shell, "_start_attempt_shell_process",
+                            lambda exec_arg, use_shell, target, actual, *, cred_runtime=None: starts.append(
+                                (exec_arg, use_shell, target, actual, cred_runtime)) or proc)
         result = shell._run_attempt_sandboxed_shell_command(tool, "command", tmp_path, 5, None, None, None)
+        # 前台启动点只收到本次 argv 与工具；未携卡时凭据运行时为空。
+        assert starts == [(["synthetic"], False, tmp_path, tool, None)]
     else:
         monkeypatch.setattr(shell.os, "name", "nt")
         monkeypatch.setattr(shell, "_subprocess_text_env", lambda *_args, **_kwargs: {})

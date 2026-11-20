@@ -35,14 +35,16 @@ from agent_py_agent.tests.ctxopt_c7_contract_snapshot import (
 # Workstream B 显式补齐嵌套参数中文 description（结构、类型、枚举与必填零删改），按当前生产 spec 同步 hash。
 # remember 的 scope/scope_key 说明写明 global 与 <类型>:<id> 必填形式（结构、枚举、必填与校验零改），同步 hash。
 # UWave 明确扩展 audit_records 的请求/消息链/工具遥测与分页字段；冻结扩展后的完整合同。
+# M01 review: remember adds only the optional top-level list cursor string (Wave-1 S4 OL-10, f3651653e).
+# M01 review: request_credentials adds optional auth_config.body_encoding json|form plus description text (FC1, fa2e6ebf8).
 _SCHEMA_HASHES = {
     **_SCHEMA_HASHES,
     'create_subagents': 'ef1b9cf22c2f295fd45e0028a813a477a322410abdc9df9c4478a93918e5f5da',
     'create_subagents_media': 'ce6289c046eeb5401fdcc3e4e2a6e65ca5663f9e0d7b34468c5e8f633c26800b',
     'task_progress': 'c86032c3c99ec9d562d658b4b0e9503ee96974f4b6d98eaf309a2218c719b0d1',
-    'remember': 'b99a8af92f1cb98b8d845d922decde8f771a32cfbb41663e0508194b7bfb86d9',
+    'remember': '51e17f7ffb2f7e514de412df8f74824af4b45a2c8f85ad2c9b139107f6a51438',
     'audit_records': '00f2b3516506b48d863687c57fb92d0e6eb65ad819a7c429ce0542f2ea78fd60',
-    'request_credentials': 'b4c3ac4ba4a2e721d6516b3ce4ace0d07d13fb6b8858d61ce9bae9acf2609337',
+    'request_credentials': '6ff4f8186220cb33fbd9bcfe882ad6e5a6e919cadf3d4fc7fbf0a725b3aa03e2',
     'update_goal': '390f15d94028bcccbf55e1a7532acc3ad803090bcdd2081f3ba5f259150ed680',
     'package_build': '0272c8997985e250c437530980369f6621b3c412b25e99ed688d46e40c7a209a',
     'watch_ordinary': 'f5f02b0fd146c611935d2c72edc96bd1af3863327623acf009b81603718daf86',
@@ -50,10 +52,11 @@ _SCHEMA_HASHES = {
     'watch_audit_binding': '5779ff5c662606744de469600a72dfba5033d77adc6663655e1b5307830dbedd',
     'watch_audit_source': '10ac093a7326198d63ae88cb625c9b8802e4709693f990c2ba79f2e0ce00c4b6',
 }
+# M01 review: request_credentials routes collected refs to run_command/browser-lite fill or configure+web_fetch (FC1).
 _DESCRIPTION_HASHES = {
     **_DESCRIPTION_HASHES,
     'create_subagents': 'b653088995df2929e2d41b1e40a9ab6bfd014b46fedd8f86987810da58b29fa9',
-    'request_credentials': '62725dbd5cdb675aec12dc1fd13e524f9920c645b24fbee932d676a78a8b8437',
+    'request_credentials': 'ecbaa068dcfb2ba12878ebec1161379d7f3765bee51fa80ecf78c47943f082b2',
     'audit_records': '7840cb38479495190236671b35db4a09bf8e45b1cf7f50521baef2136b58a0c9',
 }
 

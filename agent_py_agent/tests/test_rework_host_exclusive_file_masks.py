@@ -203,9 +203,9 @@ def test_shell_command_argv_masks_configured_source_and_config_path(tmp_path, mo
     case = _shell_case(tmp_path)
     launches = []
 
-    # 进程边界替身：记录交给前台启动点的完整 argv，只起一个空 Python 进程代替 bwrap。
-    def start(exec_arg, use_shell, target, tool):
-        launches.append(list(exec_arg))
+    # 进程边界替身：记录交给前台启动点的完整 argv 与凭据运行时，只起一个空 Python 进程代替 bwrap。
+    def start(exec_arg, use_shell, target, tool, *, cred_runtime=None):
+        launches.append((list(exec_arg), cred_runtime))
         return subprocess.Popen([sys.executable, "-c", ""], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
 
@@ -215,7 +215,8 @@ def test_shell_command_argv_masks_configured_source_and_config_path(tmp_path, mo
     finally:
         case.agent.tools.close_mcp_clients()
     assert result.ok, result.output
-    (argv,) = launches
+    ((argv, cred_runtime),) = launches
+    assert cred_runtime is None
     masks = _final_masks(argv)
     assert {str(case.secret), str(case.config_file)} <= set(masks), argv
     assert str(case.sibling) not in masks

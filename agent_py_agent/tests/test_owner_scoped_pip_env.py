@@ -70,12 +70,12 @@ def test_real_python_user_site_lands_in_owner_home(tmp_path) -> None:
 def test_run_command_wires_owner_scope_to_env(tmp_path, monkeypatch) -> None:
     """run_command 端到端:owner-scoped ShellTool 跑 python,子进程实际看到 PYTHONUSERBASE 指向 owner
     home。测试替换隔离启动参数只为观察子进程 env，不代表产品存在无沙箱降级路径。"""
+    credential_files = []
     monkeypatch.setattr(
         "agent_py_agent.agent.tooling.shell._sandbox_exec",
         lambda command, target, owner_home, protected_root=None, write_roots=None,
-        read_roots=None, protected_write_paths=None, *, host_policy=None: (
-            command,
-            True,
+        read_roots=None, protected_write_paths=None, *, host_policy=None, credential_file=None: (
+            credential_files.append(credential_file) or (command, True)
         ),
     )
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
@@ -91,3 +91,5 @@ def test_run_command_wires_owner_scope_to_env(tmp_path, monkeypatch) -> None:
     )
     assert result.ok, result.output
     assert _expected_user_base(owner_home) in result.output
+    # 不携卡的命令只调用一次隔离入口，且不交凭据文件。
+    assert credential_files == [None]

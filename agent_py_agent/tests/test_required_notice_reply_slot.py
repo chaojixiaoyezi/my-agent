@@ -270,13 +270,15 @@ def test_valid_unsent_frozen_delivery_keeps_wake_for_recovery():
     assert effects == ['released']
 
 
-@pytest.mark.parametrize('notice', [True, False], ids=['required', 'normal'])
-def test_attachment_only_source_reply_preserves_complete_committed_envelope(tmp_path, monkeypatch, notice):
+# LLM: 附件经原 send_message handler、真实渠道回执与生产回执构造器外发，只替换合成的 typed evidence refs。
+#   必要通知回合已携卡（先有 401 的 web_fetch），原附件闸门只放行净化后的纯文本业务附件。
+# 函数用途: 搭建仅附件直接回复原会话的场景，返回场景、已登记附件与 typed refs。
+def attachment_reply_case(tmp_path, monkeypatch, *, notice, name):
     from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
     from agent_py_agent.agent.capability import channel_message_tool
 
     case = reply_slot_case(tmp_path, monkeypatch, notice=notice, message='')
-    artifact = case.agent.home_paths.owner_home_dir / 'tasks' / 'attachment-fixture' / 'output' / 'result.bin'
+    artifact = case.agent.home_paths.owner_home_dir / 'tasks' / 'attachment-fixture' / 'output' / name
     artifact.parent.mkdir(parents=True)
     artifact.write_bytes(b'synthetic verified attachment')
     register_artifact(ArtifactRegistration(workspace_root=artifact.parent.parent, path=artifact,
@@ -297,6 +299,12 @@ def test_attachment_only_source_reply_preserves_complete_committed_envelope(tmp_
 
     case.backend.generate = with_attachment
     monkeypatch.setattr(channel_message_tool, '_success_result', with_typed_refs)
+    return case, artifact, refs
+
+
+@pytest.mark.parametrize('notice', [True, False], ids=['required', 'normal'])
+def test_attachment_only_source_reply_preserves_complete_committed_envelope(tmp_path, monkeypatch, notice):
+    case, artifact, refs = attachment_reply_case(tmp_path, monkeypatch, notice=notice, name='result.txt')
     reports = case.scheduler.tick(now=case.now)
     assert reports[0].delivery_status == 'sent'
     assert not case.channels.attempts and not case.sends and len(case.files) == 1
@@ -305,3 +313,27 @@ def test_attachment_only_source_reply_preserves_complete_committed_envelope(tmp_
     assert len(mirrored) == 1 and mirrored[0].content == ''
     assert mirrored[0].metadata['delivery_artifacts'][0]['path'] == str(artifact)
     assert mirrored[0].metadata['evidence_refs'] == refs
+    # 已发送的附件回复只算一次：后续 tick 不补发通知，也不重发附件。
+    case.scheduler.tick(now=case.now + 31)
+    assert len(case.files) == 1 and not case.channels.attempts and not case.sends
+
+
+# LLM: 携卡回合的二进制附件被原附件闸门拦下，canonical 记 not_started，没有发送证明，不能占用必要通知回复槽。
+# 函数用途: 验证仅附件直发缺发送证明时，必要通知仍由调度补发且只补一次。
+def test_attachment_only_reply_without_send_proof_still_sends_required_notice(tmp_path, monkeypatch):
+    from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+
+    case, _, _ = attachment_reply_case(tmp_path, monkeypatch, notice=True, name='result.bin')
+    reports = case.scheduler.tick(now=case.now)
+    assert (reports[0].delivery_status, reports[0].delivery_reason) == ('sent', 'required_user_action')
+    operations = ManagedOperationStore(case.agent.subagents.runtime_db).list_tool_operations(
+        owner_id=case.agent.home_paths.owner_id)
+    assert [(op.status, op.result.get('reported_error_code'), op.result.get('effect_outcome'))
+            for op in operations if op.tool == 'send_message'] == [
+        ('failed', 'CREDENTIAL_ATTACHMENT_WITHHELD', 'not_started')]
+    assert not case.files and not case.sends and len(case.channels.attempts) == 1
+    rows = case.store.messages.recent(case.thread.thread_id, limit=0)
+    assert not [row for row in rows if row.metadata.get('delivery_artifacts')]
+    assert len([row for row in rows if row.metadata.get('background_delivery_reason') == 'required_user_action']) == 1
+    case.scheduler.tick(now=case.now + 31)
+    assert not case.files and len(case.channels.attempts) == 1

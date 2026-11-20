@@ -361,14 +361,16 @@ def test_default_sync_execution_still_uses_existing_process_wait_chain(tmp_path,
     monkeypatch.setattr(attempt_sandbox, "AttemptExecutionSandbox", factory)
     tool = shell.ShellTool(tmp_path)
     assert tool.availability().available
-    monkeypatch.setattr(shell, "_start_attempt_shell_process", lambda argv, use_shell, target, actual: seen.append(
-        (argv, use_shell, target, actual)) or proc)
+    monkeypatch.setattr(shell, "_start_attempt_shell_process",
+                        lambda argv, use_shell, target, actual, *, cred_runtime=None: seen.append(
+                            (argv, use_shell, target, actual, cred_runtime)) or proc)
     monkeypatch.setattr(shell, "_communicate_process", lambda actual, **kw: (
         subprocess.CompletedProcess(kw["command"], 0, "default-output", "") if actual is proc else pytest.fail("进程身份漂移")))
     result = tool.execute({"command": "echo default"})
     assert result.ok and "default-output" in result.output
     assert len(factory.instances) == 2 and factory.events[0][1:] == ("probe", True)
-    assert seen == [(["fixture-sandbox", "--", *factory.events[-1][2]], False, tmp_path, tool)]
+    # 不携卡的默认同步执行不得把凭据运行时交给启动点。
+    assert seen == [(["fixture-sandbox", "--", *factory.events[-1][2]], False, tmp_path, tool, None)]
 
 
 @pytest.mark.parametrize("reason", ["dangerous", "unmanaged_background", "outside_owner", "deadline", "cancelled", "sandbox"])

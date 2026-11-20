@@ -394,8 +394,8 @@ def test_web_refresh_bypasses_only_local_cache(tmp_path, monkeypatch):
     from agent_py_agent.agent.tooling.web_fetch_runtime import RawResponseParts
     tool = WebFetchTool(max_chars=1000, timeout=5, artifact_root=tmp_path)
     calls = []
-    def fetch(request):
-        calls.append(request)
+    def fetch(request, *, credential_use=None):
+        calls.append((request, credential_use))
         return RawResponseParts(200, {"Content-Type": "text/plain"}, b"hello", request.url)
     monkeypatch.setattr(tool, "_fetch_raw_request", fetch)
     # 测试不联网；缓存命中仍跑真实网络策略，只为保留域名提供确定的公网DNS回答。
@@ -405,6 +405,8 @@ def test_web_refresh_bypasses_only_local_cache(tmp_path, monkeypatch):
         result = tool.execute({"url": "https://example.test", "refresh": refresh})
         assert result.ok
     assert len(calls) == 2
+    # 直接 execute 没有调用上下文，真实抓取不得凭空带上凭据使用权。
+    assert [credential_use for _, credential_use in calls] == [None, None]
 
 
 def test_web_extract_forwards_parameters_and_stops_at_total_bytes(tmp_path, monkeypatch):

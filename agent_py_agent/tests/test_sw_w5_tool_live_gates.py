@@ -505,22 +505,32 @@ def test_nested_mcp_configuration_does_not_mutate_applied_snapshot(tmp_path, mon
     registry.close_mcp_clients()
 
 
+# LLM: 经真实 PluginMCPClient 构造与关闭路径；wide 固定授权不进沙箱，构造与关闭都不启动插件进程。
+# 函数用途: 未启动插件的旧资源核对失败后，关闭仍确认清理、清空凭据会话，重复关闭保持幂等。
 def test_unstarted_plugin_check_failure_has_confirmed_cleanup(tmp_path, monkeypatch):
     from contextlib import nullcontext
 
     from agent_py_agent.agent import plugin_runtime
-    from agent_py_agent.agent.tooling.mcp_client import MCPServerConfig, MCPStdioClient
+    from agent_py_agent.tests.test_plugin_legacy_launch_guard import restricted_activation
 
-    # 与真实 PluginMCPClient 构造末尾相同的基类状态；不调用 start、不构造替身 stop。
-    client = object.__new__(plugin_runtime.PluginMCPClient)
-    MCPStdioClient.__init__(client, MCPServerConfig(name="unstarted-plugin", command="not-executed"))
-    client.activation_ref = SimpleNamespace(owner=lambda: SimpleNamespace(home_dir=tmp_path))
+    _, owner, entry, _ = restricted_activation(tmp_path, mode="wide")
+    client = plugin_runtime.PluginMCPClient(owner, entry, process_sandbox=False)
     transaction = SimpleNamespace(list_records=lambda: ([], ["unreadable"]))
     monkeypatch.setattr(plugin_runtime, "ProcessSessionStore", lambda root: SimpleNamespace(
         transaction=lambda: nullcontext(transaction)))
     with pytest.raises(ValueError, match="原资源目录不可读"):
         client.require_settled_previous_resources()
     assert client._transport is None and client._starting is False and client._launch_failure is None
+    # 凭据会话绑定只经生产登记入口写入；真实构造器建立了它依赖的会话锁。
+    plugin_runtime._remember_credential_session(
+        client, ("owner-a", "actor-a", "thread-a"), credential_ref="cred_" + "0" * 32, generation=1,
+        origin="https://example.test", consumer={"plugin_id": entry.manifest.plugin_id})
+    assert plugin_runtime._has_credential_sessions(client) is True
     receipt = client.stop()
-    assert receipt.confirmed is True
+    assert (receipt.method, receipt.confirmed) == ("not_started", True)
     assert client.is_closed() is True
+    assert plugin_runtime._has_credential_sessions(client) is False
+    assert client._credential_session_lock.locked() is False
+    again = client.stop()
+    assert (again.method, again.confirmed) == ("not_started", True)
+    assert client.is_closed() is True and plugin_runtime._has_credential_sessions(client) is False

@@ -27,3 +27,35 @@
 ## 执行方式
 
 运行 `python3 scripts/check_contract_test_pyramid.py --repo-root .` 检查分层，再运行相关 focused tests。提交前遵循 `AGENTS.md` 的严格 gate。测试目录、夹具与本说明一起维护。
+
+## 2026-11-19 M01：合同快照、插件生命周期夹具、测试替身与附件发送证明（Conveyor）
+
+本节记录 Conveyor M01 建立的测试不变量与验收证据。基线 `d9caa95af`。本模块只改测试与本说明，不改生产代码。
+
+**不变量**
+
+- 工具合同快照只在逐字段审阅公开差异后重算，并在所属字典上方用一行注释点名所审变更：
+  - `remember` 只新增可选顶层 `cursor`（Wave-1 S4 OL-10）；
+  - `request_credentials` 只新增可选 `auth_config.body_encoding`（`json|form`，默认 `json`），并改写两段参数说明与工具说明（FC1）。
+  - `required`、既有枚举与校验均未改。
+- shell 凭据提示按条款断言：标准 HTTP/API 携卡请求仍导向 `web_fetch`；只有前台同步 `run_command(credential_ref=...)` 读 `MY_AGENT_CREDENTIAL_FILE`；仍禁止在命令里拼接明文或占位账号，也禁止后台携卡。
+- 插件客户端用例经真实 `PluginMCPClient` 构造与 `stop()` 关闭，不启动进程。关闭在凭据会话锁内清空绑定，重复关闭幂等。
+- shell 与 web_fetch 替身显式声明生产传入的仅关键字参数（`cred_runtime`、`credential_file`、`credential_use`），并断言未携卡路径收到 `None`。不用 `**kwargs` 吞参。
+- 仅附件回复：必要通知回合已携卡，FC2 附件闸门只放行净化后的纯文本业务附件。
+  - 文本附件经真实 handler 与渠道回执外发后，只占用一次回复槽。
+  - 二进制附件被闸门拦下时，canonical 记 `CREDENTIAL_ATTACHMENT_WITHHELD` / `not_started`，没有发送证明；必要通知仍由调度补发，且只补一次。
+
+**验收证据**
+
+- 父提交上 14 个原 CI 节点全部失败：
+  - 合同 hash 不符；
+  - 替身收到意外关键字（`TypeError`）；
+  - 绕过构造器的客户端缺 `_credential_session_lock`；
+  - 附件被闸门拦下后通知重发。
+- 本提交在 3.12 与 3.14t（`-X gil=0`）均通过：9 个测试文件合计 350 passed、1 skipped（仅 Linux bwrap 用例），两个解释器结果相同。
+- 新增断言经变异反证，以下每种变异都使对应用例在新增断言处失败：
+  - 提示不再导向 `web_fetch`，或放开后台携卡；
+  - 关闭不清凭据会话；
+  - 未携卡的前台启动或 web_fetch 路径带上凭据；
+  - 回复槽不认已提交回复；
+  - 闸门放行二进制附件。

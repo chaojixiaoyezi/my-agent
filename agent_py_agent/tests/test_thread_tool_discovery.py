@@ -227,11 +227,21 @@ def test_credential_loading_preserves_tool_search_normalization(search):
     assert pending_carried_loaded_tool_names([record]) == expected
 
 
+# LLM: 按条款核对 FC2 提示的实际范围与许可：标准 HTTP/API 携卡请求仍导向 web_fetch，只有前台同步 run_command 可读凭据文件。
+# 函数用途: 提示一旦不再把宿主凭据请求导向 web_fetch，或放开命令拼接明文、后台携卡，本用例即失败。
 def test_shell_hints_direct_host_credentials_to_web_fetch():
     from agent_py_agent.agent.tooling.shell import _build_shell_tool_model_spec
 
     spec = _build_shell_tool_model_spec("full", 240, 16000)
-    assert "需要宿主凭据（credential_ref）的 HTTP/API 请求必须使用 web_fetch，禁止用 curl/shell 拼接占位账号或探测受保护接口。" in spec.hints.avoid_when
+    hints = [text for text in spec.hints.avoid_when if "credential_ref" in text]
+    assert len(hints) == 1, hints
+    routing, _, permission = hints[0].partition("；")
+    assert routing == "需要宿主凭据（credential_ref）的标准 HTTP/API 请求优先使用 web_fetch"
+    assert "同步脚本" in permission and "run_command(credential_ref=...)" in permission
+    assert "MY_AGENT_CREDENTIAL_FILE" in permission
+    assert "禁止在命令文本中拼接明文或占位账号" in permission and "禁止后台携卡运行" in permission
+    # 提示点名的参数必须是同一 schema 中真实的宿主引用字段，而不是任意文本。
+    assert spec.input_schema["properties"]["credential_ref"]["pattern"] == "^cred_[0-9a-f]{32}$"
 
 
 # LLM: 使用真实tool_search、loader、native转换与冻结参数，不能只测试registry的有序输入。
