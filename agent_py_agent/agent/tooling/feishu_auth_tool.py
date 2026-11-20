@@ -103,11 +103,22 @@ def _classify_oauth_runtime_failure(agent, action: str, exc: Exception, guidance
             {**details, "reason_code": "OAUTH_CONFIGURATION_UNAVAILABLE", "available_entry": entry},
         )
     if reason == "OAUTH_CARD_DELIVERY_FAILED":
+        # 本次操作的 effect 由产生方按送达回执决定；未确认送达保留原待处理请求，不当作已知失败。
+        details = {**details, "reason_code": "OAUTH_CARD_DELIVERY_FAILED", "delivery": dict(exc.delivery),
+                   "available_entry": 'feishu_auth(action="status")'}
+        if exc.effect_outcome == "unknown":
+            return (
+                "本人飞书授权卡发送结果未确认，原待处理请求与待输入已保留，等待核对。",
+                "unknown",
+                '切勿直接重复 authorize：先调用只读 feishu_auth(action="status") 核对；用户已收到登录卡时请其完成授权，'
+                '确认未收到时先调用 feishu_auth(action="revoke") 撤销原请求，再重新 authorize。',
+                details,
+            )
         return (
             "本人飞书授权卡发送或待输入登记失败，本次挂起请求已自动收口为失败状态。",
             "failed",
             '请先调用 feishu_auth(action="status") 确认当前记录已收口且飞书私聊通道可达，再重新调用 feishu_auth(action="authorize")。',
-            {**details, "reason_code": "OAUTH_CARD_DELIVERY_FAILED", "available_entry": 'feishu_auth(action="status")'},
+            details,
         )
     exc_type = type(exc).__name__
     if isinstance(exc, FeishuOAuthError) and exc.original_error_type:

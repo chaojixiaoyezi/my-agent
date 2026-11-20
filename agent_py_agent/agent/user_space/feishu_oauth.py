@@ -16,9 +16,15 @@ from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..capability.runtime_config_reload import deployment_capability_config
 from ..common.authenticated_http import open_authenticated_request
 from ..common.json_io import read_json_object_report
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.im_tool_approval import approval_recipient
 from ..conversation.input_dependencies import (
     create_input_dependency,
@@ -36,20 +42,26 @@ from .owner_resolver import owner_identity_from_config
 from .task_credentials import _cipher, _credential_mutation, _save_credential_row
 
 _API = "https://open.feishu.cn/open-apis"
+# 常量用途: 原执行权、有界退出与工具写上下文的未结异常须同对象穿透，不能被本地收口成已知失败。
+_UNSETTLED_EXECUTION_ERRORS = (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                               RequestExecutionContextUnavailable, ToolWriteContextUnavailable)
 
 
 class FeishuOAuthError(RuntimeError, ValueError):
-    """携带 OAuth 阶段与脱敏原因，兼容旧调用方的 ValueError 捕获。"""
+    """携带 OAuth 阶段与脱敏原因，兼容旧调用方的 ValueError 捕获；授权卡失败另带本次操作 effect 与送达阶段事实。"""
 
     def __init__(
         self, message: str, *, phase: str, provider_code: str | None = None,
         reason_code: str = "", original_error_type: str = "",
+        effect_outcome: str = "", delivery: dict | None = None,
     ) -> None:
         RuntimeError.__init__(self, message)
         self.phase = phase
         self.provider_code = provider_code
         self.reason_code = reason_code
         self.original_error_type = original_error_type
+        self.effect_outcome = effect_outcome
+        self.delivery = dict(delivery or {})
 
 
 # LLM: 只读宿主 deployment 配置，普通 owner 不能扩大 OAuth 范围；未知配置拒绝，不用用户局部 YAML 替代。
@@ -244,7 +256,7 @@ def _fail_oauth(agent, actor, input_id):
         resolve_input_dependency(agent, input_id, status="failed")
 
 
-# LLM: private link/state 绑定本 owner 原任务，缺执行上下文先拒绝；容量/运输失败写 failed 清密文，缺依赖不补偿建账。
+# LLM: private link/state 绑定本 owner 原任务，缺执行上下文先拒绝；容量或明确未发送写 failed 清密文，送达未确认保留原请求与输入，缺依赖不补偿建账。
 # 函数用途: 先登记必要输入再发送本人 OAuth 卡，登记失败不发卡，立即返回可归档的等待引用或固定错误。
 def request_oauth(agent, *, invocation_mode=None):
     current = getattr(agent, '_current_run_params', None)
@@ -272,14 +284,27 @@ def request_oauth(agent, *, invocation_mode=None):
     try:
         create_input_dependency(agent, scope, input_id=nonce, provider="feishu_oauth", expires_at=expires,
                                 reference=nonce, metadata={"actor_id": actor})
-        _deliver_oauth_card(agent, scope, row, challenge)
+    except _UNSETTLED_EXECUTION_ERRORS:
+        raise
     except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        # 登记在发卡之前失败，卡片确定未发送，收口本次待处理请求。
         _fail_oauth(agent, actor, nonce)
-        raise FeishuOAuthError("本人授权卡未送达或输入登记失败。", phase="authorize", reason_code="OAUTH_CARD_DELIVERY_FAILED") from None
+        raise _card_delivery_error("failed", {"stage": "input_registration", "input_id": nonce,
+                                              "effect_outcome": "not_started"}) from None
+    _deliver_oauth_card(agent, scope, row, challenge)
     return {"input_id": nonce, "status": "waiting_input", "expires_at": expires}
 
 
+# LLM: effect只取登记阶段或送达回执的结构化事实；unknown保留原待处理请求和输入供核对，已知未送达才沿原文案收口失败。
+# 函数用途: 构造授权卡阶段的结构化失败，供工具按原因与effect结算本次操作。
+def _card_delivery_error(effect_outcome, delivery):
+    message = "本人授权卡发送结果未确认，原待处理请求已保留。" if effect_outcome == "unknown" else "本人授权卡未送达或输入登记失败。"
+    return FeishuOAuthError(message, phase="authorize", reason_code="OAUTH_CARD_DELIVERY_FAILED",
+                            effect_outcome=effect_outcome, delivery=delivery)
+
+
 # LLM: URL 只交私人控制卡运输，不写工具回执或普通聊天；准确接收者与任务都来自宿主冻结 scope。
+# 回执明确未发送才收口失败；发送边界异常、未确认回执或送达后本地回执未保存都保留原请求，送达事实写入诊断。
 # 函数用途: 在记录锁外发送标准 PKCE 授权链接。
 def _deliver_oauth_card(agent, scope, row, challenge):
     link = "https://accounts.feishu.cn/open-apis/authen/v1/authorize?" + urlencode({
@@ -290,15 +315,38 @@ def _deliver_oauth_card(agent, scope, row, challenge):
                             "text": {"tag": "plain_text", "content": "授权我的飞书账号"}},
                             {"tag":"button","type":"default","text":{"tag":"plain_text","content":"取消"},
                              "value":{"kind":"my_agent_feishu_oauth","reference":row['state'],"decision":"cancel"}}]}]}
-    receipt = agent.delivery_service.deliver_control_card(DeliveryContext(channel="feishu", target=row["actor_id"],
-        mode="reply", task_id=scope.run_id, thread_id=scope.thread_id, idempotency_key=row["input_id"]), card, summary="本人飞书授权")
+    delivery = {"stage": "delivery", "input_id": row["input_id"]}
+    try:
+        receipt = agent.delivery_service.deliver_control_card(DeliveryContext(channel="feishu", target=row["actor_id"],
+            mode="reply", task_id=scope.run_id, thread_id=scope.thread_id, idempotency_key=row["input_id"]), card, summary="本人飞书授权")
+    except _UNSETTLED_EXECUTION_ERRORS:
+        raise
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+        raise _card_delivery_error("unknown", {**delivery, "effect_outcome": "unknown",
+                                               "exception_type": type(exc).__name__}) from None
     if not receipt.ok:
-        raise ValueError("本人授权卡未送达。")
-    with _credential_mutation(agent,oauth_path(agent,row['actor_id'])) as admission:
-        latest=read_json_object_report(oauth_path(agent,row['actor_id']),context='oauth.card_receipt').payload
-        if latest and latest.get('state')==row['state'] and latest.get('input_id')==row['input_id']:
-            _save_credential_row(admission,oauth_path(agent,row['actor_id']),{**latest,'im_control':{
-                'message_id':receipt.message_id,'chat_id':receipt.chat_id}})
+        known = getattr(receipt, "effect_outcome", "not_started") == "not_started"
+        delivery.update(effect_outcome="not_started" if known else "unknown",
+                        error_code=str(getattr(receipt, "error_code", "") or ""))
+        provider_code = getattr(receipt, "provider_code", None)
+        if type(provider_code) is int:
+            delivery["provider_code"] = provider_code
+        if not known:
+            raise _card_delivery_error("unknown", delivery)
+        _fail_oauth(agent, row["actor_id"], row["input_id"])
+        raise _card_delivery_error("failed", delivery)
+    try:
+        with _credential_mutation(agent,oauth_path(agent,row['actor_id'])) as admission:
+            latest=read_json_object_report(oauth_path(agent,row['actor_id']),context='oauth.card_receipt').payload
+            if latest and latest.get('state')==row['state'] and latest.get('input_id')==row['input_id']:
+                _save_credential_row(admission,oauth_path(agent,row['actor_id']),{**latest,'im_control':{
+                    'message_id':receipt.message_id,'chat_id':receipt.chat_id}})
+    except _UNSETTLED_EXECUTION_ERRORS:
+        raise
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+        raise _card_delivery_error("unknown", {"stage": "receipt_commit", "input_id": row["input_id"],
+                                               "effect_outcome": "confirmed",
+                                               "exception_type": type(exc).__name__}) from None
 
 
 # LLM: 已验签请求仍须核对 owner、actor、期限、pending 输入和原配置；ready 重放仅补原依赖，不重新兑换 code。

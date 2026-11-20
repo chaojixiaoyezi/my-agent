@@ -29,6 +29,9 @@ from . import (
 )
 from .descriptor import AssetDescriptor, AssetRefs, clean_json
 
+# 常量用途: 启停前像核对在任何写入之前失败时的结构化原因，调用方据此确认本次没有写入原生字节。
+SKILL_ENABLED_CAS_REFUSED = 'enabled_preimage_changed_before_write'
+
 
 # LLM: 不resolve模型路径以保留链接拒绝，输入必须是目录或准确SKILL.md，不从元数据取得路径。
 # 函数用途: 规范单个技能位置，所有实际读写仍沿nofollow链执行。
@@ -398,7 +401,7 @@ class SkillAdapter:
                 return self.set_enabled(skill_id, enabled, admission=quota, expected_sha=expected_sha)
         with self._enabled_state(skill_id, writing=True) as (directory, parts, body, meta):
             if expected_sha is not None and _enabled_state_sha(parts, body, meta) != expected_sha:
-                raise SkillSnapshotError('REVISION_CONFLICT', '启停前像已变化')
+                raise SkillSnapshotError('REVISION_CONFLICT', '启停前像已变化', reason=SKILL_ENABLED_CAS_REFUSED)
             meta.update(enabled=enabled, revision=next_asset_revision(meta))
             descriptor = _descriptor(directory, _merged_metadata(_frontmatter(body), meta), meta.get('owner_id', ''))
             raw = json.dumps(clean_json(meta), ensure_ascii=False, allow_nan=False) + '\n'

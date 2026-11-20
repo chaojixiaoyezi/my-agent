@@ -287,20 +287,39 @@ def _single_request_source(
 
 @dataclass
 class CompactAttemptBudget:
-    """同一次候选的物理调用配额，缓存、分段及底层重试共同扣减。"""
+    """同一次候选的物理调用账本：remaining 是缓存、纠正、缩窗及底层重试共用且永不回补的重试配额；
+    冻结来源的每个连续片段只在覆盖位置严格前进时得到一次首发额度，有效片段的数量由来源长度与请求几何决定。"""
 
     remaining: int
     consumed_by_stage: dict[str, int]
     empty_count: int = 0
     exhausted_cause: str = ""
     attempt_id: str = field(default_factory=lambda: uuid4().hex, repr=False, compare=False, kw_only=True)
+    source_frontier: int = field(default=-1, compare=False, kw_only=True)
+    source_grant_pending: bool = field(default=False, repr=False, compare=False, kw_only=True)
 
     def consume(self, stage: str) -> bool:
-        if self.remaining <= 0:
+        if stage == "segment" and self.source_grant_pending:
+            # 片段首发只用已验证推进授予的额度；同一位置之后的缩窗重发、纠正与传输重试照常扣重试配额。
+            self.source_grant_pending = False
+        elif self.remaining > 0:
+            self.remaining -= 1
+        else:
             self.exhausted_cause = stage
             return False
-        self.remaining -= 1
         self.consumed_by_stage[stage] = self.consumed_by_stage.get(stage, 0) + 1
+        return True
+
+    # 函数用途: 与 consume 同一判定，供发送前的准入检查使用，不扣减任何额度。
+    def admits(self, stage: str) -> bool:
+        return (stage == "segment" and self.source_grant_pending) or self.remaining > 0
+
+    # 函数用途: 来源冻结后，为严格前进且仍在来源范围内的片段起点授予一次首发额度；空回复、错误和纠正不推进位置，不能回补。
+    def grant_source_segment(self, offset: int, extent: int) -> bool:
+        if not 0 <= offset < extent or offset <= self.source_frontier:
+            return False
+        self.source_frontier = offset
+        self.source_grant_pending = True
         return True
 
 
@@ -308,8 +327,8 @@ def _new_compact_attempt_budget(agent: object) -> CompactAttemptBudget:
     from ..agent_core.provider_transient_auto_resume import provider_transient_retry_delays
 
     policy = getattr(agent, "runtime_guard_policy", None)
-    # 一次缓存发送、一次缓存纠正、一次初始分段，以及原分段纠正和退避阶梯各一份。
-    return CompactAttemptBudget(3 + _SEGMENT_REPAIR_LIMIT_COUNT + len(provider_transient_retry_delays(policy)), {})
+    # 一次缓存发送、一次缓存纠正，以及原分段纠正和退避阶梯各一份；每个片段首发由来源推进单独授予，不占此配额。
+    return CompactAttemptBudget(2 + _SEGMENT_REPAIR_LIMIT_COUNT + len(provider_transient_retry_delays(policy)), {})
 
 
 def _compact_attempt_exhausted(budget: CompactAttemptBudget, cause: str) -> ConversationCompactError:
@@ -318,7 +337,7 @@ def _compact_attempt_exhausted(budget: CompactAttemptBudget, cause: str) -> Conv
         "Compact 摘要尝试结束",
         extra={"compact_attempt_budget": {
             "compact_attempt_id": budget.attempt_id, "remaining": budget.remaining, "consumed_by_stage": dict(budget.consumed_by_stage),
-            "empty_count": budget.empty_count, "exhausted_cause": cause,
+            "empty_count": budget.empty_count, "exhausted_cause": cause, "source_frontier": budget.source_frontier,
         }},
     )
     return ConversationCompactError(
@@ -604,8 +623,9 @@ def _generate_auxiliary_with_retry(request: AuxiliaryModelCallRequest) -> object
 
     def admit_retry():
         raise_if_compact_interrupted(dispatch.attempt.interrupt_check)
-        if budget.remaining <= 0:
-            raise _compact_attempt_exhausted(budget, "transient")
+        # 退避阶梯为空时运行器在唯一一次发送前也会询问；按即将发送的阶段判定，片段首发仍可用来源推进的额度。
+        if not budget.admits(stage):
+            raise _compact_attempt_exhausted(budget, stage)
         return True
 
     return run_with_provider_transient_auto_resume(
@@ -773,6 +793,8 @@ def _summarize_segments(
 
 
 # LLM: 复用唯一分段/修复循环，成功才释放当前窗口；全部字符一致且未取消后才交回最终摘要，不推进canonical游标。
+#   每个片段起点先向账本申领首发额度：只有冻结来源内严格前进的位置才能得到，所以有效片段不吃重试配额，
+#   空回复、纠正、缩窗与传输重试仍只扣共享配额，同一次调用就能连续覆盖完整来源。
 # 函数用途: 逐段消费临时来源，保持原摘要累积、失败策略和进度，结束时验证两遍来源一致。
 def _summarize_source(
     base, source, budget, interrupt_check, source_progress, preserve_complete_fallback,
@@ -784,6 +806,8 @@ def _summarize_source(
     response: object | None = None
     while offset < len(source):
         raise_if_compact_interrupted(interrupt_check)
+        if attempt_budget is not None:
+            attempt_budget.grant_source_segment(offset, len(source))
         attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, None,
                                          calibration=calibration, attempt_budget=attempt_budget)
         outcome = _summarize_segment(base, source, offset, summary, attempt)
