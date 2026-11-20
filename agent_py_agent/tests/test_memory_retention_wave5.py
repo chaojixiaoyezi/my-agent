@@ -2266,7 +2266,11 @@ def test_r8_cold_detail_parse_aba_is_bound_by_content_address(tmp_path, monkeypa
 @pytest.mark.parametrize("budgeted", [False, True])
 def test_missing_candidate_index_reports_source_and_recovers_without_discarding_pins(tmp_path, budgeted):
     """真实索引缺叶须具体报错并保护引用；恢复原字节后新扫描自行恢复。"""
-    from agent_py_agent.agent.memory_store.candidate_ledger import read_manifest
+    from agent_py_agent.agent.memory_store.candidate_ledger import (
+        candidate_record_path,
+        candidate_records_directory,
+        read_manifest,
+    )
     from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
     from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
 
@@ -2278,7 +2282,7 @@ def test_missing_candidate_index_reports_source_and_recovers_without_discarding_
         scope=MemoryScope("personal", "personal"), evidence_refs=({"path": str(target)},),
     ))
     header = read_manifest(candidates.path)
-    missing = candidates.path.parent / (candidates.path.name + ".records") / header["root"]["ref"]["ref"]
+    missing = candidate_record_path(candidate_records_directory(candidates.path), header["root"]["ref"]["ref"])
     original = missing.read_bytes()
     missing.unlink()
 

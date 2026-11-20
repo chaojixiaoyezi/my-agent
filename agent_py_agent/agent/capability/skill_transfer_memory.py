@@ -5,7 +5,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from ..common.json_io import locked_json_path, write_private_text_file_atomic_unlocked
-from ..memory_store.candidate_ledger import CandidateRows, read_manifest
+from ..memory_store.candidate_ledger import (
+    CandidateRows,
+    candidate_records_directory,
+    prepare_candidate_node_shards,
+    read_manifest,
+)
 from ..memory_store.candidate_models import CandidateObservation
 from ..memory_store.candidates import (
     CandidateService,
@@ -104,6 +109,7 @@ class _MemoryImport:
         if self.ids:
             self.admission.check(self.changes)
             self.applied = True
+            prepare_candidate_node_shards(candidate_records_directory(self.path), self.planned)
             for target, text in self.planned.items():
                 write_private_text_file_atomic_unlocked(target, text)
             _drop_candidate_load_cache(self.path)

@@ -1,8 +1,8 @@
-# LLM: 本模块只读类型化策略、会话、任务及子代理状态和文件事实，不执行删除；来源或状态未知时必须保守保护并报告错误。
-# 模块用途: 为每个 owner 生成可在执行前重验证的留存 dry-run 计划，统一保护引用与恢复材料。
+# LLM: 留存计划只读。候选索引维护显式进入同一提交锁，来源不明时保留节点并报告错误。
+# 模块用途: 生成留存计划，并为留存执行入口提供候选不可变节点维护片。
 from __future__ import annotations
 
-"""Memory v2 retention 的只读扫描与计划生成。"""
+"""Memory v2 retention 的扫描、计划和候选索引维护。"""
 
 import hashlib
 import heapq
@@ -27,20 +27,33 @@ from typing import Any
 
 from ..audit.paths import audit_segment_day, audit_segment_paths
 from ..common import cache_capacity
-from ..common.json_io import read_json_object_report, read_jsonl_objects_report
+from ..common.json_io import locked_json_path, read_json_object_report, read_jsonl_objects_report
 from ..common.log_redaction import redact_sensitive_text
-from ..common.nofollow_fs import (
-    open_directory_beneath,
-    read_bytes_beneath,
-)
+from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+from ..conversation.hamt_reachability import _Directory, _regular
 from ..conversation.models import ConversationThread
-from ..conversation.store_io import safe_file_stem
+from ..conversation.store_io import (
+    ImmutableIndexNodeMissing,
+    ImmutableJsonIndex,
+    immutable_node_path,
+    safe_file_stem,
+)
 from ..conversation.thread_ledger_segments import archive_dir_for
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
 from ..local_storage.records import derived_terminal_expired
 from ..settings.config import AgentConfig
+from ..user_space.directory_paging import directory_page
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from . import reference_pins, retention_scan_budget
+from .candidate_ledger import (
+    FORMAT,
+    _validate_manifest,
+    candidate_node_children,
+    candidate_node_name,
+    candidate_records_directory,
+    prepare_candidate_node_shards,
+    read_manifest,
+)
 from .candidate_models import MemoryCandidate
 from .candidates import (
     _COLD_REF,
@@ -70,6 +83,8 @@ from .retention_scan_budget import (
 
 # 一天按 86400 秒算：保留期换算成秒的统一口径。
 _DAY_SECONDS = 86_400
+# 候选 JSON 节点确认不可达后至少保留 24 小时，给重新引用和事务恢复留出时间。
+_CANDIDATE_NODE_GRACE_SECONDS = 24 * 60 * 60
 # 过期会话回收前按后台整理游标往后探查可学习消息时，每页读取的会话行数。
 _UNCURATED_PROBE_PAGE_ROWS = 16
 # 同一会话最多探查的页数；读不完按“未确认读完”处理。
@@ -93,6 +108,304 @@ _PIN_BUILDS_LOCK = threading.Lock()
 _CURRENT_PIN_BUILDS = OrderedDict()
 _EXECUTION_CURSOR_KEY = "execution:pending"
 _EXECUTION_PLANS = OrderedDict()
+_CANDIDATE_NODES_CURSOR_KEY = "candidate:immutable_nodes"
+_CANDIDATE_NODE_MARKS = OrderedDict()
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateNodeProof:
+    observed_at: float
+    file_clock_ns: int
+    reachable: set[str]
+
+
+@dataclass(slots=True)
+class _CandidateNodeMark:
+    generation: tuple
+    pending: list
+    reachable: set[str] = field(default_factory=set)
+    previous: _CandidateNodeProof | None = None
+    root_page: dict = field(default_factory=dict)
+    shard_prefix: str = ""
+    shard_page: dict = field(default_factory=dict)
+
+
+def _candidate_page(directory, page, budget):
+    """用原生目录续点读取一页，未处理的名字保存在当前切片状态。"""
+    names = page.setdefault("names", [])
+    if type(names) is not list or len(names) > RETENTION_SCAN_SLICE_ENTRIES or any(type(name) is not str for name in names):
+        raise ValueError("candidate scan cursor names must be a bounded list of strings")
+    if not names and not page.get("complete") and not budget.exhausted():
+        checkpoint = page.get("checkpoint", {})
+        if not isinstance(checkpoint, dict):
+            raise ValueError("candidate directory checkpoint must be an object")
+        limit = min(RETENTION_SCAN_SLICE_ENTRIES, budget.max_entries - budget.entries)
+        names, checkpoint, complete = directory_page(
+            directory.parent, (directory.name,), checkpoint, limit, require_dir_fd=False,
+        )
+        names.reverse()
+        page.update(names=names, checkpoint=checkpoint, complete=complete)
+        if not names:
+            budget.charge(entries=max(1, checkpoint.get("last_scanned", 0)))
+    while names and not budget.exhausted():
+        budget.charge(entries=1)
+        yield names.pop()
+
+
+def _candidate_page_done(page):
+    return page.get("complete") and not page.get("names")
+
+
+def _move_legacy_candidate_node(directory, name, budget):
+    shard = immutable_node_path(directory, name)
+    with _Directory(directory) as source:
+        try:
+            info = source.stamp(name)
+        except FileNotFoundError:
+            return False
+        if not _regular(info):
+            raise OSError("candidate node must be a single-link regular file")
+        prepare_candidate_node_shards(directory, (shard,))
+        with _Directory(shard.parent) as target:
+            try:
+                other = target.stamp(name)
+            except FileNotFoundError:
+                source.rename(name, target, name)
+                if target.fd is not None:
+                    os.fsync(target.fd)
+            else:
+                if not _regular(other) or info.st_size != other.st_size:
+                    raise OSError("candidate shard and legacy file have different metadata")
+                if info.st_size * 2 > budget.max_bytes:
+                    raise OSError("candidate duplicate exceeds the retention scan byte budget")
+                if info.st_size * 2 > budget.max_bytes - budget.size:
+                    return None
+                raw = read_bytes_beneath(directory, (name,), max_bytes=info.st_size)
+                duplicate = read_bytes_beneath(directory, (shard.parent.name, name), max_bytes=info.st_size)
+                budget.charge(size=info.st_size * 2)
+                if raw is None or raw != duplicate or hashlib.sha256(raw).hexdigest() != name[:-5]:
+                    raise OSError("candidate shard and legacy file have different content or an invalid digest")
+                source.unlink(name)
+        if source.fd is not None:
+            os.fsync(source.fd)
+    return True
+
+
+def _candidate_authority(home, path, directory):
+    with _Directory(directory) as source:
+        if source.fd is not None:
+            records = os.fstat(source.fd)
+        else:
+            records = source.path.lstat()
+        try:
+            head = path.lstat()
+        except FileNotFoundError:
+            head = None
+        if head is not None and not _regular(head):
+            raise OSError("candidate head must be a single-link regular file")
+    transaction_dir = Path(home.owner_memory_curator_dir) / "transactions"
+    try:
+        with _Directory(transaction_dir) as transactions, closing(transactions.names()) as names:
+            # 存有恢复材料时整代保护。持锁的事务不可能与扫描同进，相同锁也保护恢复前像。
+            if next(names, None) is not None:
+                return None
+            txn = os.fstat(transactions.fd) if transactions.fd is not None else transaction_dir.lstat()
+    except FileNotFoundError:
+        txn = None
+    generation = ((records.st_dev, records.st_ino), *(
+        _file_identity(info) if info is not None else None for info in (head, txn)
+    ))
+    # 头或恢复目录被移除也是引用变更，用真实父目录时钟作保守上界。
+    memory = path.parent.lstat()
+    if txn is None:
+        try:
+            txn = transaction_dir.parent.lstat()
+        except FileNotFoundError:
+            txn = memory
+    changed_ns = max(max(info.st_ctime_ns, info.st_mtime_ns) for info in (head or memory, txn))
+    return generation, changed_ns
+
+
+def _candidate_mark(path, generation):
+    with _PIN_BUILDS_LOCK:
+        mark = _CANDIDATE_NODE_MARKS.get(path)
+        if mark is not None and mark.generation == generation:
+            _CANDIDATE_NODE_MARKS.move_to_end(path)
+            return mark
+    header = read_manifest(path)
+    if header is None and generation[1] is not None:
+        # 旧 JSONL 可继续读。只有明确的索引清单或确认证明不存在的头可授权扫除节点。
+        return None
+    pending = [header["root"]] if header is not None and header["root"] is not None else []
+    previous = mark.previous if mark is not None and mark.generation[0] == generation[0] else None
+    replacement = _CandidateNodeMark(generation, pending, previous=previous)
+    with _PIN_BUILDS_LOCK:
+        _CANDIDATE_NODE_MARKS[path] = replacement
+        _CANDIDATE_NODE_MARKS.move_to_end(path)
+        while len(_CANDIDATE_NODE_MARKS) > _pin_capacity():
+            _CANDIDATE_NODE_MARKS.popitem(last=False)
+    return replacement
+
+
+def _mark_candidate_references(index, mark, budget):
+    while mark.pending and not budget.exhausted():
+        reference = mark.pending[-1]
+        name, size = reference["ref"]["ref"], reference["ref"]["byte_length"]
+        if name in mark.reachable:
+            budget.charge(entries=1)
+            mark.pending.pop()
+            continue
+        if type(size) is not int or not 0 < size <= budget.max_bytes:
+            raise ValueError("candidate node reference length exceeds the retention scan budget")
+        if size > budget.max_bytes - budget.size:
+            return
+        node = index._load(reference)
+        budget.charge(entries=1, size=size)
+        mark.pending.pop()
+        mark.reachable.add(name)
+        mark.pending.extend(candidate_node_children(node))
+
+
+def _sweep_candidate_node(directory, name, mark, now, authority_ns):
+    if name in mark.reachable:
+        return False
+    with _Directory(directory) as source:
+        try:
+            info = source.stamp(name)
+        except FileNotFoundError:
+            return False
+        if not _regular(info):
+            raise OSError("unreferenced candidate node must be a single-link regular file")
+        file_ns = max(info.st_mtime_ns, info.st_ctime_ns)
+        cutoff = now - _CANDIDATE_NODE_GRACE_SECONDS
+        proof = mark.previous
+        # 较新的无关清单不会重置旧孤儿的宽限。重新采用的节点必经新写或更新时间。
+        old_enough = max(file_ns, authority_ns) / 1e9 <= cutoff or (
+            proof is not None and proof.observed_at <= cutoff
+            and name not in proof.reachable and file_ns < proof.file_clock_ns
+        )
+        if not old_enough:
+            return False
+        source.unlink(name)
+        if source.fd is not None:
+            os.fsync(source.fd)
+    return True
+
+
+def _candidate_node_issue(stage, path, exc):
+    reason = redact_sensitive_text(str(exc))
+    return MemoryRetentionError(
+        "MEMORY_RETENTION_SCAN_UNREADABLE", str(path),
+        f"候选索引{stage}失败（{type(exc).__name__}：{reason}）。本次可能已处理前序条目。"
+        "请检查此路径及清单引用，修复后重新运行保留维护。",
+    )
+
+
+def _sweep_candidate_nodes(directory, mark, budget, now, authority_ns, progress, errors):
+    while not budget.exhausted():
+        prefix = mark.shard_prefix
+        current = directory / prefix
+        page = mark.shard_page if prefix else mark.root_page
+        try:
+            with closing(_candidate_page(current, page, budget)) as names:
+                for name in names:
+                    if candidate_node_name(name) and name.startswith(prefix):
+                        try:
+                            progress["removed"] += _sweep_candidate_node(current, name, mark, now, authority_ns)
+                        except OSError as exc:
+                            errors.append(_candidate_node_issue("回收", current / name, exc))
+                    elif not prefix and len(name) == 2 and all(ch in "0123456789abcdef" for ch in name):
+                        mark.shard_prefix = name
+                        break
+        except OSError as exc:
+            if not prefix:
+                raise
+            errors.append(_candidate_node_issue("枚举", current, exc))
+            page.update(names=[], complete=True)
+        if prefix and _candidate_page_done(page):
+            mark.shard_prefix = ""
+            mark.shard_page = {}
+        elif not mark.shard_prefix and _candidate_page_done(page):
+            return True
+    return False
+
+
+def _advance_candidate_nodes(home, path, directory, now, budget, progress, errors):
+    authority = _candidate_authority(home, path, directory)
+    if authority is None:
+        progress["status"] = "transaction_pending"
+        return False
+    generation, changed_ns = authority
+    migration = progress["migration"]
+    while not budget.exhausted() and not _candidate_page_done(migration):
+        with closing(_candidate_page(directory, migration, budget)) as names:
+            for name in names:
+                if candidate_node_name(name):
+                    try:
+                        moved = _move_legacy_candidate_node(directory, name, budget)
+                    except OSError as exc:
+                        errors.append(_candidate_node_issue("迁移", directory / name, exc))
+                        continue
+                    if moved is None:
+                        migration["names"].append(name)
+                        return True
+                    progress["migrated"] += moved
+    if budget.exhausted():
+        return True
+    mark = _candidate_mark(path, generation)
+    if mark is None:
+        progress["status"] = "legacy_head"
+        return False
+    index = ImmutableJsonIndex(path.parent, (directory.name,))
+    _mark_candidate_references(index, mark, budget)
+    if mark.pending or not _sweep_candidate_nodes(directory, mark, budget, now, changed_ns, progress, errors):
+        return True
+    if mark.previous is None or now - mark.previous.observed_at >= _CANDIDATE_NODE_GRACE_SECONDS:
+        mark.previous = _CandidateNodeProof(now, time.time_ns(), mark.reachable)
+    mark.root_page = {}
+    return False
+
+
+def advance_candidate_node_maintenance(home, *, now, config, scan_cursor):
+    """同一候选提交锁内运行一片迁移、标记及回收，游标走已有保留状态文件。"""
+    path = Path(home.owner_memory_candidates_jsonl)
+    directory = candidate_records_directory(path)
+    cursor = dict(scan_cursor)
+    previous = cursor.get(_CANDIDATE_NODES_CURSOR_KEY)
+    if (isinstance(previous, dict) and previous.get("status") == "partial"
+            and isinstance(previous.get("migration"), dict)
+            and all(type(previous.get(key)) is int and previous[key] >= 0 for key in ("migrated", "removed"))):
+        progress = deepcopy(previous)
+    else:
+        progress = {"status": "partial", "migration": {}, "migrated": 0, "removed": 0}
+    errors = []
+    budget = RetentionScanBudget.default(config)
+    try:
+        directory.lstat()
+    except FileNotFoundError:
+        with _PIN_BUILDS_LOCK:
+            _CANDIDATE_NODE_MARKS.pop(path, None)
+        cursor.pop(_CANDIDATE_NODES_CURSOR_KEY, None)
+        return cursor, False, ()
+    except OSError as exc:
+        return cursor, False, (_candidate_node_issue("检查目录", directory, exc),)
+    try:
+        with locked_json_path(path, blocking=False):
+            partial = _advance_candidate_nodes(home, path, directory, now.timestamp(), budget, progress, errors)
+    except BlockingIOError:
+        partial = True
+    except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+        with _PIN_BUILDS_LOCK:
+            _CANDIDATE_NODE_MARKS.pop(path, None)
+        errors.append(_candidate_node_issue("标记或续扫", directory, exc))
+        progress["status"] = "incomplete"
+        partial = False
+    if not partial:
+        progress.pop("migration", None)
+        if progress["status"] == "partial":
+            progress["status"] = "complete"
+    cursor[_CANDIDATE_NODES_CURSOR_KEY] = progress
+    return cursor, partial, tuple(errors)
 
 
 # LLM: plan纯读取；预算覆盖引用投影与会话/快照发现，输入游标深复制，错误及策略指纹门保持。
@@ -411,7 +724,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             Path(context.home.owner_retention_json),
             Path(context.home.owner_workspace_dir) / "runtime/workspaces",
             Path(context.home.owner_memory_candidates_jsonl),
-            Path(context.home.owner_memory_candidates_jsonl).with_name('candidates.jsonl.records'),
+            candidate_records_directory(Path(context.home.owner_memory_candidates_jsonl)),
             Path(context.home.owner_memory_candidates_jsonl).parent / "candidates_archive",
             Path(context.home.owner_memory_curator_runs_dir), Path(context.home.owner_memory_curator_runs_dir).parent / "state.json",
             Path(context.home.owner_compact_dir) / "conversations", *_recovery_roots(context.home),
@@ -618,18 +931,25 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 or any(ch not in "0123456789abcdef" for ch in digest)
                 or type(size) is not int or size <= 0 or name != digest + suffix):
             raise ValueError("candidate immutable reference is invalid")
-        path = directory / name
-        raw = yield from self._read(path)
-        if raw is None:
-            # 分片读口也保留原不可变索引的精确缺叶原因，不能把缺失洗成无路径摘要错误。
-            from ..conversation.store_io import ImmutableIndexNodeMissing
-
-            raise ImmutableIndexNodeMissing(2, "immutable index node is missing", str(path))
-        if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
-            raise OSError(22, "candidate immutable source length or digest mismatches", str(path))
-        # 内容寻址对象由唯一manifest封印；不把每条历史节点放进逐动作复核集合。
-        self._forget_source(path)
-        return raw
+        flat = directory / name
+        shard = immutable_node_path(directory, name) if suffix == ".json" else None
+        # 第二次分片探测覆盖后台改名落在前两次探测之间的窗口。
+        for path in (shard, flat, shard) if shard is not None else (flat,):
+            try:
+                raw = yield from self._read(path)
+            except (FileNotFoundError, _PinReadChanged):
+                if shard is None or path != flat or self._stamp(path) is not None:
+                    raise
+                raw = None
+            # 内容寻址对象由唯一清单封印；包括缺失的旧位置在内，均不进入逐动作复核集合。
+            self._forget_source(path)
+            if raw is not None:
+                if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+                    raise OSError(22, "candidate immutable source length or digest mismatches", str(path))
+                return raw
+        shard_directory = self._stamp(shard.parent) if shard is not None else None
+        missing = shard if shard_directory is not None and stat.S_ISDIR(shard_directory[2]) else flat
+        raise ImmutableIndexNodeMissing(2, "immutable index node is missing", str(missing))
 
     def _candidate_lookup(self, directory, reference, key):
         route = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
@@ -662,7 +982,6 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             raise _CandidatePinSourceUnreadable(22, "candidate ledger is unreadable", str(path)) from exc
 
     def _candidate_rows_unchecked(self, path):
-        from .candidate_ledger import FORMAT, _validate_manifest
         from .candidates import _parse_candidate_line
 
         with closing(self._rows(path)) as stream:
@@ -684,7 +1003,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 if row is not None:
                     raise ValueError("candidate manifest contains extra records")
                 yield None
-        directory = path.with_name(path.name + ".records")
+        directory = candidate_records_directory(path)
         for position in range(header["count"]):
             identifier = yield from self._candidate_lookup(directory, header["root"], "pos/" + str(position))
             entry = (yield from self._candidate_lookup(directory, header["root"], "row/" + identifier)) if identifier else None

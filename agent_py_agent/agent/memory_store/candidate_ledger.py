@@ -7,14 +7,71 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import MutableSequence
+import os
+from collections.abc import Iterable, MutableSequence
 from copy import deepcopy
 from pathlib import Path
 
+from ..common import nofollow_fs
 from ..common.nofollow_fs import read_bytes_beneath
-from ..conversation.store_io import ImmutableJsonIndex
+from ..conversation.store_io import ImmutableJsonIndex, immutable_node_path
 
 FORMAT = 'memory-candidates-v2'
+
+
+def candidate_records_directory(path: Path) -> Path:
+    return path.with_name(path.name + '.records')
+
+
+def candidate_node_name(name: str) -> bool:
+    digest, suffix = name[:64], name[64:]
+    return len(digest) == 64 and suffix == '.json' and all(ch in '0123456789abcdef' for ch in digest)
+
+
+def candidate_record_path(directory: Path, name: str) -> Path:
+    return immutable_node_path(directory, name) if candidate_node_name(name) else directory / name
+
+
+def prepare_candidate_node_shards(directory: Path, targets: Iterable[Path]) -> None:
+    """先持久化本批需要的新分片目录项，再发表引用这些目录的清单。"""
+    prefixes = {target.parent.name for target in targets
+                if target.parent.parent == directory and candidate_node_name(target.name)
+                and target == immutable_node_path(directory, target.name)}
+    if not prefixes:
+        return
+    if not nofollow_fs._supports_dir_fd():
+        for prefix in prefixes:
+            nofollow_fs.ensure_private_dir(directory / prefix, canonical_root=directory.parent)
+        return
+    parent = nofollow_fs.open_directory_beneath(directory.parent, (directory.name,), create=True)
+    try:
+        needs_sync = False
+        for prefix in sorted(prefixes):
+            try:
+                os.mkdir(prefix, mode=0o700, dir_fd=parent)
+            except FileExistsError:
+                shard = nofollow_fs._openat_directory(parent, prefix)
+                try:
+                    # 补上一次中断后尚未写入节点的目录项，已使用过的分片不重复同步。
+                    with os.scandir(shard) as entries:
+                        needs_sync |= next(entries, None) is None
+                finally:
+                    os.close(shard)
+            else:
+                needs_sync = True
+        if needs_sync:
+            os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def candidate_node_children(node):
+    if 'children' in node:
+        yield from node['children'].values()
+    else:
+        for key, value in node['entries'].items():
+            if value is not None and (key.startswith(('statusroot/', 'anchorroot/')) or key == 'anchor/groups'):
+                yield value
 
 
 def read_manifest(path: Path):
@@ -27,8 +84,6 @@ def read_manifest(path: Path):
 
 def _read_manifest(path: Path):
     # 旧JSONL首行可能非常大；只探测格式前缀，不对旧库额外整文件读。
-    import os
-
     from ..common.nofollow_fs import open_readonly_file_beneath
     try:
         fd = open_readonly_file_beneath(path.parent, (path.name,))
@@ -81,7 +136,7 @@ def _read_candidate_row(index, reference, *, staged=None, loaded=None):
 def iter_candidate_rows(path: Path, manifest):
     """只读完整位置流；正文逐条释放，不保留修改基线、历史行或已读节点集合。"""
     header = _validate_manifest(manifest)
-    index = ImmutableJsonIndex(path.parent, (path.name + ".records",))
+    index = ImmutableJsonIndex(path.parent, (candidate_records_directory(path).name,))
     root = header["root"]
     for position in range(header["count"]):
         identifier = index.get(root, "pos/" + str(position))
@@ -97,7 +152,7 @@ def iter_candidate_rows(path: Path, manifest):
 class PlannedIndex(ImmutableJsonIndex):
     """覆盖存储叶，复用通用HAMT路由；规划期间零文件写入。"""
     def __init__(self, path):
-        super().__init__(path.parent, (path.name + '.records',))
+        super().__init__(path.parent, (candidate_records_directory(path).name,))
         self.staged = {}
         self.loaded = set()
         self.obsolete = set()
@@ -178,12 +233,9 @@ class PlannedIndex(ImmutableJsonIndex):
                 continue
             reachable.add(name)
             node = json.loads(self.staged[name])
-            if 'children' in node:
-                pending.extend(node['children'].values())
-            else:
+            pending.extend(candidate_node_children(node))
+            if 'entries' in node:
                 for key, value in node['entries'].items():
-                    if (key.startswith(('statusroot/', 'anchorroot/')) or key == 'anchor/groups') and value is not None:
-                        pending.append(value)
                     if key.startswith('row/') and value:
                         blob = value['record']['ref']
                         protected.add(blob)
@@ -383,6 +435,8 @@ class IndexedBindings:
 
 
 def seal_cleanup(writes, cleanup):
+    # JSON 节点由可达性清扫回收，正文仍沿用发布后的立即清理义务。
+    cleanup = [name for name in cleanup if not candidate_node_name(name)]
     if not cleanup:
         return []
     raw = (json.dumps(cleanup, separators=(',', ':')) + '\n').encode()

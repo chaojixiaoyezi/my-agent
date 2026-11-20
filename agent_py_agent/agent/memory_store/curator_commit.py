@@ -32,7 +32,12 @@ from ..common.request_execution_ports import (
     gateway_transaction_writer,
 )
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
-from .candidate_ledger import CandidateRows, read_manifest
+from .candidate_ledger import (
+    CandidateRows,
+    candidate_records_directory,
+    prepare_candidate_node_shards,
+    read_manifest,
+)
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import (
     CandidateService,
@@ -378,6 +383,9 @@ class CuratorBatchCommitter:
     # sole durable decision used by restart recovery.
     # 函数用途: 按 Daily、Candidate、run audit、state 最后提交的顺序替换文件。
     def _apply_changes(self, changes: dict[Path, str]) -> None:
+        if self.candidates.path in changes:
+            with gateway_transaction_writer("_apply_changes"):
+                prepare_candidate_node_shards(candidate_records_directory(self.candidates.path), changes)
         ordered = [path for path in changes if path != self.state.path]
         ordered.sort(key=lambda item: (item == self.candidates.path, str(item.resolve(strict=False))))
         ordered.append(self.state.path)

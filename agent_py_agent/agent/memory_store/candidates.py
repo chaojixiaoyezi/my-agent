@@ -47,8 +47,13 @@ from .candidate_ledger import (
     CandidateRows,
     IndexedBindings,
     ObservationPositions,
+    candidate_node_children,
+    candidate_node_name,
+    candidate_record_path,
+    candidate_records_directory,
     iter_candidate_rows,
     manifest_text,
+    prepare_candidate_node_shards,
     read_manifest,
     seal_cleanup,
 )
@@ -2179,12 +2184,9 @@ def _candidate_node_family(index, root):
         reference = pending.pop()
         yield reference['ref']['ref']
         node = index._load(reference)
-        if 'children' in node:
-            pending.extend(node['children'].values())
-        else:
+        pending.extend(candidate_node_children(node))
+        if 'entries' in node:
             for key, value in node['entries'].items():
-                if (key.startswith(('statusroot/', 'anchorroot/')) or key == 'anchor/groups') and value is not None:
-                    pending.append(value)
                 if key.startswith('row/') and value:
                     yield value['record']['ref']
 
@@ -2226,6 +2228,8 @@ def _finish_candidate_cleanup(path, manifest, *, coordinator_io, admissions=()):
     for name in cleanup:
         if (type(name) is not str or '/' in name or '\\' in name or name.startswith('.')):
             raise CandidateStoreCorruptError('candidate cleanup reference is invalid')
+    # 旧清理义务也可能含 JSON 节点，继续即时清除正文，其余交给后台回收。
+    cleanup = [name for name in cleanup if not candidate_node_name(name)]
     # 旧节点直到新头发表后才回收：按零追加登记原大小，不能在峰值准入前预支删除收益。
     tracked = [path.parent / (path.name + '.records') / name for name in cleanup]
     if cleanup_parts is not None:
@@ -2252,6 +2256,8 @@ def _finish_candidate_cleanup(path, manifest, *, coordinator_io, admissions=()):
 
 def _write_incremental_candidates(path, candidates, *, admission, coordinator_io, cold_changes, cold_redaction):
     from ..common.nofollow_fs import write_bytes_atomic_beneath
+    from ..conversation.store_io import _touch_node
+
     original_stamp = _candidate_load_stamp(path)
     previous = read_manifest(path)
     if previous is not None:
@@ -2279,24 +2285,35 @@ def _write_incremental_candidates(path, candidates, *, admission, coordinator_io
         cleanup = sorted(family - set(writes))
     cleanup = seal_cleanup(writes, cleanup)
     text = manifest_text(root, len(rows), cleanup)
+    directory = candidate_records_directory(path)
+    targets = {name: candidate_record_path(directory, name) for name in writes}
     changes = [OwnerQuotaChange(path, len(text.encode())), *[
-        OwnerQuotaChange(path.parent / (path.name + '.records') / name, len(raw)) for name, raw in writes.items()], *[
+        OwnerQuotaChange(targets[name], len(raw)) for name, raw in writes.items()], *[
         OwnerQuotaChange(path.parent / 'candidates_archive' / name, len(content.encode()))
         for name, content in archives.items()]]
     admission.check(changes)
     _drop_candidate_load_cache(path)
     created = []
+    shards_prepared = False
     try:
         _write_cold_changes(path, archives, coordinator_io=coordinator_io)
         for name, raw in writes.items():
             def operation(name=name, raw=raw):
                 from ..common.nofollow_fs import read_bytes_beneath
+
+                nonlocal shards_prepared
                 ensure_private_dir(path.parent)
-                parts = (path.name + '.records', name)
+                if not shards_prepared:
+                    prepare_candidate_node_shards(directory, targets.values())
+                    shards_prepared = True
+                parts = targets[name].relative_to(path.parent).parts
                 existing = read_bytes_beneath(path.parent, parts, max_bytes=len(raw))
                 if existing is not None:
                     if existing != raw:
                         raise CandidateStoreCorruptError('candidate immutable node changed')
+                    # 同一摘要重新进入新根时刷新文件时钟，作废后台的旧不可达证明。
+                    if candidate_node_name(name):
+                        _touch_node(path.parent, parts, raw)
                     return False
                 write_bytes_atomic_beneath(path.parent, parts, raw)
                 return True
@@ -2332,6 +2349,7 @@ def candidate_incremental_plan(path, records):
         old = CandidateRows(path, previous)
         cleanup = sorted(set(_candidate_node_family(old.index, previous['root'])) - set(writes))
     cleanup = seal_cleanup(writes, cleanup)
-    changes = {path.parent / (path.name + '.records') / name: raw.decode() for name, raw in writes.items()}
+    directory = candidate_records_directory(path)
+    changes = {candidate_record_path(directory, name): raw.decode() for name, raw in writes.items()}
     changes[path] = manifest_text(root, len(rows), cleanup)
     return changes
