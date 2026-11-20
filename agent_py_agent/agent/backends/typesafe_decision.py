@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from ..common.fast_dataclass import fast_frozen
 from .base import BackendOptions
 from .decision_protocol import (
     MAX_DECISION_RESPONSE_BYTES,
@@ -31,7 +32,8 @@ from .typesafe_decision_wire import (
 
 # LLM: body 是按唯一 wire 编码器得到的最终线上字节，上界与许可摘要都以它为准；payload 仍是 send 实际提交的同一对象。
 # 类用途: 保存一次已校验、尚未联网的 Jev 请求：原请求、线上载荷与字节、端点、模型和绝对期限。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class PreparedDecisionCall:
     request: DecisionRequest
     payload: dict = field(repr=False, compare=False)

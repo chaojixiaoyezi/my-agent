@@ -14,6 +14,7 @@ import threading
 import zlib
 from dataclasses import dataclass
 
+from ..common.fast_dataclass import fast_frozen
 from ..concurrency.interrupt import wait_interruptibly
 from ..tooling.runtime_contracts import ToolChoice
 from .base import ProviderRequestOptions
@@ -52,7 +53,8 @@ _PROBE_PROMPT = (
 
 # LLM: status 是机器判定字段；fact_source 直接进压缩 checkpoint 的 media_fact_source；evidence 只作日志/展示。
 # 类用途: 一次视觉能力判定的结构化结果。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class VisionCapability:
     status: str
     fact_source: str

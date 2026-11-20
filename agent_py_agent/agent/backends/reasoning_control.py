@@ -13,10 +13,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from ..common.fast_dataclass import fast_frozen
+
 
 # LLM: 表项只声明用户标签、两个 effort 方言的候选顺序及原始预算；不持有模型配置、不发请求。
 # 类用途: 把一个用户档位的所有换算放在同一行，避免菜单、回执与发送各自写一套规则。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _ReasoningLevelRule:
     label: str
     effort: tuple[str, ...]
@@ -68,7 +71,8 @@ _EFFORT_GENERIC_LEVELS = ("low", "medium", "high", "max")
 
 # LLM: 只携带同次载荷的输出上限与冻结后端的声明；调用方已按原规则计算 max_tokens，不拥有第二份配置。
 # 类用途: 将预算上限与档位声明收在一起，给协议组包传参时不增加长参数列表。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ReasoningPayloadLimits:
     max_tokens: int
     levels: tuple[str, ...] = ()
@@ -76,7 +80,8 @@ class ReasoningPayloadLimits:
 
 # LLM: 只保存本次上限下的预算或未发送原因；出站与回执消费同一裁决，不持有配置、不发请求、不写状态。
 # 类用途: 区分合法预算与空预算区间，防止回执和出站各算一次而发生偏差。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _AnthropicBudgetDecision:
     budget_tokens: int
     reason_code: str = ""

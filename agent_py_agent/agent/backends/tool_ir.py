@@ -19,12 +19,14 @@ it must never define a second call/result authority.
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 
 
 # LLM: 媒体保留已验证的内容引用，input_ids沿原插话包用于Compact释放；只向provider投影正文与媒体。
 # 类用途: 保存原顺序的真实用户输入、附件及内部身份，不能由文本猜附件或输入消费。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class UserTurn:
     """同一运行 turn 期间追加的一条真实用户输入。
 
@@ -41,7 +43,8 @@ class UserTurn:
 
 # LLM: 摘要仍非权威；source由原构造点赋值，候选只能按结构化来源替换，不解析正文，provider不发送该字段。
 # 类用途: 保存模型可见的摘要与内部来源，供完整恢复保留媒体、用户插话和其它IR片段。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class CompactionSummary:
     """当前运行 turn 的非权威压缩摘要。
 
@@ -58,7 +61,8 @@ class CompactionSummary:
 
 # LLM: 宿主事件不冒充用户原话，media仅原输入授权投影；source不外发/赋权，Compact保留带图项及各来源最新快照。
 # 类用途: 按来源保存宿主事实和准确原附件；后台任务正文仍是宿主事件，不变成用户文字。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RuntimeFactsTurn:
     text: str
     source: str = ""
@@ -67,7 +71,8 @@ class RuntimeFactsTurn:
 
 # LLM: AssistantTurn 是原生工具历史的单一 assistant 事实；content_blocks 只保存后端白名单清洗后的有序块，不能直接作为用户正文。
 # 类用途: 保存一轮模型的可见文字、工具调用，以及下一轮厂商协议要求回放的内部内容块。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class AssistantTurn:
     """一轮 assistant 输出：可见文本 + 本轮发起的全部工具调用。
 

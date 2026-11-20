@@ -488,49 +488,9 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M08"
     },
-    "agent/backends/decision_protocol.py::DecisionPrivacySkip.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
     "agent/backends/decision_protocol.py::DecisionRequest.__init__::object_setattr": {
       "count": 3,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ModelNotConfiguredError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderContextWindowError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderModelCapabilityError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderQuotaExhaustedError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderRequestRejectedError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderRequestShapeInvalidError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderResponseError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderTimeoutError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/errors.py::ProviderTransientError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
+      "reason": "slots-incompatible: init=False: there is no generated __init__ to replace; custom __init__ defined in the class body"
     },
     "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPConnection.__init__::super0": {
       "count": 1,
@@ -712,10 +672,6 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M08"
     },
-    "agent/backends/tool_protocol_adapter.py::_protocol_evidence::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
     "agent/backends/transport_timing.py::TimedHTTPResponse._read_status::super0": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M06"
@@ -723,58 +679,6 @@
     "agent/backends/transport_timing.py::instrument_connection::type3": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallAdmissionClosedError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger._failed_locked::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger.activity::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger.finished::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger.first_token::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger.note_event::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger.provider_attempt::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::ModelCallLedger.timeout::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::_ModelCallAggregate.observe_new::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::_ModelCallAggregate.observe_update::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::_ModelCallAggregate.to_summary::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::_ModelCallTotals._observe_usage_delta::dyn_getattr": {
-      "count": 4,
-      "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/contracts/model_call_ledger.py::_ModelCallTotals.to_summary::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M07"
     },
     "agent/contracts/tool_approval.py::ToolApprovalDecision.__post_init__::object_setattr": {
       "count": 6,

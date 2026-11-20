@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 import uuid
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from operator import attrgetter
 from typing import Any
 
 from ..backends.transport_timing import PROGRESS_STATUS
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from .model_call_budget import (
     ModelCallBudgetError,
     ModelCallInputBudget,
@@ -40,7 +43,32 @@ TIMEOUT_WAIT_PHASES = frozenset({"", "handshake"})
 _TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
 # 没拿到供应商用量就结束的终态；已发起过 HTTP 尝试时，其本地估算输入单独记在 estimated.unfinished_*。
 _UNFINISHED_STATUSES = frozenset({"failed", "timed_out"})
-_USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens")
+# 账本列名来自固定的用量字段，加载时生成并绑定读法，避免每次累计和汇总重新拼接属性名。
+_USAGE_FIELD_KEYS = tuple(
+    (
+        name,
+        sys.intern(f"provider_{name}"),
+        sys.intern(f"provider_{name}_reported_call_count"),
+        sys.intern(f"estimated_{name}") if name in ("input_tokens", "output_tokens") else None,
+    )
+    for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens")
+)
+_PROVIDER_REPORTED_COUNT_READERS = tuple(
+    (f"{name}_reported_call_count", attrgetter(count_key))
+    for name, _, count_key, _ in _USAGE_FIELD_KEYS
+)
+_RECORD_TOKEN_READERS = tuple(
+    (name, attrgetter(name))
+    for name in ("accounted_input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens")
+)
+_PARTITIONED_USAGE_KEYS = (
+    *(provider_key for _, provider_key, _, _ in _USAGE_FIELD_KEYS),
+    *(estimated_key for _, _, _, estimated_key in _USAGE_FIELD_KEYS if estimated_key is not None),
+    "estimated_unfinished_input_tokens",
+    "estimated_unfinished_call_count",
+    *(count_key for _, _, count_key, _ in _USAGE_FIELD_KEYS),
+)
+_PARTITIONED_USAGE_READERS = tuple((name, attrgetter(name)) for name in _PARTITIONED_USAGE_KEYS)
 _PURPOSE_BUCKETS = ("main", "auxiliary", "decision", "probe:tool_capability")
 # 进行中的调用多久没有任何活动（开始、首字、流活动、HTTP 尝试）就算失联，单位秒（6 小时）。远超任何供应商首字/静默超时，
 #   只防“永远收不到结束或失败”的在途明细无限堆积：失联明细和已结束明细一样可以被裁，并计入 stale_open_calls_trimmed。
@@ -50,7 +78,8 @@ _LOGGER = logging.getLogger(__name__)
 MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE = "MODEL_CALL_ADMISSION_CLOSED"
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallLedgerOptions:
     max_records: int = 128
     # 在途调用无活动超过这么多秒算失联、可被裁剪（防泄漏），默认见 _OPEN_CALL_STALE_SECONDS。
@@ -59,12 +88,14 @@ class ModelCallLedgerOptions:
     record_sink: Callable[[ModelCallRecord], None] | None = None
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallLedgerContext:
     now: Callable[[], float] = time.monotonic
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallStartedParams:
     call_id: str
     backend: str
@@ -77,14 +108,16 @@ class ModelCallStartedParams:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallFirstTokenParams:
     call_id: str
     output_tokens_seen: int = 1
     cache_suspected: bool = False
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallActivityParams:
     call_id: str
     output_tokens_seen: int = 0
@@ -92,7 +125,8 @@ class ModelCallActivityParams:
 
 # LLM: provider_usage_fields=None 保留旧信封级来源；显式字段列表只声明已报告事实，不能用估算补供应商缺值。
 # 类用途: 描述一次成功收尾的用量和结束事实，允许输入与输出各自保留不同来源。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallFinishParams:
     call_id: str
     output_tokens: int = 0
@@ -110,7 +144,8 @@ class ModelCallFinishParams:
     provider_usage_fields: tuple[str, ...] | None = None
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallTimeoutParams:
     call_id: str
     timeout_seconds: float
@@ -125,14 +160,16 @@ class ModelCallTimeoutParams:
     timeout_wait_phase: str = ""
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallFailureParams:
     call_id: str
     error_type: str
     error_code: str = ""
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallProviderAttemptParams:
     call_id: str
     attempt_id: str
@@ -149,7 +186,8 @@ class ModelCallProviderAttemptParams:
 
 # LLM: 调用身份及首个终态固定；可追加传输事实，provider_usage_fields 缺失仍沿历史全有或全无来源解释。
 # 类用途: 保存一次物理模型调用的生命周期、token 来源和 HTTP 观察结果，供原累计账本更新。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelCallRecord:
     call_id: str
     backend: str
@@ -354,8 +392,8 @@ class _ModelCallTotals:
         current: ModelCallRecord,
     ) -> None:
         old = previous or ModelCallRecord("", "", "", 0)
-        for field_name in ("accounted_input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens"):
-            setattr(self, field_name, max(0, getattr(self, field_name) + getattr(current, field_name) - getattr(old, field_name)))
+        for field_name, read in _RECORD_TOKEN_READERS:
+            setattr(self, field_name, max(0, read(self) + read(current) - read(old)))
         old_reported = int(old.provider_usage_reported and old.status == "finished")
         new_reported = int(
             current.provider_usage_reported and current.status == "finished"
@@ -374,13 +412,13 @@ class _ModelCallTotals:
         )
         old_usage = _partitioned_usage(old)
         new_usage = _partitioned_usage(current)
-        for field_name in new_usage:
+        for field_name, read in _PARTITIONED_USAGE_READERS:
             setattr(
                 self,
                 field_name,
                 max(
                     0,
-                    int(getattr(self, field_name))
+                    int(read(self))
                     + int(new_usage[field_name])
                     - int(old_usage[field_name]),
                 ),
@@ -432,7 +470,7 @@ class _ModelCallTotals:
                         0, self.provider_cache_write_input_tokens
                     ),
                     "call_count": max(0, self.provider_usage_call_count),
-                    **{f"{name}_reported_call_count": max(0, getattr(self, f"provider_{name}_reported_call_count")) for name in _USAGE_FIELDS},
+                    **{key: max(0, read(self)) for key, read in _PROVIDER_REPORTED_COUNT_READERS},
                 },
                 "estimated": {
                     "input_tokens": max(0, self.estimated_input_tokens),
@@ -451,31 +489,23 @@ class _ModelCallTotals:
 #   没发出尝试的（准入忙、许可拒绝、配置错误）不计，因为请求根本没离开本机。
 # 函数用途: 将成功调用的每个 token 字段归到供应商或本地估算，并独立记录已报告字段的次数及未完成调用的估算输入。
 def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
-    empty = {
-        "provider_input_tokens": 0,
-        "provider_output_tokens": 0,
-        "provider_cache_read_input_tokens": 0,
-        "provider_cache_write_input_tokens": 0,
-        "estimated_input_tokens": 0,
-        "estimated_output_tokens": 0,
-        "estimated_unfinished_input_tokens": 0,
-        "estimated_unfinished_call_count": 0,
-        **{f"provider_{name}_reported_call_count": 0 for name in _USAGE_FIELDS},
-    }
+    empty = dict.fromkeys(_PARTITIONED_USAGE_KEYS, 0)
     if record.status in _UNFINISHED_STATUSES and record.provider_attempt_count > 0:
         empty["estimated_unfinished_input_tokens"] = max(0, int(record.input_tokens))
         empty["estimated_unfinished_call_count"] = 1
     if record.status != "finished":
         return empty
     explicit_fields = record.provider_usage_fields
-    reported = set(explicit_fields) if explicit_fields is not None else set(_USAGE_FIELDS if record.provider_usage_reported else ())
+    reported = set(explicit_fields) if explicit_fields is not None else None
+    legacy_reported = reported is None and bool(record.provider_usage_reported)
     values = (record.accounted_input_tokens, record.output_tokens, record.cached_input_tokens, record.cache_creation_input_tokens)
-    for name, value in zip(_USAGE_FIELDS, values, strict=True):
-        if name in reported:
-            empty[f"provider_{name}"] = max(0, int(value))
-        elif name in {"input_tokens", "output_tokens"}:
-            empty[f"estimated_{name}"] = max(0, int(value))
-        empty[f"provider_{name}_reported_call_count"] = int(explicit_fields is not None and name in reported)
+    for (name, provider_key, count_key, estimated_key), value in zip(_USAGE_FIELD_KEYS, values, strict=True):
+        is_reported = legacy_reported if reported is None else name in reported
+        if is_reported:
+            empty[provider_key] = max(0, int(value))
+        elif estimated_key is not None:
+            empty[estimated_key] = max(0, int(value))
+        empty[count_key] = int(explicit_fields is not None and is_reported)
     return empty
 
 
@@ -502,20 +532,20 @@ class _ModelCallAggregate(_ModelCallTotals):
     # LLM: 同一新 call_id 同步进入总账和唯一用途桶；两处更新均由外层 ledger 锁保护。
     # 函数用途: 登记一次新调用，并保留其用途分区计数。
     def observe_new(self, record: ModelCallRecord) -> None:
-        super().observe_new(record)
+        _ModelCallTotals.observe_new(self, record)
         self.purpose_totals[model_call_purpose(record)].observe_new(record)
 
     # LLM: started 后身份及用途不再改变；后续终态和迟到 HTTP 事实按同一新旧记录同步更新原分区。
     # 函数用途: 更新调用的总计和用途计数，不新建调用或改变统计代次。
     def observe_update(self, previous: ModelCallRecord, current: ModelCallRecord) -> None:
-        super().observe_update(previous, current)
+        _ModelCallTotals.observe_update(self, previous, current)
         self.purpose_totals[model_call_purpose(current)].observe_update(previous, current)
 
     # LLM: 分区只有统计字段，不含独立代次或嵌套分区；旧持久事件未声明分区时不能事后猜测用途。
     # 函数用途: 在原累计摘要中附加三类调用的用量和尝试统计。
     def to_summary(self) -> dict[str, object]:
         return {
-            **super().to_summary(),
+            **_ModelCallTotals.to_summary(self),
             "purpose_breakdown": {
                 "schema": "model_call_purpose_breakdown.v1",
                 **{name: totals.to_summary() for name, totals in self.purpose_totals.items()},
@@ -578,7 +608,7 @@ class ModelCallAdmissionClosedError(RuntimeError):
     # LLM: 只携带唯一准入表的结构化原因，供调用方识别停机；不改账本、不得从模型正文建立原因。
     # 函数用途: 带上关门原因建立停机错误，消息只含错误码，不含提示词或正文。
     def __init__(self, closure: ModelCallAdmissionClosure) -> None:
-        super().__init__(f"model call admission closed: {closure.error_code}")
+        RuntimeError.__init__(self, f"model call admission closed: {closure.error_code}")
         self.closure = closure
 
 
@@ -701,7 +731,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             if record.first_token_at is not None or record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
-            updated = replace(
+            updated = fast_replace(
                 record,
                 status="first_token",
                 first_token_at=now,
@@ -724,7 +754,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             if record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
-            updated = replace(
+            updated = fast_replace(
                 record,
                 last_activity_at=now,
                 output_tokens_seen=(
@@ -744,7 +774,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             if record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
-            updated = replace(
+            updated = fast_replace(
                 record,
                 status="finished",
                 finished_at=now,
@@ -799,7 +829,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             if record.status in _TERMINAL_STATUSES:
                 return record
             now = float(self.context.now())
-            updated = replace(
+            updated = fast_replace(
                 record,
                 status="timed_out",
                 timeout_at=now,
@@ -835,7 +865,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
     def _failed_locked(self, record: ModelCallRecord, params: ModelCallFailureParams) -> ModelCallRecord:
         """普通失败与停机批量结清共用写入，调用者持原账本锁。"""
         now = float(self.context.now())
-        updated = replace(
+        updated = fast_replace(
             record, status="failed", failure_at=now, last_activity_at=now,
             total_latency_seconds=max(0.0, now - record.started_at),
             error_type=params.error_type, error_code=params.error_code,
@@ -859,7 +889,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
     def note_event(self, call_id: str, event: str) -> ModelCallRecord:
         with self._lock:
             record = self._require_record(call_id)
-            updated = replace(record, events=_append_event(record.events, event))
+            updated = fast_replace(record, events=_append_event(record.events, event))
             self._replace(updated)
             return updated
 
@@ -873,7 +903,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         with self._lock:
             record = self._require_record(params.call_id)
             if params.status == PROGRESS_STATUS:
-                progressed = replace(record, provider_attempts=_with_transport(record.provider_attempts, params))
+                progressed = fast_replace(record, provider_attempts=_with_transport(record.provider_attempts, params))
                 self._replace(progressed)
                 return progressed
             attempts = [dict(item) for item in record.provider_attempts]
@@ -903,7 +933,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 attempts.append(payload)
             else:
                 attempts[index] = payload
-            updated = replace(
+            updated = fast_replace(
                 record,
                 last_activity_at=record.last_activity_at if record.status in _TERMINAL_STATUSES else now,
                 provider_attempt_count=len(attempts),

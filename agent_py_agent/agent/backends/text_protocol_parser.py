@@ -25,6 +25,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
+
 _TEXT_OPEN = "[TOOL_CALL]"
 _TEXT_CLOSE = "[/TOOL_CALL]"
 
@@ -39,7 +41,8 @@ MAX_RESPONSE_CHARS = 200_000  # 整个响应文本上限（terminal，整轮拒�
 MAX_TEXT_CALL_COUNT = 64  # 好块数量上限（G5：超限 → 整轮拒绝，不执行任何块）
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ScannedTextBlock:
     open_index: int
     close_index: int | None  # None = 未闭合块（永不执行）
@@ -48,7 +51,8 @@ class ScannedTextBlock:
     error: str | None  # 坏块原因；好块 None
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class TextBlockScan:
     blocks: tuple[ScannedTextBlock, ...]
     unclosed_count: int

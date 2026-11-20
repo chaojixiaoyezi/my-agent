@@ -9,10 +9,11 @@ assistant prose is never promoted into an executable call.
 """
 
 import hashlib
-import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from ..tooling.models import ToolRuntimeSnapshot
 from ..tooling.runtime_contracts import (
     ToolCall,
@@ -36,7 +37,8 @@ _NATIVE_PSEUDO_TOOL_MARKERS = (
 )
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolProtocolViolation:
     code: str
     detail: str
@@ -63,7 +65,8 @@ class ProviderToolCallRequest:
     tool_choice: ToolChoice | None = None
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ProviderToolCallResult:
     calls: tuple[ToolCall, ...] = ()
     violations: tuple[ToolProtocolViolation, ...] = ()
@@ -328,7 +331,7 @@ def _protocol_evidence(text: str) -> str:
         for marker in {_TEXT_OPEN.lower(), _TEXT_CLOSE.lower(), *_NATIVE_PSEUDO_TOOL_MARKERS}
         if marker in lowered
     )
-    return json.dumps(
+    return hot_json.dumps(
         {
             "chars": len(value),
             "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
@@ -336,7 +339,7 @@ def _protocol_evidence(text: str) -> str:
         },
         ensure_ascii=False,
         sort_keys=True,
-        separators=(",", ":"),
+        compact=True,
     )
 
 
