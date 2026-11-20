@@ -6586,6 +6586,13 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint='运行时返回受控错误；请先读取错误详情确认权威状态并评估下一步处理方案。',
     ),
+    'COMPACT_EMPTY_BUDGET_EXHAUSTED': ErrorContract(
+        code='COMPACT_EMPTY_BUDGET_EXHAUSTED',
+        category='compact',
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='摘要未提交，旧检查点及覆盖游标保留。请缩小待摘要的来源或检查模型服务后从原检查点继续。',
+    ),
     'COMPACT_EMPTY_SUMMARY': ErrorContract(
         code='COMPACT_EMPTY_SUMMARY',
         category='compact',

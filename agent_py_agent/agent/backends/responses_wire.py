@@ -17,10 +17,12 @@ from .responses_failure import failed_event_error
 class _CollectedResponse(dict):
     # LLM: 只由本模块完整/EOF归一化构造；索引与输出一一对应，冲突沿原malformed门拒绝工具。
     # 函数用途: 保存本次收集到的来源索引和结构化身份冲突事实，不发请求或写历史。
-    def __init__(self, response: dict, indices: tuple[int | None, ...], *, conflict: bool = False):
+    def __init__(self, response: dict, indices: tuple[int | None, ...] | None, *, conflict: bool = False,
+                 stream_end_frame: bool = True):
         dict.__init__(self, response)
         self.output_indices = indices
         self.output_identity_conflict = conflict
+        self.stream_end_frame = stream_end_frame
 
 
 # LLM: 同真实id/index更正一次；冲突身份不静默吞原调用，保全条目后交原malformed门，不按正文去重。
@@ -216,10 +218,11 @@ def collect_response(lines, on_chunk, on_thinking) -> dict:
         _notify(getattr(on_thinking, "complete", None), "".join(thinking))
     if not isinstance(terminal, dict):
         return _CollectedResponse({"status": "incomplete", "incomplete_details": {"reason": "stream_eof"},
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "".join(text)}]}]}, (None,))
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "".join(text)}]}]},
+                                  (None,), stream_end_frame=False)
     if not terminal.get("output") and done_items:
         return _done_output_response(terminal, done_items, conflict=done_conflict)
-    return terminal
+    return _CollectedResponse(terminal, None)
 
 
 # LLM: text保全体正文；collector私有来源属性只在此消费，非空terminal按原数组位置，缺失index不补猜，冲突工具仍原malformed。
@@ -230,8 +233,9 @@ def response_fields(obj: dict, model: str) -> dict:
         raise ProviderResponseError("Responses 未返回有效完成状态。")
     text, blocks, calls = [], [], []
     malformed = isinstance(obj, _CollectedResponse) and obj.output_identity_conflict
+    indices = obj.output_indices if isinstance(obj, _CollectedResponse) else None
     for position, item in enumerate(obj.get("output", [])):
-        output_index = obj.output_indices[position] if isinstance(obj, _CollectedResponse) else position
+        output_index = indices[position] if indices is not None else position
         kind = item.get("type")
         if kind == "message":
             visible = [response_text_block(item, part, output_index, content_index)

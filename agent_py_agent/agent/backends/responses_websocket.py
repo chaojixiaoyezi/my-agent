@@ -32,6 +32,7 @@ from .gateway_helpers import (
     _RETRYABLE_HTTP_DELAYS_SECONDS,
     _RETRYABLE_HTTP_STATUS_CODES,
     GatewayRequest,
+    _admit_provider_attempt,
     _dump_provider_rejection,
     _emit_provider_attempt,
     _emit_provider_queue,
@@ -227,6 +228,7 @@ def _sticky_request(request: GatewayRequest, state: SessionState | None) -> Gate
 # 函数用途: 为复用连接上的真实发送补齐请求尝试观察事件。
 def _reused_attempt(request: GatewayRequest) -> None:
     event = _attempt_event(request, 1)
+    _admit_provider_attempt(event)
     _emit_provider_attempt({**event, "status": "started"})
     _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
 
@@ -297,6 +299,7 @@ def _open_connection(request: GatewayRequest):
         lease = acquire_provider_request(request, _emit_provider_queue)
         try:
             event = _attempt_event(request, attempt + 1)
+            _admit_provider_attempt(event)
             _emit_provider_attempt({**event, "status": "started"})
             try:
                 connection = _connect_admitted(request, lease)

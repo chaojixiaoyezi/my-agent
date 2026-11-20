@@ -21,9 +21,9 @@ from .errors import (
 from .http import HttpBackend, bounded_output_tokens, provider_stream_scope, request_stream_lines
 from .provider_headers import endpoint_parts
 from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
+from .reply_diagnostics import provider_completion_facts
 from .request_budget import RequestTokenBudget
 from .response_completion import (
-    has_reasoning_content,
     incomplete_response_fields,
     response_preview,
     truncated_tool_names,
@@ -391,20 +391,25 @@ class OpenAICompatibleBackend(HttpBackend):
             tool_blocks=blocks,
         )
         incomplete = incomplete_response_fields(completion.stop_reason, incomplete_reason=completion.incomplete_reason)
+        facts = provider_completion_facts(
+            text, blocks, assistant_blocks, usage=usage, stop_reason=completion.stop_reason,
+            stream_end_frame=completion.saw_message_stop, incomplete=bool(incomplete),
+        )
         if incomplete:
             return ModelResponse(
                 text=text,
                 backend=self.name,
+                model_call_diagnostic=facts,
                 usage=usage,
                 tool_use_blocks=[],
                 assistant_content_blocks=without_tool_blocks(assistant_blocks),
                 truncated_tool_names=truncated_tool_names(completion.tool_names),
                 **incomplete,
             )
-        if not text and not blocks and not has_reasoning_content(assistant_blocks) and payload.get("tools"):
+        if facts["response_shape"] == "empty_final" and payload.get("tools"):
             raise ProviderResponseError(
                 "OpenAI-compatible 流式响应没有文本或工具调用",
-                error_code="MODEL_EMPTY_RESPONSE",
+                error_code="MODEL_EMPTY_RESPONSE", details=facts,
             )
         return ModelResponse(
             text=text,
@@ -414,6 +419,7 @@ class OpenAICompatibleBackend(HttpBackend):
             assistant_content_blocks=assistant_blocks,
             truncated=completion.truncated,
             stop_reason=completion.stop_reason,
+            model_call_diagnostic=facts,
         )
 
 
@@ -441,35 +447,34 @@ def _openai_non_stream_response(
         ) from exc
     finish_reason = str(choice.get("finish_reason") or "")
     incomplete = incomplete_response_fields(finish_reason, incomplete_reason="invalid_tool_arguments" if malformed else "")
+    usage = usage_dict(obj.get("usage"))
+    assistant_blocks = _openai_assistant_content_blocks(reasoning=reasoning, text=text, tool_blocks=blocks)
+    facts = provider_completion_facts(
+        text, blocks, assistant_blocks, usage=usage, stop_reason=finish_reason, incomplete=bool(incomplete),
+    )
     if incomplete:
         return ModelResponse(
             text=text,
             backend=backend_name,
-            usage=usage_dict(obj.get("usage")),
+            usage=usage,
             tool_use_blocks=[],
-            assistant_content_blocks=_openai_assistant_content_blocks(
-                reasoning=reasoning,
-                text=text,
-                tool_blocks=[],
-            ),
+            assistant_content_blocks=without_tool_blocks(assistant_blocks),
+            model_call_diagnostic=facts,
             truncated_tool_names=truncated_tool_names(dropped_names),
             **incomplete,
         )
-    if not text and not blocks and not (reasoning or "").strip() and tools_requested:
+    if facts["response_shape"] == "empty_final" and tools_requested:
         raise ProviderResponseError(
-            f"OpenAI-compatible 响应没有文本或工具调用: {response_preview(obj)}",
-            error_code="MODEL_EMPTY_RESPONSE",
+            "OpenAI-compatible 响应没有文本或工具调用",
+            error_code="MODEL_EMPTY_RESPONSE", details=facts,
         )
     return ModelResponse(
         text=text,
         backend=backend_name,
-        usage=usage_dict(obj.get("usage")),
+        usage=usage,
         tool_use_blocks=blocks,
-        assistant_content_blocks=_openai_assistant_content_blocks(
-            reasoning=reasoning,
-            text=text,
-            tool_blocks=blocks,
-        ),
+        assistant_content_blocks=assistant_blocks,
+        model_call_diagnostic=facts,
         truncated=malformed,
         stop_reason=finish_reason,
     )
