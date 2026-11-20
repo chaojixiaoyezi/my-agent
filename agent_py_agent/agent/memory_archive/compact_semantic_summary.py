@@ -284,10 +284,8 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     return _accept_live_summary(request, summary)
 
 
-# LLM: 空正文或形状无效（模型无视"不要调用工具"、返回供应商私有工具协议、只说"现在写报告"）都退回 typed IR 机械摘要，
-#   不再烧一次相同请求、也不打断主代理轮；真正异常仍由调用方抛给 Compact 熔断器，checkpoint/CAS 失败语义不变。
-# 函数用途: 把模型给的 live 摘要收尾：合格就加固定前缀并裁到上限，不合格就机械兜底。
 def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -> str:
+    """只接收通过六段校验的正文，兼容无 agent 的机械投影。"""
     limit = max(1_000, int(request.max_output_chars or _DEFAULT_MAX_INPUT_CHARS))
     fallback_limit = min(limit, _LIVE_FALLBACK_MAX_OUTPUT_CHARS)
     if not summary:
@@ -296,11 +294,20 @@ def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -
 
     # 模型复述的宿主地标标题只是普通引文：行首标题（与宿主解析同一边界）加引用前缀，正式地标段只由宿主生成。
     summary = summary.replace(f"\n{LANDMARK_HEADING}", f"\n> {LANDMARK_HEADING}")
-    if not _valid_live_summary(summary):
-        return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_invalid_summary_shape")
-    # 先按六段拟合再复验：整体头裁会把 failures/unresolved/next_step 整段丢掉；拟合不了就走受控机械兜底，不收半截交接。
-    fitted = _fit_live_sections(summary, limit)
-    if fitted is None or not _valid_live_summary(fitted):
+    starts, code = _live_section_offsets(summary)
+    if code:
+        if request.agent is not None:
+            from ..conversation.compact_request_budget import compact_handoff_unavailable
+
+            raise compact_handoff_unavailable(code)
+        reason = (
+            "provider_invalid_summary_shape"
+            if code in {"HANDOFF_HEADER", "HANDOFF_TOOL_PROTOCOL", "HANDOFF_MISSING_SECTION"}
+            else "provider_summary_section_fit_failed"
+        )
+        return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason=reason)
+    fitted = _fit_live_sections(summary, limit, starts)
+    if fitted is None or (fitted != summary and not validate_handoff_candidate(fitted)[0]):
         return _mechanical_live_tool_history_summary(
             request, limit=fallback_limit, reason="provider_summary_section_fit_failed",
         )
@@ -311,28 +318,45 @@ def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -
     )
 
 
-# LLM: 只在超长时拟合；按行首的 v1 规范标签切段（每个标签恰好一次、顺序不变），先缩 completed、再缩 current_progress，
-#   两者到底仍超才依次缩 unresolved/failures/user_constraints/next_step。每段保留标签和最少正文，裁剪处写明字数；
-#   标签缺失、重复、乱序、某段标签后没有正文或缩到底仍放不下时返回 None，由调用方走机械兜底。不改 v1 顺序，不新增参数。
-# 函数用途: 把超长的 live 交接摘要按段压进字符上限，保证六个字段都还在。
-def _fit_live_sections(text: str, limit: int) -> str | None:
-    if len(text) <= limit:
-        return text
+def validate_handoff_candidate(text: str) -> tuple[bool, str]:
+    """校验新交接候选的 v1 结构，保留旧检查点读取语义。"""
+    _, code = _live_section_offsets(text.strip())
+    return not code, code
+
+
+def _live_section_offsets(text: str) -> tuple[list[int], str]:
+    if not text.startswith(_LIVE_HANDOFF_PREFIX):
+        return [], "HANDOFF_HEADER"
+    lowered = text.lower()
+    if any(marker in lowered for marker in _LIVE_TOOL_PROTOCOL_MARKERS):
+        return [], "HANDOFF_TOOL_PROTOCOL"
     starts: list[int] = []
     for section in _LIVE_HANDOFF_SECTIONS:
         pattern = re.compile(rf"^[ \t]*{re.escape(section)}", re.IGNORECASE | re.MULTILINE)
-        found = [match.start() for match in pattern.finditer(text)]
-        if len(found) != 1 or (starts and found[0] <= starts[-1]):
-            return None
-        starts.append(found[0])
+        matches = pattern.finditer(text)
+        first = next(matches, None)
+        if first is None:
+            return [], "HANDOFF_INLINE_SECTION" if section in lowered else "HANDOFF_MISSING_SECTION"
+        if next(matches, None) is not None:
+            return [], "HANDOFF_DUPLICATE_SECTION"
+        if starts and first.start() <= starts[-1]:
+            return [], "HANDOFF_SECTION_ORDER"
+        starts.append(first.start())
+    for section, start, end in zip(_LIVE_HANDOFF_SECTIONS, starts, [*starts[1:], len(text)]):
+        if not text[start:end].lstrip()[len(section):].strip():
+            return [], "HANDOFF_EMPTY_SECTION"
+    return starts, ""
+
+
+def _fit_live_sections(text: str, limit: int, starts: list[int]) -> str | None:
+    """按已验证的六段边界裁剪超长交接，保留各段标签和正文。"""
+    if len(text) <= limit:
+        return text
     preamble = text[:starts[0]]
     bodies = {
         section: text[start:end]
         for section, start, end in zip(_LIVE_HANDOFF_SECTIONS, starts, [*starts[1:], len(text)])
     }
-    # 空白、换行或单独的标签不是事实（none 与普通列表照常有效）：有空段就交给调用方走机械兜底。
-    if any(not bodies[section].strip()[len(section):].strip() for section in _LIVE_HANDOFF_SECTIONS):
-        return None
     excess = len(text) - limit
     floor = 160
     for section in ("completed:", "current_progress:", "unresolved:", "failures:", "user_constraints:", "next_step:"):
@@ -486,26 +510,6 @@ def _mechanical_live_tool_history_summary(
 # 函数用途: 返回机械兜底与完整回退要投影的 IR 序列。
 def _fallback_history(request: LiveToolHistorySummaryRequest) -> list[Any]:
     return list(request.history if request.fallback_history is None else request.fallback_history)
-
-
-# LLM: Live Compact accepts one plain-text handoff schema only. Rejecting provider tool syntax and
-# missing sections is a context-integrity check, not task completion authority; invalid text falls
-# back to the typed IR projection and is never executed or replayed as an assistant action.
-# 函数用途: 校验运行中 Compact 的模型摘要确实是完整交接，而不是伪工具调用、半句话或空泛的“下一步”。
-def _valid_live_summary(summary: str) -> bool:
-    text = str(summary or "").strip()
-    if not text.startswith(_LIVE_HANDOFF_PREFIX):
-        return False
-    lowered = text.lower()
-    if any(marker in lowered for marker in _LIVE_TOOL_PROTOCOL_MARKERS):
-        return False
-    cursor = len(_LIVE_HANDOFF_PREFIX)
-    for section in _LIVE_HANDOFF_SECTIONS:
-        position = lowered.find(section, cursor)
-        if position < 0:
-            return False
-        cursor = position + len(section)
-    return len(text) >= 160
 
 
 # LLM: Compact fallback fields are single-line and length bounded before global head/tail clipping.
@@ -943,6 +947,7 @@ def _resolve_generate_with_messages(
                 interrupt_check=request.interrupt_check,
                 preserve_complete_fallback=request.preserve_complete_fallback,
                 calibration=request.calibration,
+                handoff_validator=validate_handoff_candidate,
             )
         else:
             kwargs: dict[str, object] = {"messages": compact_messages}
@@ -1044,6 +1049,7 @@ __all__ = [
     "SemanticSummaryRequest",
     "SemanticSummaryStats",
     "is_live_semantic_handoff",
+    "validate_handoff_candidate",
     "live_operation_facts_entry",
     "semantic_summary_config",
     "summarize_carried_tool_context",
