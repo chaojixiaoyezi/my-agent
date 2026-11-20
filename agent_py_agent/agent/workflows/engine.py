@@ -79,6 +79,13 @@ from .script_runner import (
     load_script,
     parse_script_output,
 )
+from .subworkflow_steps import (
+    apply_child_result,
+    child_is_settled,
+    has_subworkflow_obligation,
+    mark_child_missing,
+    read_obligated_child,
+)
 
 SUCCESS = ('succeeded', 'escalated_recovered', 'skipped')
 
@@ -97,7 +104,17 @@ def _agent_task_obligation(step):
 # 函数用途: 判断恢复是否必须先交回原 Agent 任务完成链。
 def _requires_native_agent_resume(record):
     return record.status == 'waiting_for_agent' or any(
-        _agent_task_obligation(step) and not step.escalation_result.get('completion_ref') for step in record.steps)
+        has_subworkflow_obligation(step)
+        or (_agent_task_obligation(step) and not step.escalation_result.get('completion_ref'))
+        for step in record.steps)
+
+
+def _subworkflow_publication_pending(record):
+    # 独立步骤先于运行终态发表，重启后仍须完成原运行而非再发子任务。
+    return record.status == 'waiting_for_agent' and any(
+        step.step_id == record.current_step_id and step.mode == 'subworkflow'
+        and step.escalation_result.get('subworkflow_receipt') and step.status in ('succeeded', 'failed')
+        for step in record.steps)
 
 
 # LLM: 只认原run终态发表失败的结构化暂停与canonical步骤证据；run级needs_repair/unknown不单独否决，不授重提或执行许可。
@@ -469,7 +486,10 @@ class _WorkflowRunLifecycle:
             if _requires_native_agent_resume(record):
                 if from_step_id is not None or patched_step_output is not None or updated_data_sources is not None:
                     raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
-                result = self._resume_agent(record, definition)
+                if any(has_subworkflow_obligation(step) for step in record.steps) or _subworkflow_publication_pending(record):
+                    result = self._resume_subworkflows(record, definition)
+                else:
+                    result = self._resume_agent(record, definition)
                 return self.store.complete_control(workflow_run_id, operation_key) if operation_key else result
             ids = [s.step_id for s in record.steps]
             if from_step_id is not None and from_step_id not in ids:
@@ -607,6 +627,62 @@ class _WorkflowRunLifecycle:
             return self.run_authorizer(record, phase)
         return None
 
+    def _resume_subworkflows(self, record, definition):
+        """在原运行锁下对账已派发的子流程，等它们结清后才恢复后缀。"""
+        workflow_run_id = record.workflow_run_id
+        for step, spec in zip(record.steps, definition['steps'], strict=True):
+            if not has_subworkflow_obligation(step):
+                continue
+            before = payload(step)
+            child_id, child = read_obligated_child(self, record, step, spec)
+            if child is None:
+                mark_child_missing(step, child_id)
+            else:
+                self._authorize_run(child, 'preflight')
+                if child_is_settled(child) or child.status in ('failed', 'skipped', 'cancelled'):
+                    apply_child_result(step, child, spec)
+                    if before != payload(step):
+                        step.ended_at = time.time()
+                else:
+                    step.status, step.needs_repair = 'waiting_for_agent', False
+                    step.error_code = step.error_message = ''
+                    step.escalation_result['subworkflow_receipt']['status'] = child.status
+            if before != payload(step):
+                record = self.store.save_step_result(workflow_run_id, step, resuming=True)
+                self._step_progress(record, step, {'seq': record.progress_seq})
+
+        failed = next((step for step in record.steps if step.status == 'failed'), None)
+        if failed is not None:
+            outcome = 'unknown' if any(has_subworkflow_obligation(step) for step in record.steps) else 'failed'
+            if (record.status == 'failed' and record.current_step_id == failed.step_id
+                    and record.phase == 'terminal' and record.effect_outcome == outcome):
+                return record
+            record = replace_run_record(record, dict(status='failed', current_step_id=failed.step_id,
+                failed_step_id=failed.step_id, needs_repair=True, ended_at=time.time()))
+            record = self._finalize_record(record, definition)
+            execution_receipt(record, phase='terminal', effect_outcome=outcome)
+            self.store.save_run(record, resuming=True)
+            return record
+        waiting = next((step for step in record.steps if step.status == 'waiting_for_agent'
+                        or (_agent_task_obligation(step) and not step.escalation_result.get('completion_ref'))), None)
+        if waiting is not None:
+            if (record.status != 'waiting_for_agent' or record.current_step_id != waiting.step_id
+                    or record.phase != 'waiting_for_agent'):
+                record = replace_run_record(record, dict(status='waiting_for_agent', current_step_id=waiting.step_id,
+                    needs_repair=False, failed_step_id='', ended_at=0, breakpoint=None))
+                execution_receipt(record, phase='waiting_for_agent', effect_outcome='running')
+                self.store.save_run(record, resuming=True)
+            return record
+
+        start = next((i for i, step in enumerate(record.steps) if step.status not in SUCCESS), len(record.steps))
+        blocked = self._resume_script_gate(record, definition, start, False)
+        if blocked is not None:
+            return blocked
+        record = replace_run_record(record, dict(status='running', needs_repair=False, failed_step_id='',
+            ended_at=0, breakpoint=None))
+        self.store.save_run(record, resuming=True)
+        return self._drive(record, definition, start)
+
     # LLM: 仅显式恢复在原执行锁和授权门后发表；每次写入都携带恢复意图，普通晚到写仍受终态守卫拒绝。
     # 函数用途: 找回原任务或继续已证明未开始的原提交，不重放成功前缀或在恢复这一拍执行后缀。
     def _resume_agent(self, record, definition):
@@ -709,7 +785,8 @@ class _WorkflowRunLifecycle:
                                                       expected_revision=expected_revision)
             if replay:
                 return []
-            if record.status in ('succeeded', 'failed', 'skipped', 'cancelled') and _concurrency_settled(record):
+            if (record.status in ('succeeded', 'failed', 'skipped', 'cancelled') and _concurrency_settled(record)
+                    and not any(has_subworkflow_obligation(step) for step in record.steps)):
                 # 已结清终态只确认本次控制，不经过 cancelling，也不覆盖原成功或失败。
                 self.store.complete_control(workflow_run_id, operation_key)
                 return []
@@ -732,11 +809,62 @@ class _WorkflowRunLifecycle:
                     outstanding.append(step.escalation_result.get('task_id') or step.escalation_result.get('attempt_id') or step.step_id)
                 if previous != step.escalation_result:
                     record = self.store.save_step_result(workflow_run_id, step)
+            if any(has_subworkflow_obligation(step) for step in record.steps):
+                specs = self.store.load_workflow_snapshot(workflow_run_id)['steps']
+                for step, spec in zip(record.steps, specs, strict=True):
+                    if not has_subworkflow_obligation(step):
+                        continue
+                    previous = payload(step)
+                    unresolved = self._cancel_subworkflow(record, step, spec)
+                    if unresolved:
+                        outstanding.append(unresolved)
+                    if previous != payload(step):
+                        record = self.store.save_step_result(workflow_run_id, step)
             record.status = 'cancelling' if outstanding else 'cancelled'
             self.store.save_run(record)
             if not outstanding:
                 self.store.complete_control(workflow_run_id, operation_key)
             return outstanding
+
+    def _cancel_subworkflow(self, record, step, spec):
+        """沿子运行原控制账反复核对，直到原子运行终态可见。"""
+        from .run_store import _RunBusy
+
+        child_id, child = read_obligated_child(self, record, step, spec)
+        if child is None:
+            mark_child_missing(step, child_id)
+            return child_id or step.step_id
+        if child_is_settled(child):
+            self._authorize_run(child, 'cancel')
+        else:
+            key = f'subworkflow-cancel:{child_id}'
+            try:
+                data = self.store._read(child_id, 'run.json', concurrent_publication=True)
+                previous = data.get('control_operations', {}).get(key)
+                revision = previous['expected_revision'] if previous else data['revision']
+                if self.cancel_workflow_run(child_id, expected_revision=revision, operation_key=key):
+                    return child_id
+            except FileNotFoundError:
+                _, child = read_obligated_child(self, record, step, spec)
+                if child is not None:
+                    raise
+                mark_child_missing(step, child_id)
+                return child_id
+            except _RunBusy:
+                return child_id
+            except ValueError as error:
+                if str(error) == 'WORKFLOW_RUN_REVISION_CONFLICT':
+                    return child_id
+                raise
+            _, child = read_obligated_child(self, record, step, spec)
+            if child is None:
+                mark_child_missing(step, child_id)
+                return child_id
+            if not child_is_settled(child):
+                return child_id
+        apply_child_result(step, child, spec)
+        step.ended_at = time.time()
+        return ''
 
     # LLM: 项目覆盖走原只读Store，旧meta只在正式Store缺失时读；正文摘要不授执行权。
     # 函数用途: 统一读取引擎当前作用域的脚本代码与元数据。

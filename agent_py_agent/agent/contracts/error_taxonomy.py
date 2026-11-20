@@ -5335,6 +5335,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
         recovery_hint="审核要求修改。请处理该候选的评审意见，再对修订版本提交独立审核。",
     ),
+    "WORKFLOW_SUBWORKFLOW_CHILD_MISSING": ErrorContract(
+        code="WORKFLOW_SUBWORKFLOW_CHILD_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原子工作流编号或运行记录缺失，执行结果未知。核对原步骤收据并恢复原子运行记录，禁止重新派发。",
+    ),
     "WORKFLOW_CONDITION_SUBJECT_TRUNCATED": ErrorContract(
         code="WORKFLOW_CONDITION_SUBJECT_TRUNCATED", category="contract", retryable=False,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
