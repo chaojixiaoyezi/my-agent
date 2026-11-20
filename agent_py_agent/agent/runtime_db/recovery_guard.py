@@ -10,6 +10,7 @@ from contextlib import AbstractContextManager as ContextManager
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Literal
 
 from ..common import json_io
 
@@ -51,6 +52,40 @@ class RuntimeDatabaseRecoveryRequired(RuntimeDatabaseDeferred):
     error_code = "RUNTIME_DB_RECOVERY_REQUIRED"
 
 
+def _runtime_sqlite_error_details(error: BaseException) -> dict[str, object]:
+    from ..io.readonly_sqlite import ProjectionReadUnavailableError
+    from ..io.sqlite_connection import sqlite_error_details
+
+    if isinstance(error, ProjectionReadUnavailableError) and isinstance(error.__cause__, sqlite3.Error):
+        error = error.__cause__
+    return sqlite_error_details(error)
+
+
+def _sqlite_operational_classification(
+    details: object,
+) -> Literal["integrity_review", "bounded_backoff", "uncertain"]:
+    if isinstance(details, dict):
+        code = details.get("sqlite_primary_code")
+        cleanup = details.get("cleanup_error")
+        secondary = cleanup.get("sqlite_primary_code") if isinstance(cleanup, dict) else None
+        if code in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB) or secondary in (
+            sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB,
+        ):
+            return "integrity_review"
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return "bounded_backoff"
+    return "uncertain"
+
+
+def classify_sqlite_operational_error(
+    exc: BaseException,
+) -> Literal["integrity_review", "bounded_backoff", "uncertain"]:
+    """只根据 SQLite 主结果码分类，恢复报告的 status 由原状态机决定。"""
+    if isinstance(exc, RuntimeDatabaseDeferred) and hasattr(exc, "runtime_db_recovery"):
+        return _sqlite_operational_classification(exc.runtime_db_recovery.get("error"))
+    return _sqlite_operational_classification(_runtime_sqlite_error_details(exc))
+
+
 def runtime_db_recovery_error(report: dict) -> RuntimeDatabaseDeferred:
     """按恢复报告状态构造可重试延迟异常或不可自动恢复的结构性异常。"""
     status = str(report.get("status") or "")
@@ -64,6 +99,7 @@ def runtime_db_recovery_error(report: dict) -> RuntimeDatabaseDeferred:
     reason = str(report.get("reason") or err_type or status or "requires_recovery")
     error = exc_cls(reason)
     error.runtime_db_recovery = report
+    error.sqlite_operational_classification = classify_sqlite_operational_error(error)
     return error
 
 

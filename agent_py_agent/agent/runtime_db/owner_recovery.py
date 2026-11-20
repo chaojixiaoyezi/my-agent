@@ -9,18 +9,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .child_recovery import CHILD_RECOVERY_TARGET, ROOT_RECOVERY_TARGET
+from .operation_reconciliation_authority import (
+    _ISOLATED_TASK_SQL,
+    _PENDING_OPERATION_SQL,
+    pending_operation_revision,
+)
 from .operations import (
     ATTEMPT_EFFECT_DISPOSITIONS,
     ATTEMPT_STATUS_UNKNOWN,
     OP_CLAIMED,
     OP_EXECUTING,
+    OP_FAILED,
     OP_UNKNOWN,
 )
-from .repository import _recover_unknown_attempt_conn
+from .repository import RuntimeRepository, _recover_unknown_attempt_conn
+from .schema import runtime_db_identity, runtime_db_path
 
 OWNER_RECOVERY_SOURCE = "owner_history"
 OWNER_RECOVERY_BATCH_TARGET = "owner_unknown_batch"
@@ -69,6 +79,104 @@ def owner_unknown_attempts(repository: Any, owner_id: str) -> list[OwnerRecovery
         return []
     with repository._runtime_connection() as conn:
         return _owner_targets_conn(conn, normalized)
+
+
+def list_pending_verification(
+    owner_home: Path, *, source_session: str = "", scheduler_run: str = "",
+    thread_id: str = "", task_id: str = "", operation_id: str = "",
+    cursor: str = "", limit: int = 50, owner_id: str = "",
+) -> tuple[list[dict], str]:
+    """按原 rowid 向前读取一页。空 thread 查询隔离执行，指定 thread 则精确匹配。"""
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("pending verification limit must be between 1 and 50")
+    path = runtime_db_path(owner_home)
+    identity = runtime_db_identity(path)
+    if identity is None and not cursor:
+        return [], ""
+    filters = (owner_id, source_session, scheduler_run, thread_id, task_id, operation_id)
+    if any(not isinstance(value, str) for value in (*filters, cursor)):
+        raise ValueError("pending verification filters and cursor must be strings")
+    scope = hashlib.sha256(json.dumps([str(path.absolute()), identity, filters]).encode()).hexdigest()
+    after = _pending_page_start(cursor, scope)
+    repo = RuntimeRepository(path, read_only=True)
+    with repo._runtime_connection() as conn:
+        rows = _pending_operation_page(conn, filters, after, limit + 1)
+    page = rows[:limit]
+    next_cursor = f"{scope}-{page[-1]['_rowid']}" if len(rows) > limit else ""
+    return [_pending_operation_projection(row) for row in page], next_cursor
+
+
+def _pending_page_start(cursor: str, scope: str) -> int:
+    if not cursor:
+        return 0
+    prefix, sep, position = cursor.partition("-")
+    if (not sep or prefix != scope or not position.isascii() or not position.isdecimal()
+            or len(position) > len(str(sys.maxsize)) or not 0 < int(position) <= sys.maxsize):
+        raise ValueError("pending verification cursor is invalid for this query; request the first page again")
+    return int(position)
+
+
+# 两个状态分别做等值与 rowid 范围扫描，外层只合并最多两页。
+_PENDING_QUERY_FROM = """
+    SELECT o.rowid AS _rowid, o.operation_id, o.operation_type, o.status, o.handler_started_at,
+           o.attempt_id, o.attempt_generation, o.tool_operation_generation,
+           o.settled_at, o.updated_at, o.outcome_json, ar.current_attempt_id,
+           ar.current_attempt_generation, ar.workspace_epoch, ar.run_id, t.task_id, t.thread_id,
+           tr.task_run_id,
+           CASE WHEN json_valid(tr.metadata_json)
+                THEN json_extract(tr.metadata_json, '$.source_session_id') END AS source_session,
+           CASE WHEN json_valid(tr.metadata_json)
+                THEN json_extract(tr.metadata_json, '$.scheduler_run_id') END AS scheduler_run
+    FROM tool_operations o INDEXED BY idx_tool_operations_status
+    JOIN agent_runs ar ON ar.agent_run_id = o.agent_run_id
+    JOIN task_runs tr ON tr.task_run_id = ar.task_run_id
+    JOIN tasks t ON t.task_id = tr.task_id
+    WHERE
+"""
+
+
+def _pending_operation_page(conn, filters, after: int, size: int):
+    owner, source, scheduler, thread, task, operation = filters
+    where = [_PENDING_OPERATION_SQL]
+    args = []
+    if not thread:
+        where.append(_ISOLATED_TASK_SQL)
+    for column, value in (("t.owner_id", owner), ("source_session", source),
+                          ("scheduler_run", scheduler), ("t.thread_id", thread),
+                          ("t.task_id", task), ("o.operation_id", operation)):
+        if value:
+            where.append(f"{column} = ?")
+            args.append(value)
+    predicates = " AND ".join(where)
+    if operation:
+        # 精确编号使用现有主键，避免为确认一条记录遍历其它待核状态。
+        sql = _PENDING_QUERY_FROM.replace(" INDEXED BY idx_tool_operations_status", "") + predicates + " LIMIT ?"
+        with closing(conn.execute(sql, (*args, size))) as cursor:
+            return cursor.fetchall()
+    bucket = _PENDING_QUERY_FROM + "o.status = ? AND o.rowid > ? AND " + predicates + " ORDER BY o.rowid LIMIT ?"
+    sql = f"SELECT * FROM ({bucket}) UNION ALL SELECT * FROM ({bucket}) ORDER BY _rowid LIMIT ?"
+    with closing(conn.execute(sql, (OP_UNKNOWN, after, *args, size, OP_FAILED, after, *args, size, size))) as cursor:
+        return cursor.fetchall()
+
+
+def _pending_operation_projection(row) -> dict:
+    keys = ("operation_id", "operation_type", "handler_started_at", "attempt_id", "run_id",
+            "task_run_id", "task_id", "thread_id", "source_session", "scheduler_run", "tool_operation_generation")
+    result = {key: row[key] for key in keys}
+    for key in ("source_session", "scheduler_run"):
+        if not isinstance(result[key], str):
+            result[key] = ""
+    result["status"] = OP_UNKNOWN
+    result["revision"] = pending_operation_revision(row)
+    if row["status"] == OP_FAILED:
+        result["legacy_normalized"] = True
+    return result
+
+
+def owner_operation_confirmation(owner_id: str, disposition: str, revision: str) -> str:
+    """确认只对同 owner、处置和原操作版本有效。"""
+    facts = json.dumps(["owner-pending-verification.v1", owner_id, disposition, revision]).encode()
+    return hashlib.sha256(facts).hexdigest()[:_CONFIRMATION_CODE_LENGTH_CHARS]
 
 
 # LLM: 摘要绑定 owner、处置以及排序后的 target_id+attempt_id 集合；角色、文案和时间不参与机器授权。
@@ -285,6 +393,8 @@ __all__ = [
     "OWNER_RECOVERY_SOURCE",
     "OwnerRecoveryRequest",
     "OwnerRecoveryTarget",
+    "list_pending_verification",
+    "owner_operation_confirmation",
     "owner_recovery_confirmation",
     "owner_unknown_attempts",
     "recover_owner_unknown_attempts",

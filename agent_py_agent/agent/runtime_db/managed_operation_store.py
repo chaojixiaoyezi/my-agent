@@ -28,6 +28,7 @@ ManagedOperationStore 把同一套 claim/finish/reopen 契约落到 owner runtim
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -38,6 +39,11 @@ from pathlib import Path
 from typing import Any
 
 from ..common.strict_json import load_strict_json
+from ..contracts.effect_settlement import (
+    SETTLEMENT_APPLIED,
+    SETTLEMENT_NOT_STARTED,
+    operation_status_for_settlement,
+)
 from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_scope import SQLiteCommitDurability, sqlite_commit_durability
 from ..local_storage.tool_operations import (
@@ -61,7 +67,13 @@ from ..local_storage.tool_operations import (
     merge_tool_operation_dispatch,
     tool_operation_host_id,
 )
+from .operation_reconciliation_authority import (
+    _ISOLATED_TASK_SQL,
+    _PENDING_OPERATION_SQL,
+    pending_operation_revision,
+)
 from .operations import (
+    ATTEMPT_EFFECT_DISPOSITIONS,
     OP_CANCELLED,
     OP_CLAIMED,
     OP_EXECUTING,
@@ -799,6 +811,77 @@ class ManagedOperationStore:
         return records
 
 
+
+def settle_pending_verification(
+    repository, *, owner_id: str, operation_id: str, disposition: str, expected_revision: str,
+) -> dict[str, object]:
+    """确认经管理员预览的隔离操作原行，保留执行身份及原资源证据。"""
+    if not owner_id or not expected_revision or disposition not in ATTEMPT_EFFECT_DISPOSITIONS:
+        return {"settled": False, "reason": "invalid_operation_confirmation"}
+    with sqlite_commit_durability(SQLiteCommitDurability.POST_EFFECT), repository.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT o.*, ar.current_attempt_id, ar.current_attempt_generation, ar.workspace_epoch "
+            "FROM tool_operations o JOIN agent_runs ar ON ar.agent_run_id=o.agent_run_id "
+            "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id "
+            f"WHERE o.operation_id=? AND t.owner_id=? AND {_ISOLATED_TASK_SQL} AND {_PENDING_OPERATION_SQL}",
+            (operation_id, owner_id),
+        ).fetchone()
+        if row is None:
+            return {"settled": False, "reason": "operation_not_pending"}
+        if pending_operation_revision(row) != expected_revision:
+            return {"settled": False, "reason": "operation_revision_changed"}
+        try:
+            payload = _checked_operation_payload(row["outcome_json"])
+        except ToolOperationStateError:
+            return {"settled": False, "reason": "operation_payload_unreadable"}
+        now = time.time()
+        marker = payload.get("reconciliation_claim")
+        if marker is not None:
+            lease = marker.get("lease_expires_at") if isinstance(marker, dict) else None
+            if type(lease) not in (int, float) or not math.isfinite(lease):
+                return {"settled": False, "reason": "operation_payload_unreadable"}
+            if _managed_reconciliation_claim_is_live(marker, now):
+                return {"settled": False, "reason": "operation_reconciliation_in_flight"}
+        status = _manual_verification_payload(payload, row, disposition)
+        updated = conn.execute(
+            "UPDATE tool_operations AS o SET status=?, settled_at=?, updated_at=?, "
+            "outcome_json=?, tool_operation_generation=tool_operation_generation+1 "
+            "WHERE operation_id=? AND tool_operation_generation=? AND status=? "
+            f"AND updated_at=? AND settled_at=? AND {_PENDING_OPERATION_SQL}",
+            (status, now, now, json.dumps(payload, ensure_ascii=False), operation_id,
+             row["tool_operation_generation"], row["status"], row["updated_at"], row["settled_at"]),
+        ).rowcount
+        if updated != 1:
+            return {"settled": False, "reason": "operation_revision_changed"}
+        repository._append_event_conn(
+            conn, event_type="tool_operation_verified", attempt_id=row["attempt_id"], agent_run_id=row["agent_run_id"],
+            payload={"operation_id": operation_id, "owner_id": owner_id, "effect_disposition": disposition,
+                     "previous_revision": expected_revision, "status": status},
+        )
+        return {"settled": True, "operation_id": operation_id, "status": status, "effect_disposition": disposition}
+
+
+def _manual_verification_payload(payload, row, disposition: str) -> str:
+    payload.pop("reconciliation_claim", None)
+    payload.pop("reconciliation_only", None)
+    payload["lease_expires_at"] = 0.0
+    payload["manual_verification"] = {"effect_disposition": disposition, "previous_status": row["status"]}
+    if disposition == "abandoned":
+        # 结束人工清单项，保留 UNKNOWN 以继续阻止等价操作自动重放。
+        return OP_UNKNOWN
+    recorded = disposition == "recorded"
+    effect = SETTLEMENT_APPLIED if recorded else SETTLEMENT_NOT_STARTED
+    payload["result"] = {
+        "schema_version": "tool_execution_result.v1", "tool": row["operation_type"],
+        "ok": recorded, "effect_outcome": effect,
+        "output": "管理员已核实原操作生效。" if recorded else "管理员已核实原操作没有生效。",
+    }
+    payload["error_code"] = ""
+    payload["unknown_reason"] = ""
+    return operation_status_for_settlement(effect, ok=recorded).upper()
+
+
 # LLM: 当前活跃恢复者按owner/root/tool/args核验，跨attempt只增原操作代数和只读标记，执行attempt保持不变。
 # 函数用途: 同事务独占原UNKNOWN核对和资源锁，禁止取消/旧attempt取得新核对权。
 def _claim_managed_tool_operation_reconciliation(
@@ -889,7 +972,7 @@ def _managed_reconciliation_claim_decision(
     current: float,
 ) -> ToolOperationClaim | None:
     record = _record_from_row(row, owner_id=request.owner_id)
-    if str(row["status"] or "") != OP_UNKNOWN:
+    if str(row["status"] or "") != OP_UNKNOWN or row["settled_at"] != 0:
         return ToolOperationClaim("conflict", record, "operation_is_not_unknown")
     if int(row["tool_operation_generation"]) != int(request.expected_generation):
         return ToolOperationClaim("conflict", record, "unknown_generation_changed")
@@ -1931,4 +2014,5 @@ def _record_from_row(
 __all__ = [
     "AuthorityContextMissing",
     "ManagedOperationStore",
+    "settle_pending_verification",
 ]

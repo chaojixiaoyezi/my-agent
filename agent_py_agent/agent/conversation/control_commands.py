@@ -101,6 +101,10 @@ class ConversationControlCommand:
     # /fork --at N：第 N 条用户消息（从 1 计）连同其回复为分叉截止点；0 表示未给出。
     fork_at: int = 0
     recover_operations_page: tuple[int, int] | None = field(default=None, kw_only=True)
+    recover_pending_limit: int | None = field(default=None, kw_only=True)
+    recover_pending_cursor: str = field(default="", kw_only=True)
+    recover_operation_id: str = field(default="", kw_only=True)
+    recover_operation_disposition: str = field(default="", kw_only=True)
 
 
 # LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
@@ -729,6 +733,8 @@ _RECOVER_EFFECT_ALIASES = {
 _RECOVER_USAGE = (
     "用法：/recover 查看；/recover --limit <1-50> [--offset <条数>] 分页查看工具操作；"
     "/recover <处置> [编号]；/recover owner；"
+    "/recover owner --limit <1-50> [--cursor <游标>]；"
+    "/recover owner operation <操作编号> <处置> [--confirm <确认码>]；"
     "/recover owner <处置> [--confirm <确认码>]。处置为 "
     + "|".join(ATTEMPT_EFFECT_DISPOSITIONS)
     + "。"
@@ -783,6 +789,17 @@ def _recover_operations_page(parts: list[str]) -> tuple[int, int] | None:
 def _owner_recover_command(parts: list[str]) -> ConversationControlCommand:
     if not parts:
         return ConversationControlCommand("recover", operation="owner_view", usage=_RECOVER_USAGE)
+    if parts[0] == "--limit":
+        cursor = parts[3] if len(parts) == 4 and parts[2] == "--cursor" else ""
+        page = _recover_operations_page(parts[:2]) if len(parts) == 2 or cursor else None
+        valid = page is not None and (not cursor or is_opaque_id(cursor, kind="pending_verification_cursor"))
+        return ConversationControlCommand(
+            "recover", operation="owner_pending", valid=valid, usage=_RECOVER_USAGE,
+            value="owner " + " ".join(parts) if valid else "",
+            recover_pending_limit=page[0] if page else None, recover_pending_cursor=cursor,
+        )
+    if parts[0] == "operation":
+        return _owner_operation_recover_command(parts[1:])
     disposition = _RECOVER_EFFECT_ALIASES.get(parts[0].lower(), parts[0].lower())
     confirmation = parts[2].lower() if len(parts) == 3 and parts[1].lower() == "--confirm" else ""
     operation = "owner_apply" if confirmation else "owner_preview"
@@ -792,6 +809,22 @@ def _owner_recover_command(parts: list[str]) -> ConversationControlCommand:
     return ConversationControlCommand(
         "recover", value=disposition, operation=operation, valid=valid,
         usage=_RECOVER_USAGE, confirmation_code=confirmation,
+    )
+
+
+def _owner_operation_recover_command(parts: list[str]) -> ConversationControlCommand:
+    target, raw = parts[:2] if len(parts) >= 2 else ("", "")
+    identifier = target.removeprefix("tool_operation:")
+    disposition = _RECOVER_EFFECT_ALIASES.get(raw.lower(), raw.lower())
+    confirmation = parts[3].lower() if len(parts) == 4 and parts[2] == "--confirm" else ""
+    valid = (is_opaque_id(identifier, kind="tool_operation_id") and disposition in ATTEMPT_EFFECT_DISPOSITIONS
+             and (len(parts) == 2 or bool(_RECOVER_CONFIRM_CODE.fullmatch(confirmation))))
+    # value 仅给旧 CLI 恢复命令序列化，写入口只消费解析后的字段。
+    return ConversationControlCommand(
+        "recover", operation="owner_operation_apply" if confirmation else "owner_operation_preview",
+        value="owner operation " + " ".join(parts) if valid else "",
+        valid=valid, usage=_RECOVER_USAGE, confirmation_code=confirmation,
+        recover_operation_id=target, recover_operation_disposition=disposition,
     )
 
 

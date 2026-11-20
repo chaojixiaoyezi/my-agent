@@ -43,17 +43,17 @@ def test_malformed_sqlite_file_is_data_corruption_with_native_code(tmp_path: Pat
     assert real_report.get("sqlite_error_name") == "SQLITE_NOTADB"
     assert _error_reason_code(exc_info.value) == "error:data_corruption:DatabaseError"
 
-    # 无原生码的裸 DatabaseError 仍归类 data_corruption，不填充空码。
+    # 缺少原生结果码时原因未明，不填充空码。
     plain_report = runtime_error_report(sqlite3.DatabaseError("plain"))
-    assert plain_report["category"] == "data_corruption"
+    assert plain_report["category"] == "sqlite_uncertain"
     assert "sqlite_error_code" not in plain_report and "sqlite_error_name" not in plain_report
 
-    # 子类（编程错误、运行时库错、约束冲突）保持原分类（per test_wake_poison.py:198-199）。
+    # SQLite 锁争用走有界退避，编程错误与约束冲突仍由原分支处理。
     assert runtime_error_report(sqlite3.ProgrammingError("x"))["category"] == "programmer_bug"
     op_error = sqlite3.OperationalError("database is locked")
     op_error.sqlite_errorcode = 5
-    assert runtime_error_report(op_error)["category"] == "programmer_bug"
-    assert _error_reason_code(op_error) == "error:programmer_bug:OperationalError"
+    assert runtime_error_report(op_error)["category"] == "runtime_busy"
+    assert _error_reason_code(op_error) == "error:runtime_busy:OperationalError"
     assert runtime_error_report(sqlite3.IntegrityError("unique"))["category"] == "programmer_bug"
 
 
