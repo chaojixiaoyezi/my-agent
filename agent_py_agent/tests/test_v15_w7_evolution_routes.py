@@ -230,8 +230,9 @@ def test_capture_finalize_background_lane_without_model(tmp_path, monkeypatch):
     work = tmp_path / 'work'
     work.mkdir()
     agent = SimpleNamespace(root=work, home_paths=runtime.home, config=SimpleNamespace(enable_self_learning=True))
-    params = SimpleNamespace(live_archive_state={}, run_id='seam-run', attempt_id='attempt',
+    params = SimpleNamespace(run_id='seam-run', attempt_id='attempt',
                              in_use_method_ids=('owner:check',))
+    book = loop.MutationBook(params.run_id, params.attempt_id, [])
     monkeypatch.setattr(loop, '_record_tool_call_ir_if_native', lambda record, rendered: None)
     monkeypatch.setattr(tool_discovery, 'persist_discovered_tools', lambda agent, params, archive: None)
     monkeypatch.setattr(script_runner, 'ScriptRunner', InProcessReplayRunner)
@@ -242,7 +243,8 @@ def test_capture_finalize_background_lane_without_model(tmp_path, monkeypatch):
     def observe(tool, arguments, output, *, ok=True):
         record = SimpleNamespace(params=params, call=SimpleNamespace(tool_name=tool, arguments=arguments, call_id=tool + str(ok)),
                                  result=SimpleNamespace(ok=ok, output=output, error_code='' if ok else 'SCRIPT_OUTPUT_INVALID'))
-        loop._record_tool_post_archive(agent, record, {'tool': tool}, 'unchanged')
+        with loop.mutation_book_scope(book):
+            loop._record_tool_post_archive(agent, record, {'tool': tool}, 'unchanged')
 
     path = work / 'sample.py'
     path.write_text('def main(inputs):\n raise ValueError("invalid")\n')
@@ -253,7 +255,7 @@ def test_capture_finalize_background_lane_without_model(tmp_path, monkeypatch):
     observe('edit_file', {'path': 'sample.py'}, {})
     observe('run_command', {'command': 'python3 sample.py'}, {'return_code': 0, 'stdout': '{"result":"04:27"}'})
     ctx = _ctx('seam-run', attempt_id='attempt', user_prompt='核对 04:27 的结果', tool_rounds=2,
-                tool_runtime_evidence={})
+                tool_runtime_evidence={}, mutation_book=book)
     finalization._freeze_turn_asset_mutations(agent, ctx)
     assert ctx.tool_runtime_evidence['asset_evolution_run_id'] == 'seam-run'
     service = SkillLearningService(runtime.store, runtime.service.settings, runtime.service.runtime)

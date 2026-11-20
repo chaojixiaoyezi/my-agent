@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time as time_module
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -465,27 +466,39 @@ def _request_memory_curator(agent: object, reason: str) -> None:
 # LLM: 收口只冻结原run/attempt中已验证字节，不调用模型；无权限、关闭开关或task_local均不生成请求。
 # 函数用途: 将临时变更账原子冻结为后台演进材料。
 def _freeze_turn_asset_mutations(agent, ctx):
-    states = getattr(agent, '_asset_mutation_states', {})
-    state = states.pop((ctx.run_id, getattr(ctx, 'attempt_id', '')), {})
     if (not getattr(getattr(agent, 'config', None), 'enable_self_learning', False)
             or not ctx.do_save or ctx.context_scope == 'task_local'):
+        return
+    book = getattr(ctx, 'mutation_book', None)
+    if book is not None and (book.run_id, book.attempt_id) != (ctx.run_id, ctx.attempt_id):
         return
     from ..assets.mutation_ledger import freeze_asset_mutations, query_analysis_blocked
 
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
-    if any(query_analysis_blocked(row) for row in ctx.archive_tool_calls or ()):
-        state.setdefault('asset_mutations', {})['evidence_tags'] = ['query_failed']
-    if state.get('asset_mutations', {}).get('evidence_tags'):
-        ctx.tool_runtime_evidence['evidence_tags'] = ['query_failed']
-    try:
-        request = freeze_asset_mutations(agent.home_paths.owner_home_dir, state,
-            run_id=ctx.run_id or ctx.request_id, owner_id=getattr(agent.home_paths, 'owner_id', ''),
-            thread_id=attrs.get('conversation_thread_id', ''), user_prompt=ctx.user_prompt,
-            member_of=attrs.get('member_of', []), records=ctx.archive_tool_calls or ())
-        if request and (request.get('targets') or request.get('executions')):
-            ctx.tool_runtime_evidence['asset_evolution_run_id'] = request['run_id']
-    except Exception:
-        return
+    records = ctx.archive_tool_calls or ()
+    # 只串行化同一本账的登记；其他尝试可独立冻结自己的状态。
+    with book._registration_lock if book is not None else nullcontext():
+        if book is not None and book.registered:
+            return
+        state = book.mutations[0] if book is not None and book.mutations else {}
+        if any(query_analysis_blocked(row) for row in records):
+            state.setdefault('asset_mutations', {})['evidence_tags'] = ['query_failed']
+        if state.get('asset_mutations', {}).get('evidence_tags'):
+            ctx.tool_runtime_evidence['evidence_tags'] = ['query_failed']
+        if not state:
+            return
+        try:
+            request = freeze_asset_mutations(agent.home_paths.owner_home_dir, state,
+                run_id=ctx.run_id or ctx.request_id, owner_id=getattr(agent.home_paths, 'owner_id', ''),
+                thread_id=attrs.get('conversation_thread_id', ''), user_prompt=ctx.user_prompt,
+                member_of=attrs.get('member_of', []), records=records)
+            if request:
+                if book is not None:
+                    book.registered = True
+                if request.get('targets') or request.get('executions'):
+                    ctx.tool_runtime_evidence['asset_evolution_run_id'] = request['run_id']
+        except Exception:
+            return
 
 
 # LLM: 前台保留原 best-effort 学习入口；后台只交已绑定的宿主完成 DTO 给 W6 复核，未知真实错误不吞。

@@ -630,15 +630,18 @@ def _wire(case, arguments):
     return result, value
 
 
-def _observe(case, state, arguments, result, call_id, *, run_id='capture'):
-    params = SimpleNamespace(live_archive_state=state, run_id=run_id,
-                             attempt_id='attempt-' + run_id, in_use_method_ids=())
+def _mutation_book(run_id='capture'):
+    return tool_loop.MutationBook(run_id, 'attempt-' + run_id, [])
+
+
+def _observe(case, book, arguments, result, call_id):
     call = SimpleNamespace(tool_name='scripts', arguments=arguments, call_id=call_id)
-    record = SimpleNamespace(params=params, call=call, result=result)
-    tool_loop._observe_turn_asset_mutations(case.agent, record, {})
+    record = SimpleNamespace(params=book, call=call, result=result)
+    with tool_loop.mutation_book_scope(book):
+        tool_loop._observe_turn_asset_mutations(case.agent, record, {})
 
 
-def _register(case, code=_SOURCE, *, inputs=(), state=None, run_id='capture'):
+def _register(case, code=_SOURCE, *, inputs=(), book=None):
     args = {'action': 'register', 'script_id': 'sample', 'code': code,
             'descriptor': {'name': '身份检查', 'access_targets': [], 'credential_refs': [],
                 'data_sources': [{'source_id': 'local-source', 'system': 'custom',
@@ -646,8 +649,8 @@ def _register(case, code=_SOURCE, *, inputs=(), state=None, run_id='capture'):
                 'io_contract': {'inputs': list(inputs), 'outputs': ['result', 'execution_pid']}}}
     result, value = _wire(case, args)
     assert result.ok, value
-    if state is not None:
-        _observe(case, state, args, result, 'register', run_id=run_id)
+    if book is not None:
+        _observe(case, book, args, result, 'register')
     return value
 
 
@@ -657,7 +660,7 @@ def _promote(case):
     return case.store.get_script('sample')
 
 
-def _run(case, *, version=None, inputs=None, state=None, call_id='execute', run_id='capture'):
+def _run(case, *, version=None, inputs=None, book=None, call_id='execute'):
     args = {'action': 'run', 'script_id': 'sample', 'inputs': inputs or {}}
     if version is not None:
         args['version'] = version
@@ -665,16 +668,17 @@ def _run(case, *, version=None, inputs=None, state=None, call_id='execute', run_
     assert value.get('output_data', {}).get('execution_pid') != os.getpid()
     assert value.get('output_data', {}).get('execution_pid'), value
     assert value['execution_definition_ref']
-    if state is not None:
+    if book is not None:
         before = deepcopy(value)
-        _observe(case, state, args, result, call_id, run_id=run_id)
+        _observe(case, book, args, result, call_id)
         assert json.loads(result.output) == before
     return args, result, value
 
 
-def _enqueue(case, run_id):
-    ctx = _ctx(run_id, attempt_id='attempt-' + run_id, tool_rounds=2,
-               tool_runtime_evidence={}, archive_tool_calls=[])
+def _enqueue(case, book):
+    run_id = book.run_id
+    ctx = _ctx(run_id, attempt_id=book.attempt_id, tool_rounds=2,
+               tool_runtime_evidence={}, archive_tool_calls=[], mutation_book=book)
     finalization._freeze_turn_asset_mutations(case.agent, ctx)
     assert ctx.tool_runtime_evidence['asset_evolution_run_id'] == run_id
     assert case.service.enqueue_from_finalize(ctx) == 'queued'
@@ -687,7 +691,7 @@ def _trial(case):
 
 @pytest.mark.parametrize('historical_ok', [False, True])
 def test_historical_wire_receipts_cannot_count_against_promoted_trial(tmp_path, historical_ok):
-    case, state = _case(tmp_path), {}
+    case, book = _case(tmp_path), _mutation_book('history')
     _register(case)
     current = _promote(case)
     _, _, working = _run(case)
@@ -695,11 +699,11 @@ def test_historical_wire_receipts_cannot_count_against_promoted_trial(tmp_path, 
     old = get_version(case.home, 'script', 'sample', 1)
     for index in range(2):
         _, _, value = _run(case, version=1, inputs={'historical_fail': not historical_ok},
-                           state=state, call_id=f'history-{index}', run_id='history')
+                           book=book, call_id=f'history-{index}')
         assert value['ok'] is historical_ok
         assert value['source_check']['query_health']['analysis_blocked'] is False
         assert value['execution_definition_ref'] == old['execution_definition_ref']
-    request = _enqueue(case, 'history')
+    request = _enqueue(case, book)
     assert len(request['executions']) == 2
     for row in request['executions']:
         assert row['execution']['sha256'] == old['code_sha256']
@@ -721,10 +725,10 @@ def test_current_failures_rollback_but_historical_success_does_not_reset_trial(t
         ('old-success', 1, {'historical_fail': False}),
         ('current-b', None, {'fail': True}),
     ):
-        _, _, value = _run(case, version=version, inputs=inputs, state={},
-                           call_id=run_id, run_id=run_id)
+        book = _mutation_book(run_id)
+        _, _, value = _run(case, version=version, inputs=inputs, book=book, call_id=run_id)
         assert value['source_check']['query_health']['analysis_blocked'] is False
-        _enqueue(case, run_id)
+        _enqueue(case, book)
         assert case.service.run_pending().status == 'skipped'
         if run_id != 'current-b':
             assert _trial(case)['failures'] == 1
@@ -738,8 +742,8 @@ def test_current_failures_rollback_but_historical_success_does_not_reset_trial(t
 
 @pytest.mark.parametrize('change', ['code', 'contract', 'summary'])
 def test_edit_between_execution_and_observation_never_reattributes_bytes(tmp_path, change):
-    case, state = _case(tmp_path), {}
-    _register(case, _CURRENT, state=state)
+    case, book = _case(tmp_path), _mutation_book('capture')
+    _register(case, _CURRENT, book=book)
     args, receipt, value = _run(case)
     before = case.store.get_script('sample')
     descriptor = evolution_descriptor(before)
@@ -749,7 +753,8 @@ def test_edit_between_execution_and_observation_never_reattributes_bytes(tmp_pat
         descriptor = replace(descriptor, summary='新的说明')
     code = _CURRENT + '# later\n' if change == 'code' else _CURRENT
     case.store.save_script(descriptor, code, expected_revision=before['revision'])
-    _observe(case, state, args, receipt, 'before-edit')
+    _observe(case, book, args, receipt, 'before-edit')
+    [state] = book.mutations
     execution = state['asset_mutations']['targets']['script:sample']['last_execution']
     assert execution['execution_definition_ref'] == value['execution_definition_ref']
     if change != 'summary':
@@ -767,16 +772,17 @@ def test_same_code_new_descriptor_supersedes_trial_before_failure_count(tmp_path
     case = _case(tmp_path)
     _register(case)
     current = _promote(case)
-    for index in range(2):
-        _run(case, inputs={'fail': True}, state={}, call_id=f'failure-{index}', run_id=f'newer-{index}')
+    books = [_mutation_book(f'newer-{index}') for index in range(2)]
+    for index, book in enumerate(books):
+        _run(case, inputs={'fail': True}, book=book, call_id=f'failure-{index}')
     descriptor = evolution_descriptor(current)
     if change == 'contract':
         descriptor = replace(descriptor, io_contract=IOContract(outputs=('result',)))
     else:
         descriptor = replace(descriptor, summary='较新的描述符')
     newer = case.store.save_script(descriptor, _CURRENT, expected_revision=current['revision'])
-    for index in range(2):
-        _enqueue(case, f'newer-{index}')
+    for book in books:
+        _enqueue(case, book)
         assert case.service.run_pending().status == 'skipped'
     assert case.store.get_script('sample')['revision'] == newer['revision']
     assert latest_version(case.home, 'script', 'sample')['version'] == 3
@@ -784,17 +790,17 @@ def test_same_code_new_descriptor_supersedes_trial_before_failure_count(tmp_path
 
 
 def test_workspace_source_keeps_precedence_and_cannot_fail_owner_trial(tmp_path):
-    case, state = _case(tmp_path), {}
+    case, book = _case(tmp_path), _mutation_book('workspace')
     _register(case)
     current = _promote(case)
     overlay = ScriptStore(case.home, workspace_root=case.work)
     workspace_code = _SOURCE + '# workspace\n'
     workspace = overlay.save_script(evolution_descriptor(current), workspace_code, target_scope='workspace')
     for index in range(2):
-        _, _, value = _run(case, state=state, call_id=f'workspace-{index}', run_id='workspace')
+        _, _, value = _run(case, book=book, call_id=f'workspace-{index}')
         assert value['execution_definition_ref'] == workspace['execution_definition_ref']
         assert value['ok'] is False
-    request = _enqueue(case, 'workspace')
+    request = _enqueue(case, book)
     for row in request['executions']:
         assert row['execution']['sha256'] == hashlib.sha256(workspace_code.encode()).hexdigest()
         assert row['execution']['source_scope'] == 'workspace'
@@ -809,9 +815,10 @@ def test_query_blocked_current_failure_is_not_a_trial_failure(tmp_path):
     _promote(case)
     for index in range(2):
         run_id = f'blocked-{index}'
-        _, _, value = _run(case, inputs={'rows': [], 'fail': True}, state={}, call_id=run_id, run_id=run_id)
+        book = _mutation_book(run_id)
+        _, _, value = _run(case, inputs={'rows': [], 'fail': True}, book=book, call_id=run_id)
         assert value['source_check']['query_health']['analysis_blocked'] is True
-        request = freeze_asset_mutations(case.home, case.agent._asset_mutation_states[(run_id, 'attempt-' + run_id)], run_id=run_id)
+        request = freeze_asset_mutations(case.home, book.mutations[0], run_id=run_id)
         assert request['evidence_tags'] == ['query_failed'] and request['executions'] == []
         assert AssetEvolutionService(case.home).process(run_id)['status'] == 'query_failed'
     assert _trial(case)['failures'] == 0
@@ -844,12 +851,12 @@ def test_family_fingerprint_preserves_material_contract_differences(left, right)
 
 
 def _queued_structured_target(tmp_path):
-    case, state = _case(tmp_path), {}
+    case, book = _case(tmp_path), _mutation_book('structured')
     fields = [{'name': 'rows', 'type': 'array'}, {'name': 'fail', 'type': 'boolean'}]
-    _register(case, _CURRENT, inputs=fields, state=state, run_id='structured')
-    _, _, value = _run(case, state=state, run_id='structured')
+    _register(case, _CURRENT, inputs=fields, book=book)
+    _, _, value = _run(case, book=book)
     assert value['ok'] is True
-    request = _enqueue(case, 'structured')
+    request = _enqueue(case, book)
     assert len(request['targets']) == 1 and request['targets'][0]['verified'] is True
     assert case.service.enqueue_from_finalize(_ctx('next-valid')) == 'queued'
     paths = case.runtime.store.pending_requests()
@@ -935,9 +942,9 @@ def test_historical_effective_permissions_are_verified_without_history_scan(tmp_
     monkeypatch.setattr(mutation_ledger, 'get_version', exact_version)
     monkeypatch.setattr(mutation_ledger, 'read_bytes_beneath', bounded_blob)
     monkeypatch.setattr(revision_history, '_names', no_enumeration)
-    state = {}
-    _observe(case, state, args, receipt, 'effective-history')
-    fact = state['asset_mutations']['targets']['script:sample']['last_execution']
+    book = _mutation_book()
+    _observe(case, book, args, receipt, 'effective-history')
+    fact = book.mutations[0]['asset_mutations']['targets']['script:sample']['last_execution']
     assert fact['verified'] is True and fact['sha256'] == historical['code_sha256']
     assert fact['execution_definition_ref'] == value['execution_definition_ref']
     assert fact['published_definition_ref'] == historical['execution_definition_ref']
@@ -953,8 +960,9 @@ def test_duplicate_original_call_in_two_requests_is_idempotent(tmp_path):
     _promote(case)
     args, receipt, _ = _run(case, inputs={'fail': True})
     for run_id in ('delivery-a', 'delivery-b'):
-        _observe(case, {}, args, receipt, 'original-call', run_id=run_id)
-        request = _enqueue(case, run_id)
+        book = _mutation_book(run_id)
+        _observe(case, book, args, receipt, 'original-call')
+        request = _enqueue(case, book)
         assert request['executions'][0]['execution']['call_id'] == 'original-call'
         assert case.service.run_pending().status == 'skipped'
         assert _trial(case)['failures'] == 1 and _trial(case)['seen_calls'] == ['original-call']
@@ -962,12 +970,12 @@ def test_duplicate_original_call_in_two_requests_is_idempotent(tmp_path):
 
 
 def test_restore_cas_does_not_overwrite_edit_after_trial_identity_check(tmp_path, monkeypatch):
-    case, state = _case(tmp_path), {}
+    case, book = _case(tmp_path), _mutation_book('cas')
     _register(case)
     _promote(case)
     for index in range(2):
-        _run(case, inputs={'fail': True}, state=state, call_id=f'cas-{index}', run_id='cas')
-    request = _enqueue(case, 'cas')
+        _run(case, inputs={'fail': True}, book=book, call_id=f'cas-{index}')
+    request = _enqueue(case, book)
     saved, original = [], ScriptStore.save_script
 
     def edit_before_restore(self, descriptor, code, **options):
@@ -1078,12 +1086,12 @@ def test_evolution_control_or_uncertain_outcome_keeps_original_request(tmp_path,
 def test_real_restore_committed_readback_failure_keeps_request_and_attempts(tmp_path, monkeypatch):
     from agent_py_agent.agent.assets import AssetPostCommitReadbackError
 
-    case, state = _case(tmp_path), {}
+    case, book = _case(tmp_path), _mutation_book('readback')
     _register(case)
     current = _promote(case)
     for index in range(2):
-        _run(case, inputs={'fail': True}, state=state, call_id=f'readback-{index}', run_id='readback')
-    frozen = _enqueue(case, 'readback')
+        _run(case, inputs={'fail': True}, book=book, call_id=f'readback-{index}')
+    frozen = _enqueue(case, book)
     head = case.runtime.store.pending_requests()[0]
     before = head.read_bytes()
     ledger = case.runtime.store.ledger_path
@@ -1140,11 +1148,11 @@ def test_real_execution_observe_and_process_release_descriptors(tmp_path, fail):
     _register(case, _CURRENT)
     _run(case)  # 先完成解释器/摘要仓库的常规初始化，再测相同入口。
     before = _descriptor_count()
-    state = {}
-    _, _, value = _run(case, inputs={'fail': fail}, state=state, call_id='measured-call')
+    book = _mutation_book('fd-measured')
+    _, _, value = _run(case, inputs={'fail': fail}, book=book, call_id='measured-call')
     assert value['ok'] is not fail
     assert value['source_check']['query_health']['analysis_blocked'] is False
-    request = freeze_asset_mutations(case.home, state, run_id='fd-measured')
+    request = freeze_asset_mutations(case.home, book.mutations[0], run_id=book.run_id)
     assert request['executions'][0]['execution']['verified'] is True
     assert AssetEvolutionService(case.home).process('fd-measured')['status'] == 'processed'
     after = _descriptor_count()

@@ -236,3 +236,9 @@ Compact／媒体开发线与主线存在大量decision/Jev前置改动。以f2bc
 - 修复：`except` 开头只做一件事——有已提交记录就把 `loop_params` 换成候选参数，其它判断照旧。修复提示和插话都落在候选参数上；下一次迭代传入的是候选参数，记录按原规则清除，然后正常重建。
 
 **共享 tool_context（2b 起为显式合同）**：`replace_recovery_history` 用 `dataclasses.replace` 生成候选参数，只替换了历史种子、Compact 上下文、`runtime_injections`、`live_archive_state`（深拷贝）和 `tool_ir_history`，`tool_context` 仍与原参数共享同一个列表。所以恢复提交后，写进任一份参数 `tool_context` 的内容（插话、空响应修复提示）在另一份里也看得到。目前这恰好保证插话只出现一次，原先它是隐式别名。2b 选择写成显式合同：`replace_recovery_history` 注释写明共享，`test_compact_recovery_release.py` 断言候选与原参数的 `tool_context` 是同一个对象，行为不变。以后若要改为复制，须先迁移这条合同，并按结构化记录转移尚未发送的条目。
+
+## 2026-11-19 M36：资产变更账按执行尝试持有
+
+每个已绑定的 `run_id` 和 `attempt_id` 独占一本变更账。工具归档后的观察与收口共用该对象，运行中 Compact 替换参数时仍可接续原变更事实。收口使用原 `asset_evolution_request.v1` 格式，每本账只成功登记一次。仍由原账本逻辑核对字节、执行证据和查询失败标记。
+
+并发回归让同一 Agent 的 64 个和 128 个执行尝试分别在登记前完成观察。父提交两组各登记 32 条，修复后分别核对 64 条和 128 条登记及各自的脚本路径。
