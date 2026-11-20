@@ -17,6 +17,7 @@ from contextlib import nullcontext
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -693,6 +694,118 @@ class InputDependencyAccess:
         elif not pending and self.runtime_db is not None:
             for snapshot in snapshots:
                 self.perform(lambda snapshot=snapshot: self.runtime_db.retire_input_deadline(snapshot))
+
+
+def credential_evidence_chain(
+    inputs: InputDependencyAccess, input_id: str, *,
+    tool_event: Mapping[str, object] | None = None, delivery_store=None,
+) -> dict[str, object]:
+    """只读串起原输入、规范 Wake、指定宿主审计事件及准确投递回执，缺证据即止。"""
+    from ..user_space.owner_resolver import _owner_id
+    from .lifecycle_wake_event import _input_resolution_facts
+    from .store_wake_publication import published_signal
+
+    row = inputs.read(input_id)
+    credential = _validated_credential_result(row.get('credential_result'))
+    refs = row.get('result_refs')
+    if (row['status'] != 'ready' or row.get('provider') != 'credential' or credential is None
+            or not isinstance(refs, list) or credential['credential_ref'] not in refs):
+        raise ValueError('该输入没有已保存的凭据代次，请核对原 input_id 和结算状态')
+    report = {'state': 'saved', 'input_id': input_id, 'generation': credential['generation']}
+    scope = row['scope']
+    thread_id = scope['thread_id']
+    if scope['agent_kind'] == 'subagent':
+        link = inputs.store.tasks.load(scope['root_task_id'])
+        if link is None:
+            return report
+        thread_id = link.thread_id
+    wake = published_signal(inputs.store.storage, thread_id, 'task-input:' + input_id)
+    if (wake is None or wake.status not in ('pending', 'handled') or wake.root_task_id != scope['root_task_id']
+            or wake.source_agent_id != scope['run_id'] or wake.metadata.get('input_run_id') != scope['run_id']
+            or wake.metadata.get('input_id') != input_id
+            or _input_resolution_facts(wake.reason, wake.to_dict(), wake.metadata).get('credential') != credential):
+        return report
+
+    report.update(state='woken', wake_id=wake.wake_signal_id)
+    owner_id = _owner_id(inputs.owner)
+    proof = _credential_read_proof(tool_event, owner_id, wake, credential)
+    if proof is None:
+        return report
+    report.update(state='verified', model_request_id=proof['model_request_id'], protected_resource_check=proof)
+    if delivery_store is not None:
+        delivery_id = _credential_delivery_id(inputs, owner_id, wake, proof, delivery_store)
+        if delivery_id:
+            report.update(state='delivered', delivery_id=delivery_id)
+    return report
+
+
+def _credential_read_proof(event, owner_id, wake, credential):
+    from .lifecycle_wake_event import validate_protected_resource_check
+
+    if (not isinstance(event, Mapping) or event.get('source') != 'minimal_tool_audit'
+            or event.get('action') != 'tool_audit' or event.get('tool_name') != 'web_fetch'
+            or event.get('status') != 'succeeded' or event.get('tool_success') is not True or event.get('task_id') != wake.root_task_id
+            or not event.get('tool_call_id') or not credential['authentication_configured']):
+        return None
+    preview = event.get('content_preview')
+    if not isinstance(preview, str):
+        return None
+    try:
+        facts = json.loads(preview)
+    except (ValueError, RecursionError):
+        return None
+    if (not isinstance(facts, dict) or facts.get('schema_version') != 'tool_execution_audit.v1'
+            or facts.get('owner_id') != owner_id or facts.get('handler_executed') is not True):
+        return None
+    proof = validate_protected_resource_check(facts.get('protected_resource_check'))
+    if (proof is None or proof['wake_id'] != wake.wake_signal_id or proof['model_request_id'] != event.get('request_id')
+            or proof['credential_ref'] != credential['credential_ref'] or proof['generation'] != credential['generation']
+            or proof['checked_at'] < wake.created_at):
+        return None
+    return proof
+
+
+def _credential_delivery_id(inputs, owner_id, wake, proof, delivery_store):
+    from ..adapter.protocol import parse_feishu_conversation_address
+    from .background_delivery import background_delivery_idempotency_key
+    from .background_im_progress import background_delivery_context
+    from .channels import binding_delivery_target
+    from .host_actor import background_host_actor
+
+    request = SimpleNamespace(wake_signal=wake.to_dict())
+    stable_id = 'host-delivery:' + background_delivery_idempotency_key(request)
+    receipt = delivery_store.terminal_receipt(stable_id)
+    sent_at = receipt.get('sent_at') if isinstance(receipt, dict) else None
+    if (not isinstance(receipt, dict) or receipt.get('disposition') != 'sent'
+            or type(sent_at) not in (float, int) or not math.isfinite(sent_at) or sent_at < proof['checked_at']):
+        return ''
+    view = SimpleNamespace(conversation_store=inputs.store,
+        home_paths=SimpleNamespace(owner_id=owner_id, owner_kind=inputs.owner.owner_kind))
+    try:
+        actor = background_host_actor(view, wake.thread_id, wake.root_task_id)
+        if actor is None or actor.channel != 'feishu':
+            return ''
+        group = inputs.owner.owner_kind == 'group'
+        target = binding_delivery_target(actor.channel, actor.actor_id, actor.conversation_id, group=group)
+        thread = inputs.store.threads.require(wake.thread_id)
+        context = background_delivery_context(view, thread, channel=actor.channel, target=target, request=request)
+        topic = parse_feishu_conversation_address(actor.conversation_id)[1] if group else ''
+    except (ValueError, OSError, KeyError):
+        return ''
+    policy = getattr(context, 'reply_policy', '')
+    if (not target or (topic and (not context.reply_to or policy != 'thread'))
+            or (receipt.get('channel'), receipt.get('target'), receipt.get('conversation_id'),
+                receipt.get('reply_to'), receipt.get('reply_policy')) !=
+                (actor.channel, target, context.conversation_id, context.reply_to, policy)):
+        return ''
+    components = receipt.get('component_receipts')
+    if not isinstance(components, list) or not any(
+        isinstance(item, dict) and item.get('phase') == 'send_confirmed'
+        and item.get('effect_outcome') == 'confirmed' and item.get('provider_message_id')
+        for item in components
+    ):
+        return ''
+    return stable_id
 
 
 # LLM: 旧入口仅取原Agent依赖，不物化新对象；Count0原callback/初始化/缺repo语义保持。

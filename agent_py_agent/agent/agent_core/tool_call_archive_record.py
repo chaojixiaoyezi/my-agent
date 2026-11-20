@@ -863,6 +863,13 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     execution = _compact_tool_execution(envelope.get("tool_execution"))
     if execution:
         compact["tool_execution"] = execution
+    if (getattr(result, "tool_name", "") == "web_fetch" and getattr(result, "ok", False) is True
+            and getattr(result, "handler_executed", False) is True):
+        from ..conversation.lifecycle_wake_event import validate_protected_resource_check
+
+        proof = validate_protected_resource_check(envelope.get("protected_resource_check"))
+        if proof is not None:
+            compact["protected_resource_check"] = proof
     from ..conversation.input_tool_boundary import input_archive_facts
     compact.update(input_archive_facts(envelope))
     from ..conversation.required_user_action import required_action_from_result

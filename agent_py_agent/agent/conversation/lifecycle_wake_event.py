@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import math
+import re
+import time
+from collections.abc import Mapping, Sequence
 
 from ..agent_core.runtime.turn_trigger import (
     TURN_TRIGGER_LIFECYCLE_WAKE,
@@ -108,6 +111,42 @@ def _input_resolution_facts(reason, signal, metadata):
         if cred is not None and cred['credential_ref'] in clean_refs:
             facts['credential'] = cred
     return facts
+
+
+def protected_resource_check(params, *, credential_ref, generation, method, http_status):
+    """从已认证的实际业务响应与宿主回合身份构造审计事实。"""
+    trigger = getattr(params, 'turn_trigger', None)
+    if (not isinstance(trigger, TurnTrigger) or trigger.kind != TURN_TRIGGER_LIFECYCLE_WAKE
+            or trigger.reason != 'task_input_resolved' or not trigger.credential_ready):
+        return None
+    return validate_protected_resource_check({
+        'schema_version': 'protected_resource_check.v1',
+        'credential_ref': credential_ref, 'generation': generation,
+        'wake_id': trigger.wake_signal_id, 'model_request_id': getattr(params, 'request_id', ''),
+        'method': method, 'http_status': http_status, 'checked_at': time.time(),
+    })
+
+
+def validate_protected_resource_check(value: object) -> dict[str, object] | None:
+    """只保留固定的标识、认证代次、HTTP 结果和检查时间。"""
+    if not isinstance(value, Mapping) or set(value) != {
+        'schema_version', 'credential_ref', 'generation', 'wake_id', 'model_request_id',
+        'method', 'http_status', 'checked_at',
+    }:
+        return None
+    ref, generation = value['credential_ref'], value['generation']
+    status, checked_at = value['http_status'], value['checked_at']
+    if (value['schema_version'] != 'protected_resource_check.v1'
+            or not isinstance(ref, str) or not re.fullmatch(r'cred_[0-9a-f]{32}', ref)
+            or type(generation) is not int or generation < 1
+            or value['method'] not in ('GET', 'HEAD')
+            or type(status) is not int or not 200 <= status < 300
+            or type(checked_at) is not float or not math.isfinite(checked_at) or checked_at <= 0):
+        return None
+    for key in ('wake_id', 'model_request_id'):
+        if not isinstance(value[key], str) or not re.fullmatch(r'[A-Za-z0-9_.:/@-]{1,256}', value[key]):
+            return None
+    return dict(value)
 
 
 # LLM: 只取名单内且有值的字段（布尔与数字 0 也算有值），逐个做有界投影；不读名单外的键。

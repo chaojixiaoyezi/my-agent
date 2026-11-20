@@ -67,6 +67,13 @@ def _audit_facts(agent, params, record):
                 facts[key] = cloud[key]
         for key in ('reason', 'request_stage'):
             facts[key] = _identifier(cloud.get(key))
+    if (record.get('tool') == 'web_fetch' and record.get('ok') is True
+            and facts['handler_executed'] and isinstance(envelope, dict)):
+        from ...conversation.lifecycle_wake_event import validate_protected_resource_check
+
+        proof = validate_protected_resource_check(envelope.get('protected_resource_check'))
+        if proof is not None and proof['model_request_id'] == getattr(params, 'request_id', ''):
+            facts['protected_resource_check'] = proof
     return facts
 
 

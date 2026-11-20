@@ -516,26 +516,32 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
 # LLM: 回执只读原子快照，不取写锁、不迁移或补安装；prepared 不算完整交付，坏账不能退化为空。
 # 函数用途: 查询固定键是否已完整发布并处于 pending/handled，供观察界面与诊断使用。
 def publication_receipt(storage: ConversationStorage, thread_id: str, key: str) -> str:
+    signal = published_signal(storage, thread_id, key)
+    return signal.status if signal is not None else ""
+
+
+def published_signal(storage: ConversationStorage, thread_id: str, key: str) -> WakeSignal | None:
+    """按原去重收据回读已发布的规范信号。"""
     if not thread_id or not key:
-        return ""
+        return None
     path = storage.wake_dedupe_path(thread_id, key)
     record = _read_record(path)
     if record is None:
-        return ""
+        return None
     if record.get("schema_version") == _LEGACY_SCHEMA:
         if record.get("thread_id") != thread_id or record.get("dedupe_key") != key:
             raise DataCorruptionError("legacy wake receipt identity conflicts")
         signal = _read_existing_identity(storage, str(record.get("wake_signal_id") or ""))
         if signal is None or (signal.thread_id, signal.dedupe_key) != (thread_id, key):
             raise DataCorruptionError("legacy wake receipt has no matching signal")
-        return signal.status
+        return signal
     _, frozen = _frozen_pair(record, thread_id, key)
     if record["phase"] == "prepared":
-        return ""
+        return None
     signal = _installed_signal(storage, frozen)
     if signal is None:
         raise DataCorruptionError("published wake signal is missing")
-    return signal.status
+    return signal
 
 
 # LLM: 引用不拥有liveness；必须回读原发布及canonical，prepared算责任，缺失/冲突不能降为空。

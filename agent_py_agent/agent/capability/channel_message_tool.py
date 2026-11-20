@@ -9,13 +9,19 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..artifacts.registry import ArtifactRegistryRecord
+from ..artifacts.registry import (
+    ArtifactRegistration,
+    ArtifactRegistryRecord,
+    ExistingFileSource,
+    register_existing_file,
+)
 from ..common.credential_artifact_paths import (
     is_blocked_credential_debug_path,
     path_contains_credential_echo,
     relative_artifact_path_parts,
     user_artifact_subpath_parts,
 )
+from ..common.nofollow_fs import ManagedFileReadLimitExceeded, NoFollowPathError
 from ..conversation.channels import (
     project_message_paths_for_channel,
     project_user_reply,
@@ -23,6 +29,7 @@ from ..conversation.channels import (
 )
 from ..delivery import (
     ChannelAttachment,
+    ChannelCapabilities,
     DeliveryContext,
     DeliveryService,
     ReplyEnvelope,
@@ -62,6 +69,7 @@ def build_send_message_model_spec() -> ToolModelSpec:
             "本机管理员可用 notify_channel 发送到自己已绑定的 IM 身份，不需通过另一个会话转述。"
             "用户说‘发我/传给我/作为附件发送’时，在文件生成后调用；不需要用户提供飞书 ID。"
             "attachments 优先使用 Recent Artifact Refs 里的完整 path 或 artifact_id；不要猜测文件位置。"
+            "飞书也支持本任务 output/ 下已写完文件的准确路径，例如 output/report.bin。"
         ),
         input_schema={
             "type": "object",
@@ -280,8 +288,12 @@ class SendMessageTool(BaseTool):
         if active_reds and any(path_contains_credential_echo(ref, active_reds) for ref in attachment_refs):
             return _credential_attachment_withheld_outcome("CREDENTIAL_ECHO_IN_ATTACHMENT")
         registry_reports = {}
+        existing_source = None
+        if (provider == "feishu" and params.get("__artifact_task_root") and not active_reds
+                and capabilities.frozen_attachment_content and (capabilities.files or capabilities.images)):
+            existing_source = (Path(str(params["__artifact_task_root"])), scope, capabilities, {})
         attachments = _resolve_attachments(owner_root, attachment_refs, task_root=task_root,
-            verified_host_roots=current_roots, registry_reports=registry_reports)
+            verified_host_roots=current_roots, registry_reports=registry_reports, existing_source=existing_source)
         if isinstance(attachments, ToolHandlerOutcome) and attachments.error_code == "ARTIFACT_NOT_REGISTERED":
             from ..artifacts.registry_provenance import verified_recent_registry_roots
 
@@ -294,7 +306,7 @@ class SendMessageTool(BaseTool):
             if roots:
                 attachments = _resolve_attachments(owner_root, attachment_refs,
                     task_root=task_root, verified_host_roots=current_roots, historical_roots=roots,
-                    registry_reports=registry_reports)
+                    registry_reports=registry_reports, existing_source=existing_source)
             if isinstance(attachments, ToolHandlerOutcome) and attachments.error_code == "ARTIFACT_NOT_REGISTERED":
                 source_errors = [item for error in errors for item in error.get("source_errors", ())
                     if isinstance(item, dict)]
@@ -733,6 +745,8 @@ def _resolve_attachments(
     refs: list[str],
     *, task_root: object = None, verified_host_roots: tuple[Path, ...] = (),
     historical_roots: tuple[Path, ...] = (), registry_reports: dict | None = None,
+    existing_source: tuple[Path, dict[str, object], ChannelCapabilities,
+                           dict[Path, ArtifactRegistryRecord]] | None = None,
 ) -> tuple[ChannelAttachment, ...] | ToolHandlerOutcome:
     attachments: list[ChannelAttachment] = []
     registry_reports = {} if registry_reports is None else registry_reports
@@ -743,6 +757,23 @@ def _resolve_attachments(
             registry_reports=registry_reports)
         if isinstance(record, ToolHandlerOutcome):
             return record
+        if record is None and qualified and existing_source is not None:
+            try:
+                record = _register_task_output(owner_root, ref, *existing_source)
+            except FileNotFoundError:
+                pass
+            except ManagedFileReadLimitExceeded as exc:
+                return _error(
+                    f"任务输出为 {exc.observed_bytes} 字节，通道上限为 {exc.max_bytes} 字节。请缩小文件后再发送。消息未发送。",
+                    "ARTIFACT_VALIDATION_FAILED",
+                )
+            except NoFollowPathError as exc:
+                reason = "核验期间文件持续变化" if exc.transient_open_race else "目录或文件身份未通过逐段核验"
+                return _error(f"任务输出登记失败（{reason}）。请使用写入完成且无链接的普通文件。消息未发送。",
+                              "ARTIFACT_VALIDATION_FAILED")
+            except (OSError, ValueError) as exc:
+                return _error(f"任务输出登记被拒绝（{type(exc).__name__}）。请核对宿主任务目录与文件读取权限。消息未发送。",
+                              "ARTIFACT_VALIDATION_FAILED")
         if record is None:
             return _error(f"没有找到已登记产物：{Path(ref).name or ref}", "ARTIFACT_NOT_REGISTERED")
         if str(record.status or "").strip().lower() != "ready":
@@ -769,6 +800,38 @@ def _resolve_attachments(
             )
         )
     return tuple(attachments)
+
+
+def _register_task_output(owner_root: Path, ref: str, task_root: Path, scope: dict[str, object],
+                          capabilities: ChannelCapabilities,
+                          registered: dict[Path, ArtifactRegistryRecord]) -> ArtifactRegistryRecord | None:
+    from ..adapter.feishu_media import MAX_FILE_BYTES, MAX_IMAGE_BYTES
+    from ..delivery.service import _IMAGE_SUFFIXES
+
+    # 新登记只允许准确引用宿主已指定的任务输出目录，不猜测文件名或历史任务归属。
+    raw = Path(ref)
+    source = task_root / "output"
+    candidates = (raw,) if raw.is_absolute() else (task_root / raw, owner_root / raw)
+    paths = {path for path in candidates if path.is_relative_to(source) and ".." not in path.parts}
+    if len(paths) != 1:
+        return None
+    path = paths.pop()
+    if path in registered:
+        return registered[path]
+    image = path.suffix.lower() in _IMAGE_SUFFIXES and capabilities.images
+    if not image and not capabilities.files:
+        return None
+    provider_limit = MAX_IMAGE_BYTES if image else MAX_FILE_BYTES
+    declared_limit = capabilities.max_image_bytes if image else capabilities.max_file_bytes
+    request = ArtifactRegistration(
+        workspace_root=task_root, path=path, source="task_output",
+        run_id=str(scope.get("run_id") or ""), task_id=str(scope.get("task_id") or ""),
+        created_by_tool="send_message",
+    )
+    descriptor = ExistingFileSource(request, min(declared_limit or provider_limit, provider_limit))
+    record = register_existing_file(owner_root, descriptor, authorized_source=str(source))
+    registered[path] = record
+    return record
 
 
 # LLM: 登记根只来自当前宿主或同线程规范回执证明；路径只查精确祖先，匹配歧义不得自行挑选。
@@ -884,7 +947,7 @@ def _artifact_registry_roots(owner_root: Path, ref: str, *, task_root: Path | No
             if candidate.resolve(strict=False) != path:
                 continue
             path.relative_to(owner_root)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             continue
         current = path.parent
         while current != owner_root:

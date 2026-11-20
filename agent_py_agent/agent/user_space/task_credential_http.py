@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlsplit
 
 from ..capability.runtime_config_reload import capability_config_for_agent
 from ..common.json_io import read_json_object_report
+from ..conversation.lifecycle_wake_event import protected_resource_check
 from ..conversation.tool_approval_scope import (
     ToolApprovalScopeUnavailable,
     tool_approval_scope,
@@ -199,6 +200,7 @@ def credential_authenticated_request(agent, reference, request, *, send, credent
                 values = dict(material.values)
                 effective_ref = str(material.credential_ref)
                 effective_scope = str(material.access_scope)
+                generation = material.generation
         else:
             with task_credentials.authorized_credential_material(
                 auth_agent,
@@ -210,6 +212,7 @@ def credential_authenticated_request(agent, reference, request, *, send, credent
                 values = dict(material.values)
                 effective_ref = str(material.credential_ref)
                 effective_scope = str(material.access_scope)
+                generation = material.generation
         if effective_ref != row['credential_ref']:
             path = credential_path(home_paths.owner_home_dir, effective_ref)
             row = read_credential_row(path, stage='credential_use')
@@ -302,9 +305,22 @@ def credential_authenticated_request(agent, reference, request, *, send, credent
         else:
             raise ValueError('宿主认证方式无效')
         secret_tuple = tuple(dict.fromkeys(secrets))
-        return _with_credential_selection(credential_response_outcome(agent, path, row, result), selection), secret_tuple
+        result = credential_response_outcome(agent, path, row, result)
+        if isinstance(result, RawResponseParts) and headers:
+            proof = protected_resource_check(current, credential_ref=effective_ref, generation=generation,
+                method=request.method, http_status=result.status)
+            if proof is not None and _confirmed_response_origin(result.url, row['origin']):
+                result = replace(result, protected_resource_check=proof)
+        return _with_credential_selection(result, selection), secret_tuple
     finally:
         values.clear()
+
+
+def _confirmed_response_origin(url, origin):
+    try:
+        return credential_origin(url) == origin
+    except ValueError:
+        return False
 
 
 def _notify_http_secret_sinks(

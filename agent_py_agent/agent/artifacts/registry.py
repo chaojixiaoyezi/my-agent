@@ -22,8 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from ..common.nofollow_fs import (
+    ManagedFileReadLimitExceeded,
     NoFollowPathError,
+    _snapshot_stat_fields_match,
     append_text_beneath,
+    inspect_file_snapshot_beneath,
+    open_readonly_file_beneath,
     read_bytes_beneath,
     read_text_beneath,
     write_bytes_atomic_beneath,
@@ -74,6 +78,14 @@ class ArtifactGroupRegistration:
     created_by_tool: str = ""
     status: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExistingFileSource:
+    """宿主选定的登记描述与本次文件读取上限。"""
+
+    registration: ArtifactRegistration
+    max_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -162,6 +174,82 @@ def register_artifact(request: ArtifactRegistration) -> ArtifactRegistryRecord:
     return record
 
 
+def register_existing_file(
+    owner_home: str | Path, source_descriptor: ExistingFileSource, *, authorized_source: str,
+) -> ArtifactRegistryRecord:
+    """从宿主单独授权的目录流式登记现有文件，发布后仍须走常规投递复核。"""
+    if not isinstance(source_descriptor, ExistingFileSource):
+        raise ValueError("现有文件需要宿主登记描述")
+    request = source_descriptor.registration
+    limit = source_descriptor.max_bytes
+    if not isinstance(request, ArtifactRegistration) or type(limit) is not int or limit < 0:
+        raise ValueError("现有文件登记描述或字节上限无效")
+    if not isinstance(authorized_source, str):
+        raise ValueError("现有文件需要宿主授权的绝对目录")
+    owner = Path(owner_home).expanduser().resolve(strict=True)
+    source = Path(authorized_source)
+    root = Path(request.workspace_root)
+    path = Path(request.path)
+    if not path.is_absolute():
+        path = source / path
+    for candidate in (source, root, path):
+        if not candidate.is_absolute() or ".." in candidate.parts or candidate == owner:
+            raise ValueError("现有文件需要 owner 内的明确来源")
+        candidate.relative_to(owner)
+    source.relative_to(root)
+    relative = path.relative_to(source)
+    if not relative.parts or any(part.startswith(".") for part in relative.parts):
+        raise ValueError("现有文件必须是授权目录内的可见文件")
+    parts = path.relative_to(owner).parts
+    for _ in range(2):
+        try:
+            sample = _stream_existing_file(owner, parts, limit)
+        except NoFollowPathError as exc:
+            if not exc.transient_open_race:
+                raise
+            continue
+        if sample is not None:
+            digest, size = sample
+            return register_observed_artifact(
+                replace(request, artifact_id=_artifact_id(request, path), path=path, status="ready"),
+                observed_sha256=digest, observed_size_bytes=size, owner_anchor=owner,
+            )
+    raise NoFollowPathError("现有文件核验期间持续变化", transient_open_race=True)
+
+
+def _stream_existing_file(owner: Path, parts: tuple[str, ...], limit: int) -> tuple[str, int] | None:
+    before = inspect_file_snapshot_beneath(owner, parts, require_dir_fd=True)
+    if before is None:
+        raise FileNotFoundError("授权文件不存在")
+    size = before.stat.st_size
+    if limit and size > limit:
+        raise ManagedFileReadLimitExceeded(limit, size)
+    digest = hashlib.sha256()
+    try:
+        descriptor = open_readonly_file_beneath(owner, parts)
+    except FileNotFoundError:
+        return None
+    try:
+        if not _snapshot_stat_fields_match(before.stat, os.fstat(descriptor)):
+            return None
+        remaining = size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                return None
+            digest.update(chunk)
+            remaining -= len(chunk)
+        current = os.fstat(descriptor)
+        after = inspect_file_snapshot_beneath(owner, parts, require_dir_fd=True)
+        if (after is None or before.parents != after.parents
+                or not _snapshot_stat_fields_match(before.stat, current)
+                or not _snapshot_stat_fields_match(current, after.stat)):
+            return None
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest(), size
+
+
 # LLM: Shell post-check and migrations already hold observed file facts. This append-only seam
 # must persist those facts without resolving or opening the path again, because the path may have
 # become a symlink or disappeared after an external process ran. Atomic publication is opt-in;
@@ -173,6 +261,7 @@ def register_observed_artifact(
     observed_sha256: str,
     observed_size_bytes: int,
     atomic_publish: bool = False,
+    owner_anchor: Path | None = None,
 ) -> ArtifactRegistryRecord:
     """Append trusted observations without touching the referenced filesystem path."""
 
@@ -199,7 +288,7 @@ def register_observed_artifact(
     )
     if not record.artifact_id or not record.status:
         raise ValueError("observed artifact requires artifact_id and status")
-    _append_record(root, record, atomic_publish=atomic_publish)
+    _append_record(root, record, atomic_publish=atomic_publish, owner_anchor=owner_anchor)
     return record
 
 
@@ -473,8 +562,11 @@ def resolve_artifact_record_report(
 # 函数用途: 默认安全追加并刷盘；显式原子模式保留完整旧字节，再一次发表旧账本与完整新行。
 def _append_record(
     workspace_root: Path, record: ArtifactRegistryRecord, *, atomic_publish: bool = False,
+    owner_anchor: Path | None = None,
 ) -> None:
     line = json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
+    anchor = owner_anchor if owner_anchor is not None else workspace_root
+    parts = (*workspace_root.relative_to(anchor).parts, *REGISTRY_RELATIVE_PATH.parts)
     try:
         from .registry_locator import prepare_record
 
@@ -482,11 +574,10 @@ def _append_record(
     except (OSError, ValueError, sqlite3.Error) as error:
         logging.getLogger(__name__).warning('ARTIFACT_LOCATOR_PREPARE_FAILED error_type=%s next_action=bounded_locator_recovery', type(error).__name__)
     if atomic_publish:
-        parts = tuple(REGISTRY_RELATIVE_PATH.parts)
-        previous = read_bytes_beneath(workspace_root, parts) or b""
-        write_bytes_atomic_beneath(workspace_root, parts, previous + line.encode("utf-8"))
+        previous = read_bytes_beneath(anchor, parts) or b""
+        write_bytes_atomic_beneath(anchor, parts, previous + line.encode("utf-8"))
     else:
-        append_text_beneath(workspace_root, tuple(REGISTRY_RELATIVE_PATH.parts), line)
+        append_text_beneath(anchor, parts, line)
     # 索引失败不把已成功原登记谎报成未执行；正式查询沿原run索引有界自愈，miss始终不作确定不存在。
     try:
         from .registry_locator import publish_record
