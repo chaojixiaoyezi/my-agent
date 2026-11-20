@@ -207,6 +207,7 @@ def _create_locked(
         for _attempt in range(max(1, len(registry.skills) + 1)):
             try:
                 asset_updated = _registered_publication(store, registry, record, publish)
+                _recheck_displacement_locked(store, registry, victim_name, protection_snapshot)
                 _, _, committed_candidate = store._transition_displace_publish_locked(
                     registry,
                     victim_name=victim_name,
@@ -745,6 +746,36 @@ def _admit_capacity_or_select_victim_locked(
         )
     eligible.sort(key=lambda item: item[0])
     return eligible[0][1]
+
+
+def _recheck_displacement_locked(store, registry, victim_name, snapshot):
+    expected = registry.skills[victim_name]
+    latest = store.load_registry().skills.get(victim_name)
+    if latest is None or (latest.revision, latest.sha256) != (expected.revision, expected.sha256):
+        raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, {
+            "reason": "victim_revision_changed", "skill_name": victim_name,
+            "expected_revision": expected.revision, "committed": False,
+        })
+    if latest.maintenance.get("pinned") is True:
+        raise SkillLearningGateError(CODE_LIMIT_REACHED, {
+            "reason": "victim_protected", "skill_name": victim_name, "committed": False,
+        })
+    # 只读源代次与准确引用成员资格，不调用会更新 watermark 的提供者。
+    recheck = getattr(snapshot, "recheck", None)
+    try:
+        current = recheck is None or recheck()
+    except (OSError, ValueError, TypeError, KeyError):
+        current = False
+    if not current:
+        raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, {
+            "reason": "protection_generation_changed", "skill_name": victim_name,
+            "generation": getattr(snapshot, "generation", ""), "committed": False,
+        })
+    refs = snapshot.get("protected_ids") or ()
+    if "*" in refs or victim_name in refs or f"owner:{victim_name}" in refs:
+        raise SkillLearningGateError(CODE_LIMIT_REACHED, {
+            "reason": "victim_protected", "skill_name": victim_name, "committed": False,
+        })
 
 
 def _victim_rank_key(name: str, record: LearnedSkill) -> tuple[int, float, int, float, str, str]:

@@ -16,13 +16,14 @@ from ..common.json_io import (
     read_jsonl_objects_report,
 )
 from ..common.nofollow_fs import (
-    list_names_beneath,
     open_readonly_file_beneath,
     read_bytes_beneath,
     read_text_beneath,
     unlink_file_beneath,
     write_text_atomic_beneath,
 )
+from ..memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
+from ..user_space.directory_paging import directory_page
 from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_learning_prompt import SkillLearningDecision
 from .skill_learning_publish import (
@@ -120,11 +121,37 @@ def _read_proposal(store, folder, proposal_id):
     return row
 
 
-# LLM: 只从验证后的事务投影定位，不以主区优先掩盖superseded；调用方已持候选锁。
-# 函数用途: 自动定位主区或归档中的准确候选，包括崩溃后尚未落盘的投影。
+def _proposal_pair(store, proposal_id):
+    rows = []
+    for folder in (_ACTIVE, _OVERFLOW):
+        try:
+            row = _read_proposal(store, folder, proposal_id)
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+            raise LearningProposalUnreadable(folder, _proposal_name(proposal_id), exc) from exc
+        if row is not None:
+            rows.append((folder, row))
+    return rows
+
+
+def _project_proposal(store, rows, proposal_id, intent):
+    if intent:
+        changes = [entry for entry in intent['changes'] if entry[1] == proposal_id]
+        new_id = intent['new']
+        if changes and new_id and new_id != proposal_id:
+            # 旧意图的提交点是新候选首次落盘，仅点查该意图明确绑定的记录。
+            changes.extend(entry for entry in intent['changes'] if entry[1] == new_id)
+            rows = [*rows, *((folder, row) for folder, row in _proposal_pair(store, new_id) if folder == _ACTIVE)]
+        projected = _intent_projection(rows, {**intent, 'changes': changes}) if changes else rows
+    else:
+        replacement = next((row.get('superseded_by') for folder, row in rows if folder == _OVERFLOW), None)
+        if len(rows) == 2 and replacement and replacement != proposal_id:
+            rows = [*rows, *((folder, row) for folder, row in _proposal_pair(store, replacement) if folder == _ACTIVE)]
+        projected = _legacy_projection(rows)
+    return [(folder, row) for folder, row in projected if row['proposal_id'] == proposal_id]
+
+
 def _locate_proposal(store, proposal_id):
-    _proposal_name(proposal_id)
-    found = [(folder,row) for folder,row in _all_proposals(store) if row['proposal_id'] == proposal_id]
+    found = _project_proposal(store, _proposal_pair(store, proposal_id), proposal_id, _read_intent(store))
     if len(found) != 1:
         raise ValueError('学习候选不存在、重复或已损坏')
     return found[0]
@@ -134,27 +161,41 @@ def _locate_proposal(store, proposal_id):
 # 函数用途: 按编号读取主区或overflow候选供用户核对。
 def learning_proposal(store, proposal_id):
     _proposal_name(proposal_id)
-    if not _has_proposals(store):
-        raise ValueError('学习候选不存在、重复或已损坏')
+    if not store.directory.exists() or store.directory.is_symlink():
+        return _locate_proposal(store, proposal_id)[1]
     with store.state_lock(), locked_json_path(store.directory/'.proposals'):
         return _locate_proposal(store,proposal_id)[1]
 
 
 # LLM: 物理快照允许迁移产生双位置，但绝不跳过坏文件；验证和去重必须在事务投影之后。
 # 函数用途: 在调用方已持候选锁时读取两个固定目录的原始候选。
+def _folder_name_pages(store, folder):
+    cursor = {}
+    while True:
+        names, cursor, complete = directory_page(
+            store.directory, (folder,), cursor, RETENTION_SCAN_SLICE_ENTRIES, require_dir_fd=False,
+        )
+        yield names
+        if complete:
+            break
+
+
+def _proposal_file(name):
+    return name.startswith('learning-proposal-') and name.endswith('.json')
+
+
 def _physical_proposals(store):
     rows = []
     for folder in (_ACTIVE,_OVERFLOW):
-        for name in list_names_beneath(store.directory,(folder,)):
-            if not name.startswith('learning-proposal-') or not name.endswith('.json'):
-                continue
-            try:
-                row = _read_proposal(store,folder,name[:-5])
-            except ValueError as exc:
-                raise LearningProposalUnreadable(folder,name,exc) from exc
-            if row is None:
-                raise ValueError('学习候选不存在、重复或已损坏')
-            rows.append((folder,row))
+        for names in _folder_name_pages(store, folder):
+            for name in filter(_proposal_file, names):
+                try:
+                    row = _read_proposal(store, folder, name[:-5])
+                    if row is None:
+                        raise FileNotFoundError(name)
+                except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+                    raise LearningProposalUnreadable(folder, name, exc) from exc
+                rows.append((folder, row))
     return rows
 
 
@@ -173,17 +214,87 @@ def _all_proposals(store, include_overflow=True):
 # 函数用途: 判断所选候选范围是否存在可读取文件或待投影事务。
 def _has_proposals(store, include_overflow=True):
     folders = (_ACTIVE,_OVERFLOW) if include_overflow else (_ACTIVE,)
-    return bool(_read_intent(store)) or any(name.startswith('learning-proposal-') and name.endswith('.json')
-               for folder in folders for name in list_names_beneath(store.directory,(folder,)))
+    return bool(_read_intent(store)) or any(
+        _proposal_file(name) for folder in folders for page in _folder_name_pages(store, folder) for name in page
+    )
 
 
 # LLM: 默认涵盖归档pending；hot-only调用须显式False，非空查询按owner配额→state→proposals锁序只读投影。
 # 函数用途: 列出当前owner完整候选，可显式只读主区，不执行崩溃恢复或迁移。
-def list_learning_proposals(store, include_overflow=True):
-    if not _has_proposals(store,include_overflow):
-        return []
-    with store.state_lock(), locked_json_path(store.directory/'.proposals'):
-        return [row for _,row in _all_proposals(store,include_overflow)]
+def list_learning_proposals(store, include_overflow=True, *, diagnostics=None):
+    rows, errors = learning_proposals_report(store, include_overflow=include_overflow)
+    if diagnostics is not None:
+        diagnostics.extend(proposal_diagnostic(error) for error in errors)
+    elif errors:
+        raise errors[0]
+    return rows
+
+
+def proposal_diagnostic(error):
+    return {'code': error.code, 'folder': error.folder, 'file': error.file_name, 'error': error.error}
+
+
+def learning_proposal_page(store, *, after=None, limit=RETENTION_SCAN_SLICE_ENTRIES, include_overflow=True):
+    """分页沿物理目录续点，候选按编号投影。坏记录保留同页诊断。"""
+    if limit <= 0:
+        raise ValueError('学习候选分页条数须为正数')
+    if store.directory.is_symlink():
+        raise ValueError('学习候选根目录无效')
+    if not store.directory.exists():
+        return [], [], None
+    with locked_json_path(store.directory / '.proposals'):
+        intent = _read_intent(store)
+        return _proposal_page_locked(store, intent, after or {}, limit, include_overflow)
+
+
+def _proposal_page_locked(store, intent, after, limit, include_overflow):
+    folder = after.get('folder', _ACTIVE)
+    if folder not in (_ACTIVE, _OVERFLOW):
+        raise ValueError('学习候选续点目录无效')
+    names, cursor, complete = directory_page(
+        store.directory, (folder,), after.get('cursor', {}), limit, require_dir_fd=False,
+    )
+    rows, errors = [], []
+    for name in filter(_proposal_file, names):
+        proposal_id = name[:-5]
+        try:
+            _proposal_name(proposal_id)
+            physical = _proposal_pair(store, proposal_id)
+            if not physical:
+                raise FileNotFoundError(name)
+            if physical[0][0] != folder:
+                continue  # 双位置事务只由一个物理入口产生结果。
+            projected = _project_proposal(store, physical, proposal_id, intent)
+            if len(projected) > 1:
+                raise ValueError('学习候选重复或已损坏')
+            rows.extend(row for target, row in projected if include_overflow or target == _ACTIVE)
+        except LearningProposalUnreadable as exc:
+            errors.append(exc)
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+            errors.append(LearningProposalUnreadable(folder, name, exc))
+    if not complete:
+        return rows, errors, {'folder': folder, 'cursor': cursor}
+    overflow = store.directory / _OVERFLOW
+    if folder == _ACTIVE and (overflow.exists() or overflow.is_symlink()):
+        return rows, errors, {'folder': _OVERFLOW}
+    return rows, errors, None
+
+
+def learning_proposals_report(store, *, include_overflow=True):
+    if not _has_proposals(store, include_overflow):
+        return [], []
+    rows, errors = [], {}
+    # 在同一个只读快照里汇总所有页，单页读取入口可另行保存续点。
+    with locked_json_path(store.directory / '.proposals'):
+        intent = _read_intent(store)
+        after = {}
+        while after is not None:
+            page, diagnostics, after = _proposal_page_locked(
+                store, intent, after, RETENTION_SCAN_SLICE_ENTRIES, include_overflow,
+            )
+            rows.extend(page)
+            errors.update(((exc.folder, exc.file_name), exc) for exc in diagnostics)
+    return rows, list(errors.values())
 
 
 # LLM: 新记录用宿主创建时间，旧记录回退真实FD的mtime；绝不拿随机哈希编号作时间排序。
@@ -384,6 +495,10 @@ def _recover_proposals(store, admission):
         if rows != projected:
             _apply_plan(store,rows,projected,admission)
         return
+    _finish_intent(store, admission, rows, projected)
+
+
+def _finish_intent(store, admission, rows, projected):
     physical = {(folder,_proposal_name(row['proposal_id'])):row for folder,row in rows}
     final = {(folder,_proposal_name(row['proposal_id'])):row for folder,row in projected}
     changes = {parts:json.dumps(row,ensure_ascii=False) for parts,row in final.items() if physical.get(parts) != row}
@@ -432,10 +547,25 @@ def resolve_learning_proposal(store, proposal_id, expected_revision, *, decision
         raise ValueError('学习确认者编号无效')
     if decision not in {'confirm','reject'} or isinstance(expected_revision,bool) or not isinstance(expected_revision,int):
         raise ValueError('学习候选决定无效')
+    _proposal_name(proposal_id)
     # publisher复用当前state准入，账本沿原私有writer追加，不能在候选锁内重新申请owner配额。
     with store.state_lock() as admission, locked_json_path(store.directory/'.proposals'):
-        _recover_proposals(store,admission)
-        folder,row = _locate_proposal(store,proposal_id)
+        intent = _read_intent(store)
+        if intent and any(entry[1] == proposal_id for entry in intent['changes']):
+            # 恢复同一原子意图中的成员，不扫描意图之外的候选文件。
+            ids = dict.fromkeys(entry[1] for entry in intent['changes'])
+            physical = [item for identifier in ids for item in _proposal_pair(store, identifier)]
+            projected = _intent_projection(physical, intent)
+            if len({row['proposal_id'] for _, row in projected}) != len(projected):
+                raise ValueError('学习候选重复或已损坏')
+            _finish_intent(store, admission, physical, projected)
+        physical = _proposal_pair(store, proposal_id)
+        found = _project_proposal(store, physical, proposal_id, _read_intent(store))
+        if len(found) != 1:
+            raise ValueError('学习候选不存在、重复或已损坏')
+        folder, row = found[0]
+        if not intent and len(physical) == 2:
+            _apply_plan(store, physical, found, admission)
         if row['status'] == ('committed' if decision == 'confirm' else 'rejected') and row['revision'] == expected_revision + 1:
             return row
         if row['revision'] != expected_revision or row['status'] != 'pending':
@@ -470,18 +600,16 @@ def _safe_physical_proposals(store):
     rows = []
     corrupt_skipped = 0
     for folder in (_ACTIVE, _OVERFLOW):
-        for name in list_names_beneath(store.directory, (folder,)):
-            if not name.startswith('learning-proposal-') or not name.endswith('.json'):
-                continue
-            try:
-                row = _read_proposal(store, folder, name[:-5])
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                corrupt_skipped += 1
-                continue
-            if row is None:
-                corrupt_skipped += 1
-                continue
-            rows.append((folder, row))
+        for names in _folder_name_pages(store, folder):
+            for name in filter(_proposal_file, names):
+                try:
+                    row = _read_proposal(store, folder, name[:-5])
+                except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                    row = None
+                if row is None:
+                    corrupt_skipped += 1
+                else:
+                    rows.append((folder, row))
     return rows, corrupt_skipped
 
 

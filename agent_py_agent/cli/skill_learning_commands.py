@@ -242,7 +242,9 @@ def cmd_learning_proposals(args):
     def operation(context, selected):
         action = selected.skills_learned_action
         if action == "proposals":
-            return {"ok":True,"proposals":list_learning_proposals(context.store,include_overflow=True)}
+            diagnostics = []
+            rows = list_learning_proposals(context.store, include_overflow=True, diagnostics=diagnostics)
+            return {"ok": True, "proposals": rows, **({"diagnostics": diagnostics} if diagnostics else {})}
         if action == "proposal-show":
             return {"ok":True,"proposal":learning_proposal(context.store,selected.proposal_id)}
         row = resolve_learning_proposal(context.store,selected.proposal_id,selected.revision,decision=action,guard_config=context.config,actor_id="local-cli")

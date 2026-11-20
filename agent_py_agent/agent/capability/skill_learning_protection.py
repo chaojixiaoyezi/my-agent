@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from ..conversation.models import THREAD_TASK_LINK_INACTIVE_STATUSES
@@ -37,51 +38,159 @@ def _zero_arg_callable(fn: object) -> bool:
     return True
 
 
-def _supports_limit_kwarg(fn: object) -> bool:
-    if not callable(fn):
-        return False
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return False
-    return "limit" in sig.parameters or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+def _signature(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _consume_protection_source(agent, source, rows, protected, budget, include):
-    """每个来源保留一份有界内容指纹与续点；CPU暂停不撤销已经读到的事实，也不让下一片从头重扫。"""
-    if len(rows) > agent._skill_protection_scan_limit:
-        return False
-    encoded = json.dumps(rows, sort_keys=True, ensure_ascii=False).encode()
-    if len(encoded) > budget.max_bytes:
-        return False
-    signature = hashlib.sha256(encoded).hexdigest()
-    scans = dict(getattr(agent, '_skill_protection_source_scans', {}))
-    previous = scans.get(source, {})
-    cursor = int(previous.get('cursor') or 0) if previous.get('signature') == signature else 0
-    refs = set(previous.get('refs') or ()) if previous.get('signature') == signature else set()
-    stepped = False
-    for index in range(cursor, len(rows)):
-        # 墙钟是下一个对象的让出点，单次不可中断读取超时后仍允许一个有界对象前进；数量/字节仍是硬上界。
-        if (budget.entries >= budget.max_entries or budget.size >= budget.max_bytes
-                or (stepped and time.monotonic() >= budget.deadline)):
+class _ProtectionSnapshot(dict):
+    """源代次复核供发布事务消费，字典键继续兼容维护入口。"""
+
+    def __init__(self, refs, complete, generation, recheck):
+        super().__init__(protected_ids=tuple(sorted(refs)), protection_complete=complete)
+        self.generation = generation
+        self.recheck = recheck
+
+
+def _read_sources(agent, store):
+    scheduler = getattr(agent, 'scheduler_repository', None)
+    subagents = getattr(agent, 'subagents', None)
+    persistence = getattr(subagents, 'persistence', None)
+    index = getattr(persistence, 'run_index', None)
+    tasks = getattr(getattr(agent, 'conversation_store', None), 'tasks', None)
+    runtime = getattr(agent, 'runtime_db', None) or getattr(subagents, 'runtime_db', None)
+
+    scheduler_path = getattr(scheduler, 'store_path', None)
+    jobs = scheduler.list_jobs(include_deleted=False) if scheduler is not None and scheduler_path is None else None
+    if index is not None:
+        index_state = persistence.prepare_run_index(tolerate_pending=True)
+    child_reader = getattr(subagents, 'list_recovery_runs_report', None) or getattr(subagents, 'list_runs_report', None)
+
+    def children():
+        if child_reader is None:
+            return [], []
+        report = child_reader()
+        rows = [{'status': child.status, 'attributes': child.attributes or {}} for child in report.runs]
+        return rows, report.load_errors
+
+    child_rows = children() if index is None else None
+    if index is not None and (not index_state['complete'] or index_state['pending']):
+        child_rows = [], ['subagent_index_incomplete']
+    paths = [scheduler_path, getattr(index, 'path', None), getattr(runtime, 'db_path', None)]
+    storage = getattr(tasks, 'storage', None)
+    paths.extend(getattr(storage, name, None) for name in ('tasks_dir', 'threads_dir'))
+    if store is not None:
+        paths.extend(store.directory / name for name in ('proposals', 'proposals_overflow', '.proposals-intent.json'))
+    files = tuple(Path(path) for path in paths if path is not None)
+    wal = tuple(Path(str(path) + '-wal') for path in files if path.suffix in ('.db', '.sqlite', '.sqlite3'))
+    task_reader = next((getattr(tasks, name) for name in ('unsettled_report', 'active_report')
+                        if _zero_arg_callable(getattr(tasks, name, None))), None)
+    task_rows = task_reader() if task_reader is not None else None
+
+    def generation(*, fresh=False):
+        return _signature((
+            [_path_stamp(path) for path in (*files, *wal)],
+            scheduler.list_jobs(include_deleted=False) if fresh and jobs is not None else jobs,
+            children() if fresh and index is None else child_rows,
+            (_task_listing_signature(task_reader()) if fresh else _task_listing_signature(task_rows))
+            if task_rows is not None else None,
+        ))
+
+    return generation, scheduler, jobs, persistence, child_rows, task_rows
+
+
+def _task_listing_signature(report):
+    rows, errors = report
+    return [row.to_dict() if hasattr(row, 'to_dict') else row for row in rows], errors
+
+
+def _page_rows(rows, errors, offset, budget, include, refs):
+    if errors:
+        raise ValueError('protection_source_unreadable')
+    initial = offset
+    while offset < len(rows):
+        if budget.entries >= budget.max_entries or budget.size >= budget.max_bytes:
             break
-        row = rows[index]
-        try:
-            include(refs, row)
-        except (ValueError, TypeError, KeyError):
-            scans.pop(source, None)
-            agent._skill_protection_source_scans = scans
-            protected.update(refs)
-            return False
-        budget.charge(entries=1, size=_approx_bytes(row))
-        cursor = index + 1
-        stepped = True
-    protected.update(refs)
-    scans[source] = {'signature': signature, 'cursor': cursor, 'refs': tuple(sorted(refs))}
-    agent._skill_protection_source_scans = scans
-    return cursor == len(rows)
+        if offset != initial and budget.exhausted():
+            break
+        row = rows[offset]
+        size = _approx_bytes(row)
+        if budget.size + size > budget.max_bytes:
+            break
+        include(refs, row)
+        budget.charge(entries=1, size=size)
+        offset += 1
+    return None if offset == len(rows) else offset
+
+
+def _scheduler_page(agent, scheduler, jobs, after, budget, refs, generation):
+    if jobs is not None:
+        return _page_rows(*jobs, after, budget, _include_job_refs, refs)
+    if scheduler is None:
+        return None
+    store = scheduler._store_snapshot(readonly=True)['jobs']
+    memo = getattr(agent, '_skill_protection_scheduler_keys', None)
+    if memo is None or memo[0] != generation:
+        memo = (generation, tuple(store))
+        agent._skill_protection_scheduler_keys = memo
+    keys = memo[1]
+    initial = after
+    while after < len(keys) and budget.entries < budget.max_entries and budget.size < budget.max_bytes:
+        if after != initial and budget.exhausted():
+            break
+        job, error = scheduler._parse_job(store[keys[after]])
+        if error or job is None:
+            raise ValueError('scheduler_protection_source_unreadable')
+        size = _approx_bytes(job)
+        if budget.size + size > budget.max_bytes:
+            break
+        if job['status'] != 'deleted':
+            _include_job_refs(refs, job)
+        budget.charge(entries=1, size=size)
+        after += 1
+    return None if after == len(keys) else after
+
+
+def _include_task_refs(refs, task):
+    if getattr(task, 'status', None) not in THREAD_TASK_LINK_INACTIVE_STATUSES:
+        _include_refs(refs, task.to_dict() if hasattr(task, 'to_dict') else dict(task))
+
+
+def _proposal_refs_page(store, after, budget, refs):
+    from .skill_learning_proposals import learning_proposal_page
+
+    if store is None:
+        return None
+    # 页游标仅在所有行完成核对以后提交。
+    rows, errors, cursor = learning_proposal_page(store, after=after, limit=budget.max_entries - budget.entries)
+    page_budget = replace(budget)
+    page_refs = set()
+    if _page_rows(rows, errors, 0, page_budget, _include_proposal_refs, page_refs) is not None:
+        # 大页超过字节/墙钟预算时按逐行页推进，避免在同一续点重试同一大页。
+        single, errors, cursor = learning_proposal_page(store, after=after, limit=1)
+        if _page_rows(single, errors, 0, budget, _include_proposal_refs, refs) is not None:
+            return after
+    else:
+        budget.charge(entries=page_budget.entries - budget.entries, size=page_budget.size - budget.size)
+        refs.update(page_refs)
+    return cursor
+
+
+def _child_refs_page(persistence, child_rows, after, budget, refs):
+    if persistence is None or child_rows is not None:
+        return _page_rows(*(child_rows or ([], [])), after or 0, budget, _include_child_refs, refs)
+    ids, cursor = persistence.run_index.recovery_ids(
+        after=after or '', limit=budget.max_entries - budget.entries,
+    )
+    report = persistence.list_runs_by_ids_report(ids)
+    children = {child.run_id: child for child in report.runs}
+    rows = [{'status': children[run_id].status, 'attributes': children[run_id].attributes or {}}
+            for run_id in ids if run_id in children]
+    if report.load_errors or len(rows) != len(ids):
+        raise ValueError('subagent_protection_source_unreadable')
+    remaining = _page_rows(rows, [], 0, budget, _include_child_refs, refs)
+    if remaining is not None:
+        return ids[remaining - 1] if remaining else after
+    return cursor or None
 
 
 def _include_job_refs(protected, job):
@@ -102,68 +211,87 @@ def _include_child_refs(protected, child):
 # LLM: 四个 canonical 活跃索引来源共享有界配额与墙钟预算；严禁调用 threads.list_report(limit=0)。
 # 函数用途: 汇集未结算任务、监控、待审提案及未结束子代理的保护名单。
 def learning_protection_for_agent(agent, *, scan_limit=1000):
-    protected: set[str] = set()
-    complete = True
-    agent._skill_protection_scan_limit = scan_limit if type(scan_limit) is int and scan_limit > 0 else 1000
+    from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
+
     budget = RetentionScanBudget.default(getattr(agent, "config", None))
     if type(scan_limit) is int and scan_limit > 0:
         budget.max_entries = min(budget.max_entries, scan_limit)
-
+    home = getattr(agent, 'home_paths', None)
+    store = SkillLearningStore.for_home(home) if getattr(home, 'owner_skill_learning_dir', None) else None
+    protected = set()
     try:
-        tasks_complete = _collect_unsettled_tasks(agent, protected, budget)
-        complete = complete and tasks_complete
-    except Exception:  # noqa: BLE001
-        complete = False
-
-    try:
-        jobs, errors = agent.scheduler_repository.list_jobs(include_deleted=False)
-        complete = complete and not errors
-        jobs_complete = _consume_protection_source(agent, 'scheduler', jobs, protected, budget, _include_job_refs)
-        complete = complete and jobs_complete
-    except Exception:  # noqa: BLE001
-        complete = False
-
-    try:
-        from .skill_learning_proposals import list_learning_proposals
-        from .skill_learning_store import SkillLearningStore
-
-        proposals = list_learning_proposals(
-            SkillLearningStore.for_home(agent.home_paths),
-            include_overflow=True,
-        )
-        proposals_complete = _consume_protection_source(
-            agent, 'proposals', proposals, protected, budget, _include_proposal_refs,
-        )
-        complete = complete and proposals_complete
-    except Exception:  # noqa: BLE001
-        complete = False
-
-    try:
-        reader = getattr(agent.subagents, "list_recovery_runs_report", None)
-        if callable(reader):
-            if _supports_limit_kwarg(reader):
-                # 读取上界属于整个有界保护视图，消费配额才属于本片；否则每片截到不同前缀会重置续点。
-                report = reader(limit=agent._skill_protection_scan_limit + 1)
-            else:
-                report = reader()
+        generation_of, scheduler, jobs, persistence, children, tasks = _read_sources(agent, store)
+        generation = generation_of()
+        previous = _load_protection_scan(store) if store is not None else getattr(agent, '_skill_protection_scan', None)
+        saved = previous if isinstance(previous, dict) and previous.get('generation') == generation else {}
+        after = dict(saved.get('after') or {})
+        task_progress = dict(after.get('runtime') or {})
+        if not _active_stamps_current(agent, task_progress):
+            after, task_progress = {}, {}
+        # 引用来源共享配额，已结束页不再读其正文。无主机来源时只返回覆盖不完整。
+        protected.update(after.get('protected_ids', ()))
+        if tasks is None:
+            complete_tasks = _collect_unsettled_tasks(agent, protected, budget, progress=task_progress)
+            after['runtime'] = task_progress
         else:
-            report = agent.subagents.list_runs_report()
-        complete = complete and not report.load_errors
-        children = [{'status': child.status, 'attributes': child.attributes or {}} for child in report.runs]
-        children_complete = _consume_protection_source(
-            agent, 'subagents', children, protected, budget, _include_child_refs,
-        )
-        complete = complete and children_complete
-    except Exception:  # noqa: BLE001
-        complete = False
+            after['tasks'] = _page_rows(*tasks, after.get('tasks', 0), budget, _include_task_refs, protected) \
+                if after.get('tasks', 0) is not None else None
+            complete_tasks = after['tasks'] is None
 
-    # 预算只决定是否开始下一对象；最后一个原子读取完成后越过墙钟不等于来源读取失败。
-    if budget.size >= budget.max_bytes:
-        complete = False
-    return {"protected_ids": tuple(sorted(protected)), "protection_complete": complete}
+        if after.get('scheduler', 0) is not None:
+            after['scheduler'] = _scheduler_page(agent, scheduler, jobs, after.get('scheduler', 0), budget,
+                                                 protected, generation)
+        if budget.entries < budget.max_entries and budget.size < budget.max_bytes:
+            if after.get('proposals', {}) is not None:
+                after['proposals'] = _proposal_refs_page(store, after.get('proposals', {}), budget, protected)
+            if budget.entries < budget.max_entries and budget.size < budget.max_bytes \
+                    and after.get('subagents', '') is not None:
+                after['subagents'] = _child_refs_page(persistence, children, after.get('subagents', ''), budget, protected)
+        complete = (complete_tasks and scheduler is not None and getattr(agent, 'subagents', None) is not None
+                    and store is not None and all(key in after and after[key] is None
+                                                  for key in ('scheduler', 'proposals', 'subagents')))
+        after['protected_ids'] = sorted(protected)
+        current = {'generation': generation, 'after': after}
+
+        def recheck():
+            return generation_of(fresh=True) == generation and _active_stamps_current(agent, task_progress)
+
+        if not recheck():
+            complete = False
+        elif current != previous:
+            if store is None:
+                agent._skill_protection_scan = current
+            elif protected or _scan_has_progress(after) or store.registry_path.exists():
+                complete = _save_protection_scan(store, previous, current) and complete
+        return _ProtectionSnapshot(protected, complete, generation, recheck)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, SkillLearningStoreError):
+        return _ProtectionSnapshot(protected, False, '', lambda: False)
 
 
-def _collect_unsettled_tasks(agent, protected: set[str], budget: RetentionScanBudget) -> bool:
+def _load_protection_scan(store):
+    return store.load_registry().import_operations.get('protection_scan')
+
+
+def _scan_has_progress(after):
+    runtime = after.get('runtime') or {}
+    return any(after.get(source) for source in ('tasks', 'scheduler', 'proposals', 'subagents')) or bool(
+        runtime.get('cursor') or runtime.get('prefix_refs') or runtime.get('after', [0, ''])[1],
+    )
+
+
+def _save_protection_scan(store, previous, current):
+    # 复用旧版登记表能保留的操作元数据槽。仅在原状态锁内对扫描字段做 CAS。
+    with store.state_lock():
+        registry = store.load_registry()
+        if registry.import_operations.get('protection_scan') != previous:
+            return False
+        store.save_registry(replace(
+            registry, import_operations={**registry.import_operations, 'protection_scan': current},
+        ))
+    return True
+
+
+def _collect_unsettled_tasks(agent, protected: set[str], budget: RetentionScanBudget, *, progress=None) -> bool:
     conversations = getattr(agent, "conversation_store", None)
     tasks = getattr(conversations, "tasks", None) if conversations is not None else None
     repo = getattr(agent, "runtime_db", None) or getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -179,7 +307,7 @@ def _collect_unsettled_tasks(agent, protected: set[str], budget: RetentionScanBu
     from ..runtime_db.repository import RuntimeRepository
 
     if isinstance(repo, RuntimeRepository):
-        return _collect_runtime_task_refs(agent, repo, tasks, protected, budget)
+        return _collect_runtime_task_refs(agent, repo, tasks, protected, budget, progress=progress)
 
     if repo is not None and callable(getattr(repo, "open_task_runs", None)):
         remaining = max(1, budget.max_entries - budget.entries)
@@ -239,12 +367,23 @@ def _collect_unsettled_tasks(agent, protected: set[str], budget: RetentionScanBu
 def _path_stamp(path):
     try:
         info = Path(path).lstat()
-        return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        return [info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
     except FileNotFoundError:
         return None
 
 
-def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes):
+def _active_stamps_current(agent, progress):
+    tasks = getattr(getattr(agent, 'conversation_store', None), 'tasks', None)
+    storage = getattr(tasks, 'storage', None)
+    return (
+        all(storage is not None and _path_stamp(storage.task_path(task_id)) == stamp
+            for task_id, stamp in (progress.get('active_stamps') or {}).items())
+        and all(storage is not None and _path_stamp(storage.thread_path(thread_id)) == stamp
+                for thread_id, stamp in (progress.get('thread_stamps') or {}).items())
+    )
+
+
+def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes, after=(0, '')):
     """同一只读事务取有界当前树事实；旧TaskRun只作候选，不借其created投影推断执行存活。"""
     from ..runtime_db.operations import OP_CLAIMED, OP_EXECUTING, OP_UNKNOWN, exec_lock_scope
     from ..runtime_db.repository import _quiescent_nonterminal_agent_runs
@@ -255,9 +394,9 @@ def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes):
     with repo._runtime_connection() as conn:
         conn.execute("BEGIN")
         rows = conn.execute(
-            "WITH candidates AS (SELECT * FROM task_runs WHERE closed_at=0 "
+            "WITH candidates AS (SELECT * FROM task_runs WHERE closed_at=0 AND (created_at,task_run_id)>(?,?) "
             "ORDER BY created_at,task_run_id LIMIT ?) "
-            "SELECT tr.task_run_id,tr.task_id,tr.updated_at AS task_updated_at,"
+            "SELECT tr.task_run_id,tr.task_id,tr.created_at AS task_created_at,tr.updated_at AS task_updated_at,"
             "substr(tr.metadata_json,1,?) AS task_metadata,t.thread_id,t.conversation_task_id,"
             "ar.agent_run_id,ar.parent_agent_run_id,ar.status,ar.updated_at,ar.current_attempt_id,ar.current_attempt_generation,"
             "aa.agent_run_id AS attempt_agent_run_id,aa.attempt_generation,aa.status AS attempt_status,aa.ended_at,"
@@ -268,17 +407,22 @@ def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes):
             "FROM candidates tr LEFT JOIN tasks t ON t.task_id=tr.task_id "
             "LEFT JOIN agent_runs ar ON ar.task_run_id=tr.task_run_id "
             "LEFT JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id "
-            "ORDER BY tr.created_at,tr.task_run_id,ar.created_at,ar.agent_run_id LIMIT ?",
-            (limit + 1, max_bytes + 1, max_bytes + 1, exec_lock_scope(""), OP_EXECUTING, OP_UNKNOWN, OP_CLAIMED, limit + 1),
+            "ORDER BY tr.created_at,tr.task_run_id,ar.created_at,ar.agent_run_id",
+            (*after, limit + 1, max_bytes + 1, max_bytes + 1, exec_lock_scope(""),
+             OP_EXECUTING, OP_UNKNOWN, OP_CLAIMED),
         )
-        for index, raw in enumerate(rows):
+        for raw in rows:
             row = dict(raw)
-            size = _approx_bytes(row)
-            total_bytes += size
-            if index >= limit or total_bytes > max_bytes:
+            key = row['task_run_id']
+            total_bytes += _approx_bytes(row)
+            if total_bytes > max_bytes:
+                groups.pop(key, None)
                 complete = False
                 break
-            groups.setdefault(row['task_run_id'], []).append(row)
+            if key not in groups and len(groups) >= limit:
+                complete = False
+                break
+            groups.setdefault(key, []).append(row)
         for group in groups.values():
             # 复用运行库原树静止合同；额外要求exact current attempt的退出证明，unknown绝不算静止。
             group[0]['tree_quiescent'] = _quiescent_nonterminal_agent_runs(conn, group) is not None
@@ -295,30 +439,33 @@ def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes):
     return groups, signature, complete
 
 
-def _collect_runtime_task_refs(agent, repo, tasks, protected, budget):
+def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progress=None):
     """只缓存有界保护投影续点；每次重核canonical树与准确文件指纹，新任务/新attempt立即废弃旧证明。"""
     from ..runtime_db.executor_liveness import executor_exit_reason
     from ..runtime_db.operations import ATTEMPT_STATUS_PENDING
     from ..runtime_db.repository import _QUIESCENT_ATTEMPT_STATUSES
 
-    limit = max(1, min(int(getattr(agent, '_skill_protection_scan_limit', 1000)), 1000))
+    previous = getattr(agent, '_skill_task_protection_scan', {}) if progress is None else progress
+    db_path = Path(repo.db_path)
+    db_generation = _signature((_path_stamp(db_path), _path_stamp(str(db_path) + '-wal')))
+    if previous.get('database_generation') != db_generation or not _active_stamps_current(agent, previous):
+        previous = {}
+    after = previous.get('after') or [0, '']
+    limit = budget.max_entries
     groups, signature, source_complete = _runtime_task_ref_snapshot(
-        repo, tasks, limit=limit, max_bytes=budget.max_bytes,
+        repo, tasks, limit=limit, max_bytes=budget.max_bytes, after=after,
     )
-    previous = getattr(agent, '_skill_task_protection_scan', {})
     storage = getattr(tasks, 'storage', None)
     active_stamps = dict(previous.get('active_stamps') or {})
-    active_unchanged = all(storage is not None and _path_stamp(storage.task_path(task_id)) == stamp
-                           for task_id, stamp in active_stamps.items())
+    thread_stamps = dict(previous.get('thread_stamps') or {})
     finished_failure = (not previous.get('complete', True)
                         and int(previous.get('cursor') or 0) >= len(groups))
-    if previous.get('signature') == signature and active_unchanged and not finished_failure:
+    if previous.get('signature') == signature and not finished_failure:
         cursor = int(previous.get('cursor') or 0)
         refs = set(previous.get('refs') or ())
         complete = bool(previous.get('complete', True))
     else:
-        cursor, refs, complete = 0, set(), True
-        active_stamps = {}
+        cursor, refs, complete = 0, set(previous.get('prefix_refs') or ()), True
     items = list(groups.values())
     initial_cursor = cursor
     for index in range(cursor, len(items)):
@@ -361,6 +508,8 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget):
                 thread_id = str(first.get('thread_id') or '')
                 if task_id and callable(getattr(tasks, 'load_report', None)):
                     link, error = tasks.load_report(task_id)
+                    if storage is not None:
+                        active_stamps[task_id] = first['task_link_stamp']
                     if error or (link is None and not no_captured_execution):
                         complete = False
                     if link is not None:
@@ -371,8 +520,6 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget):
                     try:
                         thread = tasks._require_thread(thread_id)
                         active_ids = tuple(thread.active_task_ids)
-                        if len(active_ids) + len(active_stamps) > limit:
-                            raise ValueError('active_task_link_budget_exceeded')
                         before_stamps = {task_id: _path_stamp(storage.task_path(task_id))
                                          for task_id in active_ids}
                         links, errors = tasks.active_report(thread_id)
@@ -382,6 +529,8 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget):
                             complete = False
                         else:
                             active_stamps.update(before_stamps)
+                            if storage is not None:
+                                thread_stamps[thread_id] = first['thread_stamp']
                         if not _consume_task_links(links, errors, refs, budget, charge_entries=False):
                             complete = False
                     except KeyError:
@@ -391,16 +540,26 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget):
                     complete = False
         except (OSError, ValueError, TypeError, KeyError):
             complete = False
-        budget.charge(entries=len(group), size=_approx_bytes(group))
+        budget.charge(entries=1, size=_approx_bytes(group))
         cursor = index + 1
     protected.update(refs)
     # 最后处理片只登记待复核；下一片开头的一次快照即可核验完整证明，避免同片双扫耗尽所有后续来源预算。
     verified_complete = cursor == len(items) and cursor == initial_cursor and source_complete and complete
     # 未完成只暴露partial；每次继续都从真实来源指纹重核，不把跨新attempt的旧complete缓存成授权。
-    agent._skill_task_protection_scan = {
-        'signature': signature, 'cursor': cursor, 'refs': tuple(sorted(refs)), 'complete': complete,
-        'active_stamps': active_stamps,
+    prefix = previous.get('prefix_refs') or []
+    if groups and cursor == len(items) and complete and not source_complete:
+        last = items[-1][0]
+        after, cursor, signature = [last['task_created_at'], last['task_run_id']], 0, ''
+        prefix = sorted(refs)
+    updated = {
+        'signature': signature, 'cursor': cursor, 'refs': sorted(refs), 'complete': complete,
+        'active_stamps': active_stamps, 'thread_stamps': thread_stamps, 'after': after, 'prefix_refs': prefix,
+        'database_generation': db_generation,
     }
+    if progress is None:
+        agent._skill_task_protection_scan = updated
+    else:
+        progress.update(updated)
     return verified_complete
 
 def _consume_task_links(
