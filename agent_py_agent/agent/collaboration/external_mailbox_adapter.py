@@ -1,25 +1,27 @@
-# LLM: 外部交互式助手安全文件邮箱适配器（External Mailbox Adapter）：
-#   实现协调器与外部交互式助手的严格单写者物理文件隔离：
-#   1. 协调器仅原子写入协调器属主 outbox 文件（temp-write + os.replace）；
-#   2. 仅安全读取外部助手属主 inbox/ACK 文件，严格限制字节数（<= 256 KiB）、限制真实路径处于授权协调根内、硬拒绝软链接；
-#   3. 坏记录与损坏格式走 quarantine/skip 安全隔离，严禁死循环；
-#   4. 绝对禁止生成外部 CLI/PTY/SDK 子进程或模拟发送终端按键。
-# 模块用途: 提供外部助手有界文件邮箱传输适配与同步功能。
-"""Bounded writer-separated external assistant file adapter."""
+"""协调器与外部助手的单写者文件邮箱。"""
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import logging
 import os
-import shutil
 import stat
 import time
+import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import write_json_file_atomic
-from ..common.nofollow_fs import ensure_private_dir
+from ..common.json_io import locked_json_path
+from ..common.nofollow_fs import (
+    _portable_path,
+    _supports_dir_fd,
+    ensure_private_dir,
+    open_directory_beneath,
+    write_text_atomic_beneath,
+)
 from ..common.opaque_id import validate_opaque_id
 from .models import ExternalMailboxLayout
 
@@ -64,16 +66,176 @@ def create_external_mailbox_layout(
     )
 
 
-# LLM: 外部助手安全文件邮箱适配器，负责单写者文件原子写入与有界防逃逸读取。
-# 类用途: 协调器与外部助手的安全文件交换适配器。
+# 以受管目录打开的数据描述符为准，游标身份取同一次 fstat。
+@contextmanager
+def _mailbox_file(root, parts, flags):
+    flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    create = bool(flags & os.O_CREAT)
+    with ExitStack() as stack:
+        if _supports_dir_fd():
+            parent = open_directory_beneath(root, parts[:-1], create=create)
+            stack.callback(os.close, parent)
+            fd = os.open(parts[-1], flags, 0o600, dir_fd=parent)
+            stack.callback(os.close, fd)
+            named = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        else:
+            target = _portable_path(root, parts, create=create)
+            try:
+                before = target.lstat()
+            except FileNotFoundError:
+                before = None
+            if before is not None and not stat.S_ISREG(before.st_mode):
+                raise OSError(errno.EINVAL, "Mailbox leaf must be a regular file")
+            fd = os.open(target, flags, 0o600)
+            stack.callback(os.close, fd)
+            named = target.lstat()
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not os.path.samestat(info, named):
+            raise OSError(errno.EINVAL, "Mailbox leaf must be a stable regular single-link file")
+        yield fd, info
+
+
+def _read_window(stream, size):
+    data = stream.read(size)
+    if len(data) != size:
+        raise OSError(errno.EIO, "Mailbox size changed before the selected bytes could be read")
+    return data
+
+
+# 旧行号只在迁移时扫描一次，使用固定窗口，避免对长行分配整行内存。
+def _legacy_offset(stream, lines, size, window):
+    offset = 0
+    while lines > 0 and offset < size:
+        data = _read_window(stream, min(window, size - offset))
+        count = data.count(b"\n")
+        if count >= lines:
+            return offset + len(data) - len(data.split(b"\n", lines)[-1])
+        offset += len(data)
+        lines -= count
+    return 0
+
+
+def _resume_cursor(stream, info, previous, window, start_line):
+    cursor = {
+        "v": 2, "offset": 0, "st_dev": info.st_dev, "st_ino": info.st_ino, "generation": 0,
+    }
+    fields = ("offset", "generation", "st_dev", "st_ino")
+    if previous.get("v") == 2 and all(type(previous.get(k)) is int and previous[k] >= 0 for k in fields):
+        generation = previous["generation"]
+        offset = previous["offset"]
+        if ((previous["st_dev"], previous["st_ino"]) != (info.st_dev, info.st_ino)
+                or offset > info.st_size):
+            cursor["generation"] = generation + 1
+        else:
+            cursor.update(offset=offset, generation=generation)
+            discard_start = previous.get("discard_start")
+            if type(discard_start) is int and 0 <= discard_start < offset:
+                cursor["discard_start"] = discard_start
+        return cursor
+
+    lines = previous.get("processed_lines", start_line)
+    file_size = previous.get("file_size", 0)
+    if type(lines) is int and lines > 0 and type(file_size) is int and 0 <= file_size <= info.st_size:
+        cursor["offset"] = _legacy_offset(stream, lines, info.st_size, window)
+    return cursor
+
+
+def _parse_mailbox_window(data, cursor, window, start_line):
+    messages, quarantined = [], []
+    offset = cursor["offset"]
+
+    if "discard_start" in cursor:
+        end = data.find(b"\n") + 1
+        if not end:
+            cursor["offset"] += len(data)
+            return messages, quarantined
+        quarantined.append({
+            "byte_start": cursor.pop("discard_start"),
+            "byte_end": offset + end,
+            "reason": "EXCEEDS_MAX_BYTES: line exceeds mailbox window",
+        })
+        offset += end
+        data = data[end:]
+
+    end = data.rfind(b"\n") + 1
+    if not end and len(data) == window:
+        # 余下页继续跳过这一行，见到 LF 时一次性报告完整字节范围。
+        cursor.update(offset=offset + len(data), discard_start=offset)
+        return messages, quarantined
+
+    cursor["offset"] = offset + end
+    for index, line in enumerate(data[:end].split(b"\n")[:-1], start_line + 1):
+        next_offset = offset + len(line) + 1
+        raw = line.strip()
+        if raw:
+            try:
+                entry = json.loads(raw.decode("utf-8"))
+            except (ValueError, RecursionError) as exc:
+                reason = f"JSON_DECODE_ERROR: {exc}"
+            else:
+                reason = "RECORD_NOT_DICT"
+                if isinstance(entry, dict):
+                    messages.append(entry)
+                    offset = next_offset
+                    continue
+            quarantined.append({
+                "line": index,
+                "byte_start": offset,
+                "byte_end": next_offset,
+                "reason": reason,
+                "content": raw[:100].decode("utf-8", errors="replace"),
+            })
+        offset = next_offset
+    return messages, quarantined
+
+
+def _inbox_io_error(path, phase, exc):
+    return {
+        "path": str(path),
+        "reason": f"{phase}: {exc}",
+        "error_code": "MAILBOX_INBOX_IO_ERROR",
+        "exception_type": type(exc).__name__,
+        "errno": exc.errno,
+        "retryable": True,
+        "effect_outcome": "unknown" if phase == "cursor_write_failed" else "not_started",
+        "next_action": "Retry sync_external_mailbox with the same mailbox and message IDs.",
+    }
+
+
+def _message_receipt(cursor, message_id):
+    # 按身份、代次和消息 ID 做精确点查。分桶限制单目录大小，进程重启后仍可识别重复消息。
+    key = json.dumps([cursor["st_dev"], cursor["st_ino"], cursor["generation"], message_id])
+    digest = hashlib.sha256(key.encode("ascii")).hexdigest()
+    return ".coordinator_seen", digest[:2], digest[2:]
+
+
+def _receipt_exists(root, parts):
+    try:
+        with _mailbox_file(root, parts, os.O_RDONLY):
+            return True
+    except FileNotFoundError:
+        return False
+
+
+def _load_cursor(path):
+    try:
+        with _mailbox_file(path.parent, (path.name,), os.O_RDONLY) as (fd, _):
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
+                saved = json.load(stream)
+    except (FileNotFoundError, ValueError, RecursionError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
 class ExternalMailboxAdapter:
-    # LLM: 初始化邮箱适配器，记录允许的根目录集合与最大单文件读取上限（默认 256 KiB）。
-    # 函数用途: 构造外部助手邮箱适配器。
+    # max_file_bytes 限制每次收件箱读取的窗口。
     def __init__(
         self,
         allowed_roots: tuple[Path | str, ...] | list[Path | str],
         max_file_bytes: int = 262144,
     ) -> None:
+        if type(max_file_bytes) is not int or max_file_bytes <= 0:
+            raise ValueError("max_file_bytes must be a positive integer window size")
         self.allowed_roots = tuple(Path(r).resolve() for r in allowed_roots)
         self.max_file_bytes = max_file_bytes
 
@@ -95,10 +257,7 @@ class ExternalMailboxAdapter:
             message=f"MAILBOX_SECURITY_VIOLATION: Symlink rejected for mailbox path: {target}",
         )
         resolved = Path(os.path.realpath(target))
-        is_confined = any(
-            str(resolved).startswith(str(root) + os.sep) or resolved == root
-            for root in self.allowed_roots
-        )
+        is_confined = any(resolved.is_relative_to(root) for root in self.allowed_roots)
         if not is_confined:
             raise ExternalMailboxSecurityError(
                 f"MAILBOX_SECURITY_VIOLATION: Path {target} resolves to {resolved} outside allowed roots",
@@ -106,143 +265,70 @@ class ExternalMailboxAdapter:
             )
         return resolved
 
-    # LLM: 安全读取外部助手写入的 inbox 文件，包含大小上限检查、软链接拒绝与格式异常跳过/隔离。
-    # 函数用途: 读取外部助手上报的消息记录列表。
+    def _read_actor_batch(self, layout, previous, *, start_line=0):
+        path = layout.actor_inbox_path
+        phase = "open_or_stat_failed"
+        try:
+            root, parts = self._confined_file(path)
+            with _mailbox_file(root, parts, os.O_RDONLY) as (fd, info):
+                phase = "read_failed"
+                with os.fdopen(fd, "rb", buffering=0, closefd=False) as stream:
+                    cursor = _resume_cursor(stream, info, previous, self.max_file_bytes, start_line)
+                    stream.seek(cursor["offset"])
+                    data = _read_window(stream, min(self.max_file_bytes, info.st_size - cursor["offset"]))
+            messages, quarantined = _parse_mailbox_window(data, cursor, self.max_file_bytes, start_line)
+            return messages, quarantined, cursor
+        except FileNotFoundError:
+            return [], [], None
+        except ExternalMailboxSecurityError as exc:
+            return [], [{"path": str(path), "reason": str(exc), "error_code": exc.error_code}], None
+        except OSError as exc:
+            return [], [_inbox_io_error(path, phase, exc)], None
+
+    def _confined_file(self, path):
+        resolved = self.validate_confined_path(path)
+        for root in self.allowed_roots:
+            if resolved != root and resolved.is_relative_to(root):
+                return root, resolved.relative_to(root).parts
+        raise ExternalMailboxSecurityError(
+            "Mailbox data must be a file below an allowed root",
+            error_code="PATH_TRAVERSAL_FORBIDDEN",
+        )
+
     def read_actor_messages(
         self,
         layout: ExternalMailboxLayout,
         *,
         start_line: int = 0,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        valid_records: list[dict[str, Any]] = []
-        quarantined: list[dict[str, Any]] = []
+        """按旧行号入口读取一页完整记录。持续同步使用持久化字节游标。"""
+        messages, quarantined, _ = self._read_actor_batch(layout, {}, start_line=start_line)
+        return messages, quarantined
 
-        path = layout.actor_inbox_path
-
-        try:
-            self.validate_confined_path(path)
-            file_stat = path.stat()
-        except ExternalMailboxSecurityError as exc:
-            quarantined.append({"path": str(path), "reason": str(exc), "error_code": exc.error_code})
-            return valid_records, quarantined
-        except FileNotFoundError:
-            return valid_records, quarantined
-        except OSError as exc:
-            quarantined.append({
-                "path": str(path),
-                "reason": f"stat_failed: {exc}",
-                "error_code": "MAILBOX_INBOX_IO_ERROR",
-                "exception_type": type(exc).__name__,
-                "errno": exc.errno,
-                "retryable": True,
-            })
-            return valid_records, quarantined
-
-        if file_stat.st_size > self.max_file_bytes:
-            # 超过 256 KiB 限制，安全隔离并不读取内容
-            quarantine_dir = path.parent / ".quarantine"
-            ensure_private_dir(quarantine_dir)
-            quarantine_dest = quarantine_dir / f"oversize_{int(time.time())}_{path.name}"
-            try:
-                shutil.move(str(path), str(quarantine_dest))
-            except Exception as move_err:  # noqa: BLE001
-                logger.warning("Failed to move oversized mailbox file: %s", move_err)
-            quarantined.append({
-                "path": str(path),
-                "reason": f"EXCEEDS_MAX_BYTES: size={file_stat.st_size} max={self.max_file_bytes}",
-                "quarantine_path": str(quarantine_dest),
-            })
-            return valid_records, quarantined
-
-        # 逐行读取 JSONL
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-        except OSError as exc:
-            quarantined.append({
-                "path": str(path),
-                "reason": f"read_failed: {exc}",
-                "error_code": "MAILBOX_INBOX_IO_ERROR",
-                "exception_type": type(exc).__name__,
-                "errno": exc.errno,
-                "retryable": True,
-            })
-            return valid_records, quarantined
-
-        has_corrupt = False
-        valid_lines: list[str] = []
-        for line_no, raw_line in enumerate(lines, 1):
-            if line_no <= start_line:
-                continue
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                if isinstance(data, dict):
-                    valid_records.append(data)
-                    valid_lines.append(raw_line)
-                else:
-                    has_corrupt = True
-                    quarantined.append({
-                        "line": line_no,
-                        "reason": "RECORD_NOT_DICT",
-                        "content": line[:100],
-                    })
-            except Exception as exc:  # noqa: BLE001
-                has_corrupt = True
-                quarantined.append({
-                    "line": line_no,
-                    "reason": f"JSON_DECODE_ERROR: {exc}",
-                    "content": line[:100],
-                })
-
-        # 若存在坏行，可选择将损坏行记录日志并保留有效记录
-        if has_corrupt:
-            logger.warning("Quarantined %d corrupt records in %s", len(quarantined), path)
-
-        return valid_records, quarantined
-
-    # LLM: 协调器原子写入消息到 coordinator_outbox 文件（单写者；临时文件 + os.replace）。
-    # 函数用途: 向外部助手的收件箱原子推送新交接或指令。
     def write_coordinator_message(
         self,
         layout: ExternalMailboxLayout,
         message: dict[str, Any],
     ) -> None:
-        target_path = layout.coordinator_outbox_path
-        self.validate_confined_path(target_path.parent)
+        """用原路径锁串行追加一条消息，保留已有数据与文件身份。"""
+        target = layout.coordinator_outbox_path
+        self.validate_confined_path(target.parent)
+        root, parts = self._confined_file(target)
+        target = root.joinpath(*parts)
+        ensure_private_dir(target.parent)
+        packet = dict(message)
+        if not packet.get("message_id"):
+            packet["message_id"] = uuid.uuid4().hex
+        data = (json.dumps(packet, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        with locked_json_path(target), _mailbox_file(root, parts, os.O_WRONLY | os.O_APPEND | os.O_CREAT) as (fd, info):
+            written = os.write(fd, data)
+            if written != len(data):
+                # 单写者锁内回收本次短写的尾部，保留此前已经追加的行。
+                if written and os.fstat(fd).st_size == info.st_size + written:
+                    os.ftruncate(fd, info.st_size)
+                raise OSError(errno.EIO, f"Mailbox append wrote {written} of {len(data)} bytes")
+            os.fsync(fd)
 
-        self._ensure_not_symlink(
-            target_path,
-            message=f"MAILBOX_SECURITY_VIOLATION: coordinator_outbox is a symlink: {target_path}",
-        )
-
-        ensure_private_dir(target_path.parent)
-
-        # 读取已有行并追加新行，写入同目录下临时文件后原子替换
-        existing_lines: list[str] = []
-        try:
-            with open(target_path, encoding="utf-8") as f:
-                existing_lines = f.readlines()
-        except FileNotFoundError:
-            existing_lines = []
-
-        serialized_message = json.dumps(message, ensure_ascii=False, sort_keys=True)
-        existing_lines.append(serialized_message + "\n")
-
-        pid = os.getpid()
-        ns = time.time_ns()
-        tmp_path = target_path.parent / f".tmp.{target_path.name}.{pid}_{ns}"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.writelines(existing_lines)
-            f.flush()
-            os.fsync(f.fileno())
-
-        os.replace(tmp_path, target_path)
-
-    # LLM: 同步外部邮箱：消费助手 inbox 的 ACK/提交，推送 published 交接项到 coordinator_outbox。
-    # 函数用途: 批量同步外部邮箱的双向交接状态。
     def sync_external_mailbox(
         self,
         handoff_service: HandoffBoardService,
@@ -250,68 +336,40 @@ class ExternalMailboxAdapter:
         *,
         now: float | None = None,
     ) -> dict[str, Any]:
+        cursor_path = self.validate_confined_path(layout.actor_inbox_path.parent) / ".coordinator_cursor.json"
+        with locked_json_path(cursor_path):
+            return self._sync_locked(handoff_service, layout, cursor_path, now)
+
+    def _sync_locked(self, handoff_service, layout, cursor_path, now):
         current_time_val = float(now if now is not None else time.time())
-
-        inbox_path = layout.actor_inbox_path
-        cursor_path = inbox_path.parent / ".coordinator_cursor.json"
-
-        processed_lines = 0
-        last_file_size = 0
+        mailbox_dir = cursor_path.parent
         try:
-            with open(cursor_path, encoding="utf-8") as f:
-                cdata = json.load(f)
-            if isinstance(cdata, dict):
-                processed_lines = int(cdata.get("processed_lines") or 0)
-                last_file_size = int(cdata.get("file_size") or 0)
-        except FileNotFoundError:
-            pass
-        except Exception:
-            processed_lines = 0
-            last_file_size = 0
-
-        current_file_size = 0
-        total_file_lines = 0
-        inbox_io_error = False
-        inbox_exists = False
-        try:
-            st = inbox_path.stat()
-            inbox_exists = True
-            current_file_size = st.st_size
-            with open(inbox_path, encoding="utf-8", errors="replace") as f:
-                for _ in f:
-                    total_file_lines += 1
-        except FileNotFoundError:
-            inbox_exists = False
-            current_file_size = 0
-            total_file_lines = 0
-        except OSError:
-            current_file_size = 0
-            total_file_lines = 0
-            inbox_io_error = True
-
-        if not inbox_io_error and (current_file_size < last_file_size or total_file_lines < processed_lines):
-            # File shrunk, rotated, or truncated
-            processed_lines = 0
-
-        messages, quarantined = self.read_actor_messages(layout, start_line=processed_lines)
+            previous = _load_cursor(cursor_path)
+        except OSError as exc:
+            previous = None
+            messages, quarantined, cursor = [], [_inbox_io_error(cursor_path, "cursor_read_failed", exc)], None
+        if previous is not None:
+            messages, quarantined, cursor = self._read_actor_batch(layout, previous)
 
         delivered_item_ids: list[str] = []
         acked_item_ids: list[str] = []
         submitted_item_ids: list[str] = []
         errors: list[dict[str, Any]] = []
-        retryable_apply_error = inbox_io_error or any(
-            bool(entry.get("retryable")) for entry in quarantined if isinstance(entry, dict)
-        )
+        retryable_apply_error = False
 
         # 1. 消费外部助手的回复
         for msg in messages:
             action = str(msg.get("action") or msg.get("type") or "").strip().lower()
             case_id = str(msg.get("case_id") or "").strip()
             item_id = str(msg.get("item_id") or "").strip()
-            if not case_id or not item_id:
+            if not case_id or not item_id or action not in {"ack", "record_ack", "submit", "submit_handoff"}:
                 continue
 
+            message_id = str(msg.get("message_id") or "").strip()
+            receipt = _message_receipt(cursor, message_id) if message_id else None
             try:
+                if receipt is not None and _receipt_exists(mailbox_dir, receipt):
+                    continue
                 if action in {"ack", "record_ack"}:
                     item = handoff_service.store.load_handoff_item(case_id, item_id)
                     if item is None or item.responsible_actor != layout.actor_id:
@@ -386,6 +444,10 @@ class ExternalMailboxAdapter:
                         now=current_time_val,
                     )
                     submitted_item_ids.append(item_id)
+                if receipt is not None:
+                    # 原交接应用可重放。只有应用成功后才留下去重记录。
+                    with _mailbox_file(mailbox_dir, receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL):
+                        pass
             except OSError as exc:
                 retryable_apply_error = True
                 logger.warning(
@@ -413,18 +475,11 @@ class ExternalMailboxAdapter:
             except Exception as exc:  # noqa: BLE001
                 errors.append({"item_id": item_id, "action": action, "error": str(exc)})
 
-        # 记录处理进度 cursor；存在可重试 I/O 故障时保持游标不前进，避免消息丢失
-        if inbox_exists and not retryable_apply_error:
+        if cursor is not None and cursor != previous and not retryable_apply_error:
             try:
-                write_json_file_atomic(
-                    cursor_path,
-                    {
-                        "processed_lines": max(processed_lines, total_file_lines),
-                        "file_size": current_file_size,
-                    },
-                )
-            except Exception as cursor_err:
-                logger.warning("Failed to persist mailbox coordinator cursor: %s", cursor_err)
+                write_text_atomic_beneath(mailbox_dir, (cursor_path.name,), json.dumps(cursor) + "\n", durable=False)
+            except OSError as exc:
+                quarantined.append(_inbox_io_error(cursor_path, "cursor_write_failed", exc))
 
         # 2. 检查是否有待投递给该 external_assistant 的 published 交接项
         try:
@@ -442,8 +497,10 @@ class ExternalMailboxAdapter:
             if delivery_receipt.get("mailbox_outbox_path"):
                 continue
 
+            message_key = f"{item.case_id}:{item.item_id}".encode()
             packet = {
                 "action": "dispatch_item",
+                "message_id": f"mailbox_deliv_{hashlib.sha256(message_key).hexdigest()}",
                 "item_id": item.item_id,
                 "case_id": item.case_id,
                 "request_id": item.request_id,
