@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,6 +48,62 @@ from agent_py_agent.agent.memory_store.migration import MemoryMigrationService
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 # ---------- 辅助(与既有 curator/migration 测试同一构造约定) ----------
+
+
+@pytest.fixture(autouse=True)
+def scan_clock(monkeypatch):
+    """Curator 消息扫描 25ms 片只读测试推进的单调时钟；条目、字节与真实会话读取不变，宿主负载不能让片先到期。"""
+    from agent_py_agent.agent.memory_store import curator_inputs, retention_scan_budget
+
+    clock = SimpleNamespace(now=1000.0)
+    source = SimpleNamespace(monotonic=lambda: clock.now)
+    monkeypatch.setattr(curator_inputs, "time", source)
+    monkeypatch.setattr(retention_scan_budget, "time", source)
+    return clock
+
+
+def _trace_lease_and_commit(monkeypatch, service, trace: list) -> None:
+    """按发生顺序记录领取到的租约代次、候选提交点与租约释放；原实现照常执行。"""
+    from agent_py_agent.agent.memory_store import curator_lease
+
+    acquire, commit = service.committer.recover_and_acquire, service.committer.commit
+    release = curator_lease.release_curator_lease
+
+    def observed_acquire(request):
+        acquired = acquire(request)
+        lease = acquired[1] if acquired is not None else {}
+        trace.append(("lease", lease.get("lease_id"), lease.get("reason_generation")))
+        return acquired
+
+    def observed_commit(request):
+        committed = commit(request)
+        state = request.state_commit
+        trace.append(("commit", state.lease_id, state.candidate_count, dict(state.per_thread_cursors)))
+        return committed
+
+    def observed_release(store, lease_id):
+        release(store, lease_id)
+        trace.append(("release", lease_id))
+
+    monkeypatch.setattr(service.committer, "recover_and_acquire", observed_acquire)
+    monkeypatch.setattr(service.committer, "commit", observed_commit)
+    monkeypatch.setattr(curator_lease, "release_curator_lease", observed_release)
+
+
+def _expire_slice_after_thread_listing(monkeypatch, store: ConversationStore, clock) -> None:
+    """CI 所见次序：持租约的消息扫描列出线程后、读取首个线程前，本片 25ms 已到期。"""
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_MS
+
+    original, fired = store.threads.record_snapshot_report, []
+
+    def listed(thread_id: str, *, max_bytes: int):
+        result = original(thread_id, max_bytes=max_bytes)
+        if not fired:
+            fired.append(True)
+            clock.now += RETENTION_SCAN_SLICE_MS / 1000 * 2
+        return result
+
+    monkeypatch.setattr(store.threads, "record_snapshot_report", listed)
 
 
 class _StaticStructuredBackend:
@@ -280,21 +337,28 @@ def test_lessons_list_fails_closed_after_migration_marker(tmp_path: Path):
 
 
 class _FailingFormalSource:
+    def __init__(self, trace: list | None = None) -> None:
+        self.trace = trace
+
     def read(self, *, max_items: int, max_chars: int, query: str = "", pinned_ids: tuple[str, ...] = ()):
         del max_items, max_chars, query, pinned_ids
+        if self.trace is not None:
+            self.trace.append(("formal_read",))
         raise RuntimeError("probe: formal memory unavailable")
 
 
-def test_curator_formal_read_failure_degrades_but_commits(tmp_path: Path):
+def test_curator_formal_read_failure_degrades_but_commits(tmp_path: Path, monkeypatch):
     store = ConversationStore(tmp_path / "conversations")
     thread, message = _conversation(store)
     backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id))
+    trace: list = []
     service = _curator_service(
         tmp_path,
         backend,
         store=store,
-        formal_memory_source=_FailingFormalSource(),
+        formal_memory_source=_FailingFormalSource(trace),
     )
+    _trace_lease_and_commit(monkeypatch, service, trace)
 
     # 修前:CURATOR_FORMAL_MEMORY_READ_FAILED → 每次 run 失败,提炼完全瘫痪。
     result = service.run(reason="admin")
@@ -304,6 +368,63 @@ def test_curator_formal_read_failure_degrades_but_commits(tmp_path: Path):
     assert any(
         "formal_memory_read_skipped" in warning for warning in result.warnings
     )
+    assert service.candidate_service.list()[0].content == "个人电脑使用 macOS。"
+    # 同一租约内：领取(首代) → 正式读取真实中断 → 候选提交推进游标 → 释放。
+    lease_id = trace[0][1]
+    assert trace == [
+        ("lease", lease_id, 1),
+        ("formal_read",),
+        ("commit", lease_id, 1, {thread.thread_id: message.message_id}),
+        ("release", lease_id),
+    ]
+    state = service.state_store.load()
+    assert not state.active_lease and state.per_thread_cursors == {thread.thread_id: message.message_id}
+
+
+# LLM: busy 只来自真实持有者竞争或明确的扫描片到期；两者都不提交候选、不推进游标，原因各自可追溯，原因消除后同一输入才成功。
+# 函数用途: 分开验证租约持有者竞争与 CI 所见扫描片到期次序，不把任何 busy 当作成功。
+@pytest.mark.parametrize("cause", ["lease_holder", "scan_slice_expired"])
+def test_curator_busy_commits_nothing_until_retry(tmp_path: Path, monkeypatch, scan_clock, cause):
+    from agent_py_agent.agent.memory_store.curator_lease import release_curator_lease
+    from agent_py_agent.agent.memory_store.curator_state import CuratorLeaseRequest
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread, message = _conversation(store)
+    backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id))
+    trace: list = []
+    service = _curator_service(tmp_path, backend, store=store, formal_memory_source=_FailingFormalSource(trace))
+    holder = before = None
+    if cause == "lease_holder":
+        _state, holder = service.committer.recover_and_acquire(CuratorLeaseRequest("admin", "fixture", 120, None))
+        before = service.state_store.path.read_bytes()
+    else:
+        _expire_slice_after_thread_listing(monkeypatch, store, scan_clock)
+    _trace_lease_and_commit(monkeypatch, service, trace)
+
+    busy = service.run(reason="admin")
+
+    assert busy.status == "busy" and busy.reason == "admin" and not busy.failure_code
+    assert not service.candidate_service.list()
+    if holder is not None:
+        # 活着的持有者让领取返回空：本次不读正式记忆、不提交，也不改写状态或原租约。
+        assert trace == [("lease", None, None)] and busy.warnings == ()
+        assert service.state_store.path.read_bytes() == before
+        assert service.state_store.load().active_lease["lease_id"] == holder["lease_id"]
+        release_curator_lease(service.state_store, holder["lease_id"])
+    else:
+        # 片在首个线程读取前到期：持租约读过正式窗口后按 partial busy 释放，候选与游标都不动。
+        lease_id = trace[0][1]
+        assert trace == [("lease", lease_id, 1), ("formal_read",), ("release", lease_id)]
+        assert "message_scan_partial" in busy.warnings
+        state = service.state_store.load()
+        assert not state.active_lease and not state.per_thread_cursors
+    trace.clear()
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded" and result.candidates == 1
+    assert [step[0] for step in trace] == ["lease", "formal_read", "commit", "release"]
+    assert trace[2][3] == {thread.thread_id: message.message_id}
     assert service.candidate_service.list()[0].content == "个人电脑使用 macOS。"
 
 

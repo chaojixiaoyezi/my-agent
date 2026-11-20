@@ -20,6 +20,16 @@ from agent_py_agent.agent.workflows.business_scope import WorkflowScopeService, 
 DAY = 86_400
 
 
+@pytest.fixture(autouse=True)
+def scan_clock(monkeypatch):
+    """保留扫描25ms片只读测试推进的单调时钟；条目/字节预算与真实目录读取不变，宿主负载不能让某一拍先判部分覆盖。"""
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
+
+
 def _counts(**changes):
     return {'recycled': 0, 'skipped': 0, 'failed': 0, 'unknown': 0, **changes}
 
@@ -300,12 +310,16 @@ def test_resume_keeps_original_row_authorization_cas_reference_and_age_guards(ow
     _create(owner, 'a-first')
     _create(owner, 'b-guarded')
     owner.clock[0] += 31 * DAY
-    _fail_once(monkeypatch, phase='progress')
+    failures = _fail_once(monkeypatch, phase='progress')
     failed = _tick(owner)
     pending = _record(owner)['inflight']
     identity = pending['identity']
     assert failed['workflow_maintenance']['executed'] is False and pending['position'] == 0
     assert owner.writes == ['a-first']
+    # 唯一中断点：首个进度写入失败时持久账本仍停在原操作身份的位置0。
+    assert len(failures) == 1 and failures[0]['inflight']['identity'] == identity
+    assert failures[0]['inflight']['position'] == 0
+    row = next(item for item in pending['rows'] if item['workflow_ref'] == 'b-guarded')
     ref = {'workflow_ref': 'b-guarded'}
     if guard == 'scope_cas':
         owner.api.execute('workflows.scope.set', {**ref, 'scope': {'scope_mode': 'spaces', 'space_ids': ['space']}},
@@ -324,8 +338,14 @@ def test_resume_keeps_original_row_authorization_cas_reference_and_age_guards(ow
     elif guard == 'recycle_permission':
         owner.access['denied'].add(('workflows.recycle', 'b-guarded'))
     else:
+        from agent_py_agent.agent.assets import workflow_store
+
         definition = owner.api._get('b-guarded').to_dict()
-        owner.api.store.save_workflow({**definition, 'body_markdown': '真正更新内容，重新起算孤立期限'})
+        # 编辑时刻由测试时钟给定，落在两次维护拍之间；真实正文变化以此重新起算孤立期限。
+        edited_at = owner.clock[0] + DAY / 2
+        with monkeypatch.context() as patch:
+            patch.setattr(workflow_store, 'time', SimpleNamespace(time=lambda: edited_at))
+            owner.api.store.save_workflow({**definition, 'body_markdown': '真正更新内容，重新起算孤立期限'})
     owner.clock[0] += DAY
     recovered = _tick(owner)['workflow_maintenance']
     assert recovered['executed'] is True and recovered['operation_id'] == identity
@@ -333,6 +353,14 @@ def test_resume_keeps_original_row_authorization_cas_reference_and_age_guards(ow
         else _counts(recycled=1, skipped=1))
     assert workflow_state(owner.api._get('b-guarded'))['lifecycle'] == 'active'
     assert owner.writes == ['a-first'] and _record(owner)['inflight'] is None
+    assert len(failures) == 1
+    if guard == 'content_edit':
+        # 年龄与行CAS守卫的输入确实变化，已编辑对象原样保留而非回收或回退。
+        edited = owner.api._get('b-guarded')
+        state = workflow_state(edited)
+        assert edited.body_markdown == '真正更新内容，重新起算孤立期限'
+        assert state['last_content_edit_at'] == state['orphan_since'] == edited_at != row['orphan_since']
+        assert edited.descriptor.revision != row['definition_revision']
 
 
 def test_wrong_owner_and_revoked_row_permission_cannot_consume_pending(owner, monkeypatch):

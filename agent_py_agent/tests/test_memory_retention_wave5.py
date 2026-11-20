@@ -1372,17 +1372,17 @@ def _r5_finish_verification(snapshot, errors):
 
 # LLM: 夹具只写临时线程；固定真实inode的粗时钟观察，并精确控制引用偏移与总字节数。
 # 函数用途: 构造可复现中段等长改写的大热来源。
-def _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib=300):
+def _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib=300, *, thread_id="t"):
     from agent_py_agent.agent.memory_store import reference_pins
 
     home, _, service = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
     control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
-    prefix = '{"thread_id":"t","summary":"' + "p" * (offset_kib * 1024)
+    prefix = '{"thread_id":"' + thread_id + '","summary":"' + "p" * (offset_kib * 1024)
     prefix += '","source_refs":["' + str(control) + '"],"note":"'
     payload = prefix + "q" * (size_kib * 1024 - len(prefix.encode()) - 3) + '"}\n'
     directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
-    path = old_file(directory / "t.json", payload)
+    path = old_file(directory / f"{thread_id}.json", payload)
     assert path.stat().st_size == size_kib * 1024
     assert offset_kib * 1024 < payload.index("pin-a.jsonl") < (offset_kib + 1) * 1024
     fixed = path.stat()
@@ -1669,19 +1669,42 @@ def test_r6_rewrite_of_post_verified_slice_never_publishes_stale_pins(tmp_path, 
 
 
 # LLM: 较短来源已在某轮完成post、较长来源仍pending时改写较短来源；后续发布不得复用其跨current的旧完成结果。
-# 函数用途: 回归R5-F01多源post完成复用，发布结果必须保护改写后的新引用。
-def test_r6_completed_post_of_one_source_is_not_reused_while_another_is_pending(tmp_path, monkeypatch):
+#   同页成员访问顺序由测试显式给出（生产保持真实目录顺序自由）：较短来源先被访问，事件证明其本轮post已完成且较长来源仍pending后才注入等长改写。
+# 函数用途: 在指定成员访问顺序下回归R5-F01多源post完成复用，发布结果必须保护改写后的新引用。
+def _completed_post_reuse_case(tmp_path, monkeypatch, *, short_id, long_id):
+    import threading
+
     from agent_py_agent.agent.memory_store import reference_pins
-    home,_,first,target,payload=_r5_hot_thread(tmp_path,monkeypatch,600,100)
-    second=first.with_name("u.json")
-    second.write_text(json.dumps({"thread_id":"u","summary":"s"*(2048*1024)}))
+    from agent_py_agent.agent.user_space import directory_paging
+
+    home,_,first,target,payload=_r5_hot_thread(tmp_path,monkeypatch,600,100,thread_id=short_id)
+    second=first.with_name(long_id+".json")
+    second.write_text(json.dumps({"thread_id":long_id,"summary":"s"*(2048*1024)}))
     _freeze_pin_file_stat(monkeypatch,second)
+    original_page, pages = directory_paging.directory_page, []
+
+    # LLM: 只重排同一原生页内的这两个线程成员（任一顺序都是合法readdir结果），续点、成员身份与其余成员不变。
+    # 函数用途: 固定成员访问顺序，使两种名字顺序都确定进入“首源已完成、次源pending”的交错。
+    def page(root, parts, cursor, limit, *, require_dir_fd=True):
+        names, after, complete = original_page(root, parts, cursor, limit, require_dir_fd=require_dir_fd)
+        if Path(root, *parts) == first.parent and {first.name, second.name} <= set(names):
+            names = [first.name, second.name, *(name for name in names if name not in {first.name, second.name})]
+            pages.append(tuple(names))
+        return names, after, complete
+
+    monkeypatch.setattr(directory_paging, "directory_page", page)
     original,fired=scan._PinProjection._chunks,[]
+    first_verified, second_pending = threading.Event(), threading.Event()
     def chunks(projection,source,**kwargs):
-        if source==second and kwargs.get("verifying") and first in projection.post_scopes and not fired:
+        if (source==second and kwargs.get("verifying") and first_verified.is_set()
+                and first in projection.post_scopes and not fired):
+            if projection.post_scopes.get(second) != projection.contents["pass_token"]:
+                second_pending.set()
             first.write_text(payload.replace("pin-a.jsonl","pin-b.jsonl"))
             fired.append(True)
         yield from original(projection,source,**kwargs)
+        if source==first and kwargs.get("verifying") and first in projection.post_scopes:
+            first_verified.set()
     monkeypatch.setattr(scan._PinProjection,"_chunks",chunks)
     snapshot=_ProjectionSnapshot(home,(),NOW)
     for _ in range(12):
@@ -1693,10 +1716,24 @@ def test_r6_completed_post_of_one_source_is_not_reused_while_another_is_pending(
             assert fired and complete and pins.protects(target,[]),"stale hot post was reused across passes"
             break
     assert fired
+    assert first_verified.is_set() and second_pending.is_set()
+    assert pages and all(names[:2] == (first.name, second.name) for names in pages)
     settled=max(first.stat().st_ctime_ns,second.stat().st_ctime_ns)+3_000_000_000
     monkeypatch.setattr(reference_pins.time,"time_ns",lambda:settled)
     pins,complete=_r5_finish_verification(snapshot,[])
     assert complete and pins.protects(target,[])
+
+
+# LLM: 名字序t先于u；较短来源t先被访问。
+# 函数用途: 回归R5-F01多源post完成复用，发布结果必须保护改写后的新引用。
+def test_r6_completed_post_of_one_source_is_not_reused_while_another_is_pending(tmp_path, monkeypatch):
+    _completed_post_reuse_case(tmp_path, monkeypatch, short_id="t", long_id="u")
+
+
+# LLM: 颠倒成员访问顺序：u先于t（R2在Linux 3.12看到的目录次序），较短来源改为u以保持同一交错。
+# 函数用途: 证明多源post复用防线与成员访问顺序无关。
+def test_r6_completed_post_reuse_in_reversed_member_access_order(tmp_path, monkeypatch):
+    _completed_post_reuse_case(tmp_path, monkeypatch, short_id="u", long_id="t")
 
 
 # LLM: 正式记忆旧格式路径对同一<=256KiB热源有显式watch、_pin_rows读前读后、显式读后与最终复核；外加重试也不得每current超过1MiB摘要读取。

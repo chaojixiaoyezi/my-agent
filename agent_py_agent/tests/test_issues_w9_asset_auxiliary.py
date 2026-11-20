@@ -2,10 +2,15 @@
 # 模块用途: 验证资产辅助TTL通道不碰正式版本、blob、待发表证据和用户提案。
 import gc
 import json
+import os
+import subprocess
+import sys
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,6 +44,21 @@ from agent_py_agent.tests.test_issues_w14_lane_wiring_e2e import _fd_count
 @pytest.fixture
 def setup(tmp_path):
     return ensure_my_agent_home(tmp_path / 'home'), datetime.now(timezone.utc)
+
+
+# LLM: 辅助lane与引用投影各自的25ms片只读测试推进的单调时钟；条目/字节预算、pin来源、目录、锁与unlink仍真实执行。
+#   宿主负载不能再让引用投影或lane片在观察点前到期；测试自行替换的片时钟（慢pin、空片）仍覆盖本时钟。
+# 函数用途: 固定两处片预算时钟，只有测试显式推进时片才到期。
+@pytest.fixture(autouse=True)
+def slice_clock(monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+    from agent_py_agent.agent.user_space import storage_lanes
+
+    clock = SimpleNamespace(now=1000.0)
+    source = SimpleNamespace(monotonic=lambda: clock.now)
+    monkeypatch.setattr(storage_lanes, 'time', source)
+    monkeypatch.setattr(retention_scan_budget, 'time', source)
+    return clock
 
 
 # LLM: 参数为冻结调度DTO；每次调用重新建立预算，不保存模型侧隐形状态。
@@ -131,26 +151,127 @@ def user_proposal(setup, name, *, committed=False):
     return home.owner_home_dir / 'data' / 'asset_extractions' / (value['proposal_id'] + '.json')
 
 
-# LLM: 线程持有与生产相同的请求锁或记录集合锁，事件保证测试观察点准确。
-# 函数用途: 构造可重复的原领域锁竞争。
+# LLM: 线程持有与生产相同的请求锁或记录集合锁，事件保证测试观察点准确；给出sidecar时记录持有者所持锁文件inode。
+# 函数用途: 构造可重复的原领域锁竞争，released事件确认锁已在上下文退出后真实释放。
 @contextmanager
-def held_lock(lock):
-    ready, release = threading.Event(), threading.Event()
+def held_lock(lock, sidecar=None):
+    ready, release, released = threading.Event(), threading.Event(), threading.Event()
+    holder = SimpleNamespace(inode=None, released=released)
     # LLM: 上下文退出才释放锁，不用sleep猜测锁已获得。
     # 函数用途: 持有真实领域锁。
     def worker():
         with lock:
+            if sidecar is not None:
+                holder.inode = os.stat(sidecar).st_ino
             ready.set()
             assert release.wait(10)
+        released.set()
     thread = threading.Thread(target=worker)
     thread.start()
     assert ready.wait(5)
     try:
-        yield
+        yield holder
     finally:
         release.set()
         thread.join(5)
-        assert not thread.is_alive()
+        assert not thread.is_alive() and released.is_set()
+
+
+# 子进程经生产锁入口持有同一规范OS锁；只打印锁文件inode与释放回执作握手，不写任何领域记录。
+_LOCK_HOLDER_PROGRAM = '''
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[2])
+if sys.argv[1] == 'json':
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    lock, sidecar = locked_json_path(target), target.with_name(target.name + '.lock')
+else:
+    from agent_py_agent.agent.common.directory_lock import locked_private_directory
+
+    lock = locked_private_directory(target, relative_parts=('data', 'asset_extractions'), lock_name='.records.lock')
+    sidecar = target / 'data' / 'asset_extractions' / '.records.lock'
+with lock:
+    print('held', os.stat(sidecar).st_ino, flush=True)
+    sys.stdin.readline()
+print('released', flush=True)
+'''
+
+
+# LLM: 另一进程只占OS锁层，本进程线程锁层保持空闲；握手行由读线程转为事件，所有等待有界并断言。
+# 函数用途: 构造跨进程的同一规范锁竞争，退出时确认子进程已释放并正常结束。
+@contextmanager
+def held_lock_in_process(kind, target):
+    child = subprocess.Popen([sys.executable, '-c', _LOCK_HOLDER_PROGRAM, kind, str(target)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        cwd=Path(__file__).resolve().parents[2])
+    lines, ready, released = [], threading.Event(), threading.Event()
+    # LLM: 只把子进程输出转成握手事件并留作失败诊断。
+    # 函数用途: 读取持锁与释放回执。
+    def read():
+        for line in child.stdout:
+            lines.append(line.rstrip('\n'))
+            if line.startswith('held '):
+                ready.set()
+            elif line.startswith('released'):
+                released.set()
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        assert ready.wait(30), lines
+        inode = int(next(line for line in lines if line.startswith('held ')).split()[1])
+        yield SimpleNamespace(inode=inode, released=released)
+    finally:
+        child.stdin.close()
+        try:
+            code = child.wait(30)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            code = child.wait(5)
+        reader.join(5)
+        assert code == 0 and released.is_set() and not reader.is_alive(), lines
+
+
+# LLM: 原锁入口与异常原样执行；只记录尝试时的成员名、锁文件inode、本片剩余时间与已计读取字节。
+# 函数用途: 进入一个领域锁并登记取得或忙碌的观察点。
+@contextmanager
+def _observed_lock(manager, name, sidecar, attempts, attempted):
+    meter = history._AUXILIARY_READ_METER.get()
+    fact = {'name': name, 'inode': sidecar.stat().st_ino if sidecar.exists() else None,
+            'remaining_ms': None if meter is None else meter['budget'].remaining_ms(),
+            'read_bytes': None if meter is None else meter['bytes']}
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(manager)
+        except BlockingIOError:
+            attempts.append({**fact, 'outcome': 'busy'})
+            attempted.set()
+            raise
+        attempts.append({**fact, 'outcome': 'acquired'})
+        yield
+
+
+# LLM: 显式镜像两个生产锁入口的签名，不用宽泛参数吞掉新增关键字；锁仍由原实现取得。
+# 函数用途: 观察辅助lane对请求叶锁和提炼集合锁的实际尝试，attempted事件标记本片已撞上忙锁。
+def observe_member_locks(monkeypatch):
+    from agent_py_agent.agent.assets import turn_extractor
+
+    attempts, attempted = [], threading.Event()
+    json_lock, records_lock = history.locked_json_path, turn_extractor.locked_private_directory
+
+    def observed_json(path, *, blocking=True, birth_commit=None, category=None):
+        return _observed_lock(json_lock(path, blocking=blocking, birth_commit=birth_commit, category=category),
+            path.name, path.with_name(path.name + '.lock'), attempts, attempted)
+
+    def observed_records(root, *, lock_name, relative_parts=(), wait_check=None):
+        return _observed_lock(records_lock(root, lock_name=lock_name, relative_parts=relative_parts,
+            wait_check=wait_check), lock_name, Path(root).joinpath(*relative_parts, lock_name), attempts, attempted)
+
+    monkeypatch.setattr(history, 'locked_json_path', observed_json)
+    monkeypatch.setattr(turn_extractor, 'locked_private_directory', observed_records)
+    return attempts, attempted
 
 
 # LLM: 混合真实writer样本验证所有phase；计量比较精确逻辑用量，blob和正式版本逐字保留。
@@ -221,18 +342,68 @@ def test_request_lock_busy_and_new_generation(setup):
     assert path.exists() and sum(row['deleted_items'] for row in rows) == 0
 
 
-# LLM: 自动草稿与用户确认共用原.records.lock，竞争后保留精确提案续点。
-# 函数用途: 验证集合锁有界等待与重试。
-def test_extraction_records_lock_busy(setup):
+# LLM: 自动草稿与用户确认共用原.records.lock，竞争后保留精确提案续点；事件依次固定已持同一锁、本片已尝试该成员、锁已释放。
+# 函数用途: 在进程内或另一进程持锁下验证集合锁有界等待、只读一次与释放后重试。
+def _extraction_records_lock_busy(setup, monkeypatch, holder):
     home, _ = setup
     path = automatic(setup)
+    size = path.stat().st_size
     cursor = {'phase': 'extractions', 'kind': 'script', 'after': ''}
-    lock = locked_private_directory(home.owner_home_dir, relative_parts=('data', 'asset_extractions'), lock_name='.records.lock')
-    with held_lock(lock):
+    sidecar = path.parent / '.records.lock'
+    attempts, attempted = observe_member_locks(monkeypatch)
+    lock = (held_lock(locked_private_directory(home.owner_home_dir, relative_parts=('data', 'asset_extractions'),
+                                               lock_name='.records.lock'), sidecar)
+            if holder == 'thread' else held_lock_in_process('records', home.owner_home_dir))
+    with lock as held:
         result = history.maintain_asset_auxiliary_lane(request(setup, cursor=cursor))
         assert result['skipped']['lock_busy'] == 1 and not result['complete'] and path.exists()
+        assert attempted.is_set() and [(item['name'], item['outcome']) for item in attempts] == [('.records.lock', 'busy')]
+        assert attempts[0]['inode'] == held.inode == sidecar.stat().st_ino and attempts[0]['remaining_ms'] > 0
+        # 扫描真实读过一次；忙锁之后没有锁内复读，阶段续点原样停在该提案前。
+        assert attempts[0]['read_bytes'] == result['bytes'] == size and result['items'] == 1
+        assert result['skipped'] == {'lock_busy': 1} and result['deleted_items'] == 0 and result['cursor'] == cursor
+    assert held.released.is_set()
     assert sum(row['deleted_items'] for row in drain(setup, cursor=result['cursor'])) == 1
     assert path.parent.joinpath('.records.lock').exists()
+
+
+# LLM: 本进程线程持有集合锁，进程内互斥与OS锁同时被占。
+# 函数用途: 验证集合锁有界等待与重试。
+def test_extraction_records_lock_busy(setup, monkeypatch):
+    _extraction_records_lock_busy(setup, monkeypatch, 'thread')
+
+
+# LLM: 另一进程只占同一.records.lock的OS锁，本进程互斥空闲；有界轮询到期后仍按锁忙保留。
+# 函数用途: 验证跨进程持锁时集合锁有界等待与重试。
+def test_extraction_records_lock_busy_out_of_process_holder(setup, monkeypatch):
+    _extraction_records_lock_busy(setup, monkeypatch, 'process')
+
+
+# LLM: 同页两份到期请求，锁忙成员排前或排后、由本进程线程或另一进程持锁；游标只越过已决成员，释放后同一续点删除。
+# 函数用途: 覆盖两种合法成员顺序与进程内外持锁者，证明锁忙叶不被跳过、不被误删也不在锁外复读。
+@pytest.mark.parametrize('holder', ['thread', 'process'])
+@pytest.mark.parametrize('busy_first', [True, False])
+def test_lock_busy_member_keeps_cursor_in_either_member_order(setup, monkeypatch, busy_first, holder):
+    busy_name, free_name = ('a-busy', 'b-free') if busy_first else ('b-busy', 'a-free')
+    busy, free = evolution_request(setup, busy_name), evolution_request(setup, free_name)
+    sizes = {busy.name: busy.stat().st_size, free.name: free.stat().st_size}
+    sidecar = busy.with_name(busy.name + '.lock')
+    order = [busy.name, free.name] if busy_first else [free.name, busy.name]
+    attempts, attempted = observe_member_locks(monkeypatch)
+    lock = held_lock(locked_json_path(busy), sidecar) if holder == 'thread' else held_lock_in_process('json', busy)
+    with lock as held:
+        row = validate_lane_receipt(history.maintain_asset_auxiliary_lane(request(setup)))
+        assert attempted.is_set() and [(item['name'], item['outcome']) for item in attempts] == [
+            (name, 'busy' if name == busy.name else 'acquired') for name in order]
+        busy_attempt = next(item for item in attempts if item['outcome'] == 'busy')
+        assert busy_attempt['inode'] == held.inode == sidecar.stat().st_ino and busy_attempt['remaining_ms'] > 0
+        assert row['skipped'] == {'lock_busy': 1} and row['deleted_items'] == 1 and not row['complete']
+        assert row['freed_bytes'] == sizes[free.name] and busy.exists() and not free.exists()
+        # 两份各扫描读一次，只有取得锁的成员在锁内复读。
+        assert row['items'] == 2 and row['bytes'] == sizes[busy.name] + 2 * sizes[free.name]
+        assert row['cursor'] == {'phase': 'requests', 'kind': 'script', 'after': '' if busy_first else free.name}
+    assert held.released.is_set()
+    assert sum(item['deleted_items'] for item in drain(setup, cursor=row['cursor'])) == 1 and not busy.exists()
 
 
 # LLM: 小预算覆盖同一候选子目录内多叶，不能因第一叶被保留而永远重读或跨过锁忙叶。
@@ -392,8 +563,10 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
         monkeypatch.setattr(os, 'unlink', fail_unlink)
         # 能力不变，错误必须发生在实际unlink观察点而非平台能力检查阶段。
         monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {fail_unlink})
-    lock = held_lock(locked_json_path(path)) if condition == 'lock_busy' else nullcontext()
-    with lock:
+    sidecar = path.with_name(path.name + '.lock')
+    attempts, attempted = observe_member_locks(monkeypatch)
+    lock = held_lock(locked_json_path(path), sidecar) if condition == 'lock_busy' else nullcontext()
+    with lock as holder:
         gc.collect()
         before = _fd_count(root=setup[0].root)
         cursor, rows = {}, []
@@ -415,10 +588,19 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
             pytest.fail(f'auxiliary failure observation never reached: {rows!r}')
         record_property('fd_delta', delta)
         assert [r['items'] for r in rows[:empty_slices]] == [0] * empty_slices
+        # 片时钟只在注入的空片推进：观察点必定落在第empty_slices+1片，引用投影不会先行到期。
+        assert len(rows) == empty_slices + 1
         if condition == 'lock_busy':
             assert row['skipped']['lock_busy'] == 1
+            assert attempted.is_set() and [(item['name'], item['outcome']) for item in attempts] == [(path.name, 'busy')]
+            assert attempts[0]['inode'] == holder.inode == sidecar.stat().st_ino and attempts[0]['remaining_ms'] > 0
+            assert attempts[0]['read_bytes'] == row['bytes'] == path.stat().st_size and row['items'] == 1
+            assert row['skipped'] == {'lock_busy': 1} and row['cursor'] == {'phase': 'requests', 'kind': 'script', 'after': ''}
         else:
             assert failed and row['errors']
+            assert [(item['name'], item['outcome']) for item in attempts] == [(path.name, 'acquired')]
+    if condition == 'lock_busy':
+        assert holder.released.is_set()
     monkeypatch.setattr(os, 'unlink', original)
     assert sum(item['deleted_items'] for item in drain(setup, cursor=row['cursor'])) == 1
     assert not path.exists()
