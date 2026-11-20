@@ -149,8 +149,12 @@ def _build_init(cls: type) -> Callable:
 
 # LLM: 只对本类实例走快路径；init=False 字段出现在改动里、或缺少无默认值的 InitVar 时，直接交给
 #   dataclasses.replace，让它抛出与当前解释器完全相同的异常（3.12 为 ValueError，3.13+ 为 TypeError）。
-#   其余情况按 dataclasses.replace 的规则用 self.<字段> 补齐缺省的 init 字段与带默认值的 InitVar，
-#   再以 object.__new__ + 快速 __init__ 构造（类未改 __new__、元类未改 __call__ 时与 cls(**changes) 等价）。
+#   这两项回落条件在生成时按字段名展开成对本次调用 changes 的字面量成员判断（与 dataclasses.replace 自己的
+#   f.name in changes 同一语义），没有这类字段就不生成。不要改回对类级共享集合调用 isdisjoint(changes) 或
+#   <= changes.keys()：3.14t 关闭 GIL 时两者都会进入那个共享集合的临界区，所有线程替换同一个类时排在这把锁上，
+#   128 线程吞吐只有 16 线程的约 0.2。其余情况按 dataclasses.replace 的规则用 self.<字段> 补齐缺省的 init 字段与
+#   带默认值的 InitVar，再以 object.__new__ + 快速 __init__ 构造（类未改 __new__、元类未改 __call__ 时与
+#   cls(**changes) 等价）。
 # 函数用途: 生成 __replace__/__fast_replace__。
 def _build_replace(cls: type, init_fn: Callable) -> Callable:
     fields = _init_fields(cls)
@@ -161,14 +165,14 @@ def _build_replace(cls: type, init_fn: Callable) -> Callable:
         "__fast_init__": init_fn,
         "__fast_new__": object.__new__,
         "__fast_dc_replace__": dataclasses.replace,
-        "__fast_not_init__": frozenset(f.name for f in fields if not f.init),
-        "__fast_required__": frozenset(f.name for f in fields
-                                       if f._field_type is _FIELD_INITVAR and f.default is _MISSING),
     }
+    fallback = ["__fast_type__(self) is not __fast_cls__"]
+    fallback += [f"{f.name!r} in changes" for f in fields if not f.init]
+    fallback += [f"{f.name!r} not in changes" for f in fields
+                 if f._field_type is _FIELD_INITVAR and f.default is _MISSING]
     lines = [
         "def __replace__(self, /, **changes):",
-        " if (__fast_type__(self) is not __fast_cls__ or not __fast_not_init__.isdisjoint(changes)",
-        "         or not __fast_required__ <= changes.keys()):",
+        f" if {' or '.join(fallback)}:",
         "  return __fast_dc_replace__(self, **changes)",
     ]
     for f in fields:

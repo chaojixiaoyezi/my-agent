@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from dataclasses import replace
 
 from ...backends import ModelResponse
 from ...backends.tool_ir import AssistantTurn, UserTurn
+from ...common import hot_json
+from ...common.fast_dataclass import fast_replace
 from ...conversation.user_visible_text import (
     contains_internal_protocol,
     sanitize_user_visible_text,
@@ -78,7 +78,7 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         "audit_prepare_result",
         "subagents_active", "delegated_result", "delegated_failure",
     }
-    return replace(
+    return fast_replace(
         params,
         user_prompt=guidance,
         memories=[],
@@ -163,11 +163,11 @@ def _rejected_tool_feedback_ir(
         arguments = block.get("input")
         arguments = dict(arguments) if isinstance(arguments, dict) else {}
         schema_digest = hashlib.sha256(
-            json.dumps(
+            hot_json.dumps(
                 {"name": name, "arguments": arguments},
                 ensure_ascii=False,
                 sort_keys=True,
-                separators=(",", ":"),
+                compact=True,
             ).encode("utf-8")
         ).hexdigest()
         calls.append(
@@ -311,7 +311,7 @@ def finish_natural_user_reply(
         # notice instead of promoting that transition to a false final reply.
         if rejection_reason == "structured_tool_call":
             lifecycle_is_nonterminal = runtime_status != "ok"
-            return replace(
+            return fast_replace(
                 response,
                 text="这次回复没有完整生成，其中附带的操作没有执行。请重试查看结果。",
                 runtime_status=(
@@ -330,7 +330,7 @@ def finish_natural_user_reply(
                 tool_use_blocks=[],
                 turn_end_reason=end_reason,
             )
-        return replace(
+        return fast_replace(
             response,
             text="",
             runtime_status=(
@@ -343,7 +343,7 @@ def finish_natural_user_reply(
             tool_use_blocks=[],
             turn_end_reason=end_reason,
         )
-    return replace(
+    return fast_replace(
         response,
         text=sanitize_user_visible_text(response.text).content,
         runtime_status=runtime_status,
@@ -416,7 +416,7 @@ def _reply_guidance(phase: dict[str, object]) -> str:
     )
     return (
         "[natural-user-reply]\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        + hot_json.dumps(payload, ensure_ascii=False, sort_keys=True)
         + "\n请把上面的内容只当作写回复时可用的事实，用你自己的自然语气直接回复用户。"
         "只陈述 facts 中已确认的事实；draft 只是可能过期的表达草稿，和 facts 冲突时必须丢弃。"
         "internal_result_is_model_authored=true 时，internal_execution_result 只是本轮模型的内部总结，不等于宿主核验；"

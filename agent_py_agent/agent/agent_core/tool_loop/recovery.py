@@ -3,11 +3,11 @@
 # 模块用途: 收口阶段剥离模型仍在请求的工具调用，并为归档和恢复计算当前 run 的身份范围。
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from ...action_protocol import RunScope
 from ...backends import ModelResponse
+from ...common.fast_dataclass import fast_replace
 from ...common.value_parsing import text_value
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
@@ -48,7 +48,7 @@ def without_tool_call_after_limit(
     if not adapted.calls and not adapted.violations:
         return response
     if reason == "repeated_failure_exhausted":
-        return replace(
+        return fast_replace(
             response,
             text=(
                 "同类工具失败已连续达到阈值且多轮未能脱困，系统停止新的工具调用。"
@@ -58,7 +58,7 @@ def without_tool_call_after_limit(
         )
     if reason == "repeated_authorization_failure":
         # 子代理授权阶段收口：交接对象是直属父级，不是用户；权限不会因重试改变。
-        return replace(
+        return fast_replace(
             response,
             text=(
                 "工具调用已在授权阶段以同一原因连续被拦下，系统停止新的工具调用。"
@@ -67,7 +67,7 @@ def without_tool_call_after_limit(
             ),
         )
     if reason == "repeated_failure":
-        return replace(
+        return fast_replace(
             response,
             text=(
                 "同类工具失败已连续达到阈值，本轮停止新的工具调用。"
@@ -77,7 +77,7 @@ def without_tool_call_after_limit(
             ),
         )
     if reason == "unknown_outcome":
-        return replace(
+        return fast_replace(
             response,
             text=(
                 "工具副作用的最终结果暂时无法确认，系统已停止继续调用工具，避免重复执行。"
@@ -85,14 +85,14 @@ def without_tool_call_after_limit(
             ),
         )
     if reason == "no_action_gate":
-        return replace(
+        return fast_replace(
             response,
             text=(
                 "当前回合没有已确认需要执行的动作，系统没有执行模型继续提出的工具调用。"
                 "请如实说明现状，不要把未执行的操作写成已完成。"
             ),
         )
-    return replace(
+    return fast_replace(
         response,
         text=(
             "已达到最大工具轮数限制，系统已经停止执行新的工具调用。"

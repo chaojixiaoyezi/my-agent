@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 
 from ...backends import ModelResponse
+from ...common.fast_dataclass import fast_replace
 
 
 # LLM: 原请求与响应成对返回；先调用原模型运输，再处理剩余工具请求，最后读取结构化原因。异常原样传播，不重试、不执行工具或记账。
@@ -21,7 +21,7 @@ def generate_tool_loop_closeout(
     response = generate_response(prompt)
     response = prepare_handoff_response(response)
     reason = read_runtime_reason()
-    return prompt, replace(
+    return prompt, fast_replace(
         response,
         runtime_status="blocked" if reason == "TOOL_OPERATION_OUTCOME_UNKNOWN" else "unfinished",
         runtime_reason=reason,

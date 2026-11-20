@@ -2,8 +2,7 @@
 # 模块用途: 分离后台内部执行结果与公开通知，允许无公开内容的成功运行，并复用原零工具表达修复。
 from __future__ import annotations
 
-from dataclasses import replace
-
+from ...common.fast_dataclass import fast_replace
 from ...common.structured_output import json_value_from_complete_response
 from ...contracts.background_public_receipt import CONTRACT_KEY, RESULT_SCHEMA
 from ...conversation.user_visible_text import sanitize_user_visible_text
@@ -82,8 +81,8 @@ def _has_pending_delivery_artifacts(params: object, *, agent=None) -> bool:
 # LLM: 合同错误只拒绝错误协议或来源，不裁决报告深度；不能把错误正文或空供应商响应降级成成功静默。
 # 函数用途: 为不可公开的后台完成响应给出无正文的明确失败状态。
 def _invalid_receipt(response: object, code: str) -> object:
-    return replace(response, text='', runtime_status='failed', runtime_reason=code,
-                   runtime_source='background_public_receipt', public_receipt=None)
+    return fast_replace(response, text='', runtime_status='failed', runtime_reason=code,
+                        runtime_source='background_public_receipt', public_receipt=None)
 
 
 # LLM: 回执修复的执行证据只来自本run原工具账，投影有界，不把模型内部总结升级为宿主证明。
@@ -121,8 +120,8 @@ def prepare_background_public_receipt(params: object, response: object, *, agent
     source = response_provenance_projection(response)
     receipt = {'schema': RESULT_SCHEMA, 'notification_intent': payload['notification_intent'],
                'execution_source': source, 'public_source': source}
-    prepared = replace(response, text=sanitize_user_visible_text(payload['public_reply']).content,
-                       internal_response=payload['internal_result'], public_receipt=receipt)
+    prepared = fast_replace(response, text=sanitize_user_visible_text(payload['public_reply']).content,
+                            internal_response=payload['internal_result'], public_receipt=receipt)
     if payload['notification_intent'] == 'internal_only' and attachments_required:
         return 'finish', _invalid_receipt(prepared, 'BACKGROUND_RECEIPT_PUBLIC_OBLIGATION')
     if (reply_required and payload['notification_intent'] == 'internal_only') or (
@@ -161,9 +160,9 @@ def finish_background_receipt_repair(params: object, response: object, *, accept
     error = response_provenance_error(params, response, purposes=('background_receipt_repair',))
     if error or not accepted:
         failed = _invalid_receipt(response, error or 'BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE')
-        return replace(failed, internal_response=str(original.get('internal_response') or ''))
+        return fast_replace(failed, internal_response=str(original.get('internal_response') or ''))
     receipt = dict(original.get('public_receipt') or {})
     receipt.update(notification_intent='publish', public_source=response_provenance_projection(response))
     satisfy_active_turn_user_reply(params)
-    return replace(response, text=sanitize_user_visible_text(response.text).content,
-                   internal_response=str(original.get('internal_response') or ''), public_receipt=receipt)
+    return fast_replace(response, text=sanitize_user_visible_text(response.text).content,
+                        internal_response=str(original.get('internal_response') or ''), public_receipt=receipt)

@@ -5,8 +5,7 @@
 #   让模型下一步照定义重试，而不是在没有定义的情况下反复猜参数。
 from __future__ import annotations
 
-import json
-
+from ...common import hot_json
 from ...contracts.error_taxonomy import error_contract
 from ...contracts.recovery import RecoveryAction
 from ...conversation.tool_discovery import (
@@ -57,7 +56,7 @@ def reload_schema_after_blind_call(agent: object, params: object, archive_record
         details = {"loaded_micro_schema": schemas[0], "schema_inline_only": True}
         archive_record["schema_reload"] = details
         return (f"\n[tool-schema-inline] {tool} 的参数定义如下，请按定义直接按名重新调用。\n"
-                + json.dumps(details, ensure_ascii=False, separators=(",", ":")))
+                + hot_json.dumps(details, ensure_ascii=False, compact=True))
     if isinstance(loaded, list):
         loaded.append(tool)
     else:
@@ -73,7 +72,7 @@ def reload_schema_after_blind_call(agent: object, params: object, archive_record
     if schemas:
         details = {"loaded_micro_schema": schemas[0], "schema_auto_activated_for_next_turn": True}
         archive_record["schema_reload"] = details
-        hint += "\n" + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+        hint += "\n" + hot_json.dumps(details, ensure_ascii=False, compact=True)
     return hint
 
 
