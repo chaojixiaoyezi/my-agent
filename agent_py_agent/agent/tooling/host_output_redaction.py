@@ -13,6 +13,7 @@ import weakref
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -522,10 +523,7 @@ class TurnCredentialStreamFilter:
         self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         self._pending_tail = b''
 
-    def _sync(self) -> HostOutputStreamRedactor | None:
-        version, snapshot = self._turn._snapshot_state()
-        if not self._turn.active:
-            return None
+    def _sync(self, version: int, snapshot: HostCredentialSnapshot) -> HostOutputStreamRedactor:
         if self._redactor is None or self._version != version:
             # 升级快照时不能泄漏旧状态机里尚未结算的字节，将其转入新状态机重喂。
             carry = b''
@@ -541,11 +539,15 @@ class TurnCredentialStreamFilter:
         return self._redactor
 
     def feed_text(self, text: str, *, final: bool = False) -> str:
-        if self._turn.withheld:
+        version, snapshot, closed, withheld, active = self._turn._stream_state()
+        if closed:
+            self.discard()
+            return ''
+        if withheld:
             return '[内容因凭据脱敏额度超限已扣留]' if final or text else ''
-        redactor = self._sync()
-        if redactor is None:
+        if not active:
             return text
+        redactor = self._sync(version, snapshot)
         raw = (text or '').encode('utf-8')
         out = self._pending_tail
         self._pending_tail = b''
@@ -578,6 +580,7 @@ _instance_seq = itertools.count(1)
 _lease_seq = itertools.count(1)
 _local_op_state = threading.local()
 _deferred_finalizer_closes: deque[TurnCredentialRedaction] = deque()
+_active_turn_holding: ContextVar[TurnHoldingHandle | None] = ContextVar('turn_holding_handle', default=None)
 
 
 @contextmanager
@@ -841,7 +844,7 @@ class TurnCredentialRedaction:
             if getattr(_local_op_state, 'depth', 0) > 0:
                 _deferred_finalizer_closes.append(self)
             else:
-                self.close()
+                self.close(if_unheld=True)
 
     @property
     def active(self) -> bool:
@@ -858,9 +861,9 @@ class TurnCredentialRedaction:
         with self._lock:
             return self._current
 
-    def _snapshot_state(self) -> tuple[int, HostCredentialSnapshot]:
+    def _stream_state(self) -> tuple[int, HostCredentialSnapshot, bool, bool, bool]:
         with self._lock:
-            return self._version, self._current.snapshot
+            return self._version, self._current.snapshot, self._closed, self._withheld, bool(self._variants)
 
     def new_stream_filter(self) -> TurnCredentialStreamFilter:
         return TurnCredentialStreamFilter(self)
@@ -977,11 +980,13 @@ class TurnCredentialRedaction:
         self._closed = True
         self._version += 1
 
-    def close(self) -> None:
+    def close(self, *, if_unheld: bool = False) -> None:
         with _redaction_op_guard(), self._publish_lock:
             keys = self._scope_keys()
             log_key = f"{self.owner_key}::{self.turn_key}"
             with self._lock:
+                if self._closed or (if_unheld and self._live_holders):
+                    return
                 self._clear_secrets_unlocked()
                 self._live_holders.clear()
                 finalizers = tuple(self._holder_finalizers.values())
@@ -992,6 +997,27 @@ class TurnCredentialRedaction:
                 fin.detach()
             _unregister_active_scope(keys, self.turn_key, self)
             unregister_active_turn_log_values(log_key)
+
+
+class TurnHoldingHandle:
+    """回合入口持有一份引用，写入器借用各自的引用并在收口时释放。"""
+
+    def __init__(self, owner_id: str, thread_id: str, turn_id: str, *,
+                 redaction: TurnCredentialRedaction | None = None) -> None:
+        self.owner_id = owner_id
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.redaction = redaction if redaction is not None else TurnCredentialRedaction(
+            owner_key=owner_id, thread_id=thread_id, turn_key=turn_id)
+        self._entry_release = self.acquire(self)
+
+    def acquire(self, writer: object) -> Callable[[], None] | None:
+        return self.redaction._attach_lifetime_holder(writer)
+
+    def release(self, lease: Callable[[], None] | None = None) -> None:
+        release = self._entry_release if lease is None else lease
+        if release is not None:
+            release()
 
 
 def _clean_public_structure(value: Any, secret_values: tuple[str, ...], *, depth: int = 0) -> Any:
@@ -1101,10 +1127,11 @@ def _lookup_holder_redaction(holder: object) -> TurnCredentialRedaction | None:
     return cand if isinstance(cand, TurnCredentialRedaction) else None
 
 
-def _attach_holder_and_attr(holder: object, turn_redaction: TurnCredentialRedaction) -> None:
+def _attach_holder_and_attr(holder: object, turn_redaction: TurnCredentialRedaction, *, lease: bool = True) -> None:
     if holder is None:
         return
-    turn_redaction._attach_lifetime_holder(holder)
+    if lease:
+        turn_redaction._attach_lifetime_holder(holder)
     try:
         object.__setattr__(holder, _TURN_REDACTION_ATTR, turn_redaction)
     except (AttributeError, TypeError):
@@ -1115,6 +1142,47 @@ def _attach_holder_and_attr(holder: object, turn_redaction: TurnCredentialRedact
             pass
 
 
+def _matches_turn(redaction, owner_key, thread_id, turn_key):
+    with redaction._lock:
+        return (
+            not redaction._closed and redaction.owner_key == owner_key
+            and (not thread_id or not redaction.thread_id or redaction.thread_id == thread_id)
+            and (not turn_key or turn_key in redaction._turn_aliases)
+        )
+
+
+@contextmanager
+def hold_turn_output(agent: object, params: object):
+    """在运行片入口建立持有关系，沿同一回合的输出端口续用脱敏器。"""
+    owner_key, conv_root, thread_id, turn_key = _extract_turn_identity(agent, params)
+    existing = _lookup_holder_redaction(params)
+    if existing is None or not _matches_turn(existing, owner_key, thread_id, turn_key):
+        existing = None
+        if turn_key:
+            for writer in _candidate_writers(params):
+                holder = getattr(writer, '_turn_lifetime_owner', None)
+                candidate = _lookup_holder_redaction(writer) or _lookup_holder_redaction(holder)
+                if candidate is not None and _matches_turn(candidate, owner_key, thread_id, turn_key):
+                    existing = candidate
+                    break
+    if existing is None:
+        existing = TurnCredentialRedaction(
+            owner_key=owner_key, conversation_root=conv_root, thread_id=thread_id,
+            turn_key=turn_key, base_redaction=_base_redaction_for_agent(agent),
+        )
+    handle = TurnHoldingHandle(owner_key, thread_id, existing.turn_key, redaction=existing)
+    token = _active_turn_holding.set(handle)
+    try:
+        with existing._lock:
+            existing._turn_aliases.update(_extract_turn_aliases(params))
+        _attach_holder_and_attr(params, existing, lease=False)
+        _bind_writer_if_present(params, existing, holding_handle=handle)
+        yield handle
+    finally:
+        _active_turn_holding.reset(token)
+        handle.release()
+
+
 def turn_credential_redaction(agent: object, params: object = None) -> TurnCredentialRedaction:
     """获取或建立与当前 (owner, thread, run/request) 绑定的回合脱敏对象，并显式挂接到流写入器。"""
     with _redaction_op_guard():
@@ -1122,10 +1190,12 @@ def turn_credential_redaction(agent: object, params: object = None) -> TurnCrede
         resolved_params = params if params is not None else current_run_params
         owner_key, conv_root, thread_id, turn_key = _extract_turn_identity(agent, resolved_params)
         aliases = _extract_turn_aliases(resolved_params)
-        existing: TurnCredentialRedaction | None = None
+        handle = _active_turn_holding.get()
+        existing = handle.redaction if handle is not None and _matches_turn(
+            handle.redaction, owner_key, thread_id, turn_key) else None
 
         cand = _lookup_holder_redaction(resolved_params)
-        if cand is not None and not cand._closed and cand.owner_key == owner_key:
+        if existing is None and cand is not None and not cand._closed and cand.owner_key == owner_key:
             existing = cand
 
         if existing is None:
@@ -1198,21 +1268,28 @@ def turn_credential_redaction(agent: object, params: object = None) -> TurnCrede
                 existing.conversation_root = conv_root
                 scope_upgraded = True
 
+        if handle is not None and handle.redaction is not existing:
+            handle = None
         if resolved_params is not None:
-            _attach_holder_and_attr(resolved_params, existing)
+            _attach_holder_and_attr(resolved_params, existing, lease=handle is None)
         if current_run_params is not None and current_run_params is not resolved_params:
             c_owner, _, _, c_turn = _extract_turn_identity(agent, current_run_params)
             if c_owner == owner_key and turn_key and c_turn == turn_key:
-                _attach_holder_and_attr(current_run_params, existing)
-        _bind_writer_if_present(resolved_params, existing)
+                _attach_holder_and_attr(current_run_params, existing, lease=handle is None)
+        _bind_writer_if_present(resolved_params, existing, holding_handle=handle)
         if scope_upgraded:
             existing._publish_active_state()
         return existing
 
 
-def _bind_writer_if_present(params: object, turn_redaction: TurnCredentialRedaction) -> None:
+def _bind_writer_if_present(params: object, turn_redaction: TurnCredentialRedaction, *,
+                            holding_handle: TurnHoldingHandle | None = None) -> None:
     for writer in _candidate_writers(params):
         lifetime_owner = getattr(writer, '_turn_lifetime_owner', None)
+        bind_handle = getattr(writer, 'bind_turn_holding_handle', None)
+        if holding_handle is not None and callable(bind_handle) and bind_handle(holding_handle) is not False:
+            _attach_holder_and_attr(lifetime_owner, turn_redaction, lease=False)
+            continue
         if lifetime_owner is not None:
             _attach_holder_and_attr(lifetime_owner, turn_redaction)
         binder = getattr(writer, 'bind_credential_redaction', None)

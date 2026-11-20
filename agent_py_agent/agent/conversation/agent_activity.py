@@ -105,6 +105,7 @@ class BackgroundMainActivitySink:
         self.task_id = str(task_id or "").strip()
         self._turn_lifetime_owner = lifetime_owner
         self._turn_redaction: object | None = None
+        self._turn_holding_lease = None
         self.started_at = time.time()
         if publication_gate is None and has_publication_provenance(lifetime_owner):
             run_id = str(getattr(lifetime_owner, "conversation_turn_id", "") or "")
@@ -115,7 +116,8 @@ class BackgroundMainActivitySink:
             task_id=self.task_id,
             publication_gate=publication_gate,
         )
-        if publication_gate is not None and lifetime_owner is not None:
+        self._publication_owns_hold = publication_gate is not None and lifetime_owner is not None
+        if self._publication_owns_hold:
             # 与该请求已有的脱敏租约共用寿命，跨执行和投递闭合原工作片。
             object.__setattr__(lifetime_owner, "_background_publication_sink", self)
         self._publish("running", "整理任务上下文", begin=True)
@@ -135,12 +137,36 @@ class BackgroundMainActivitySink:
         return self._transcript.project_publication_payload(payload)
 
     def abandon_publication(self) -> None:
-        self._transcript.abandon_publication()
+        try:
+            self._transcript.abandon_publication()
+        finally:
+            self._release_turn_holding_lease()
+
+    def _release_turn_holding_lease(self) -> None:
+        lease = self._turn_holding_lease
+        self._turn_holding_lease = None
+        if lease is not None:
+            handle, token = lease
+            handle.release(token)
 
     def resolve_publication(self, decision, *, redactions=()) -> None:
         self._transcript.resolve_publication(decision, redactions=redactions)
         if self.publication_gate.decision == "withheld":
             self._publish("waiting", WITHHELD_TEXT, begin=True, withhold_record=True)
+
+    def bind_turn_holding_handle(self, handle) -> bool:
+        # 受发布门管理的接收器由交付 finally 显式释放，包含 Compact 后的投递。
+        if not self._publication_owns_hold:
+            return False
+        if self._turn_redaction is handle.redaction and self._turn_holding_lease is not None:
+            return True
+        lease = handle.acquire(self)
+        if lease is None:
+            return False
+        self._release_turn_holding_lease()
+        self._turn_holding_lease = handle, lease
+        self.bind_credential_redaction(handle.redaction)
+        return True
 
     def bind_credential_redaction(self, turn_redaction: object) -> None:
         """幂等绑定当前回合凭据脱敏器，并转发至底层后台转录接收器。"""

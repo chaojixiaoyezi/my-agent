@@ -414,14 +414,19 @@ def _publish_deferred_batch(
 # LLM: 容错关闭writer绑定的主活动与transcript两个sink，单个sink异常不影响另一sink收口。
 # 函数用途: 统一执行stream_writer的底层sink关闭动作。
 def close_writer_sinks_now(writer: Any) -> None:
-    for sink in (getattr(writer, "main_activity_sink", None), getattr(writer, "transcript_sink", None)):
-        closer = getattr(sink, "close", None)
-        if not callable(closer):
-            continue
-        try:
-            closer()
-        except (OSError, RuntimeError, TypeError, ValueError):
-            pass
+    try:
+        for sink in (getattr(writer, "main_activity_sink", None), getattr(writer, "transcript_sink", None)):
+            closer = getattr(sink, "close", None)
+            if not callable(closer):
+                continue
+            try:
+                closer()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+    finally:
+        release = getattr(writer, "_release_credential_turn", None)
+        if callable(release):
+            release()
 
 
 # LLM: 容错调用transcript_sink.prepare_final，异常不外抛以免阻断后续sink关闭。
