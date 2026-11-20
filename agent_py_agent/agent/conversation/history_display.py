@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 
 from ..turn_end import turn_end_notice
 from .background_history import background_display_turn_from_row
+from .background_publication_gate import WITHHELD_TEXT, is_withheld_publication
 from .background_transcript import public_background_transcript_text
 from .display_checkpoint import DISPLAY_CHECKPOINT_ROLE, display_checkpoint_events
 from .history_order import order_history_events
@@ -29,7 +30,19 @@ def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
     completed = completed_gateway_final_attempts(rows)
-    visible_rows = [row for row in rows if not superseded_gateway_final(row, completed)]
+    withheld_requests = {
+        row.metadata.get("background_transcript_request_id") for row in rows
+        if is_withheld_publication(getattr(row, "metadata", None))
+        and isinstance(row.metadata.get("background_transcript_request_id"), str)
+    }
+    visible_rows = [
+        row for row in rows
+        if not superseded_gateway_final(row, completed)
+        and not (getattr(row, "role", "") == DISPLAY_CHECKPOINT_ROLE
+                 and isinstance(metadata := getattr(row, "metadata", None), dict)
+                 and isinstance(identity := metadata.get("background_transcript_request_id"), str)
+                 and identity in withheld_requests)
+    ]
     delivery_groups = {
         (getattr(row, "thread_id", ""), str(row.metadata["conversation_request_id"])): history_group_identity(row)
         for row in visible_rows
@@ -132,6 +145,10 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
         if labels:
             events[0]["payload"]["text"] = labels + " " + str(events[0]["payload"]["text"])
     assistants = [row for row in rows if row.role == "assistant"]
+    withheld = [row for row in assistants if is_withheld_publication(getattr(row, "metadata", None))]
+    if withheld:
+        events.extend(public_assistant_message_event(row) for row in withheld)
+        return events
     snapshots = [snapshot for row in assistants if (snapshot := background_display_turn_from_row(row))]
     checkpoints = display_checkpoint_events(rows, covered_requests={item["request_id"] for item in snapshots})
     events.extend(checkpoints)
@@ -190,6 +207,10 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
 # 函数用途: 将一条已提交助手消息转换成稳定显示块，同一消息重放不再插入第二条。
 def public_assistant_message_event(row: object) -> dict[str, object]:
     request_id = f"history:{row.thread_id}:{row.message_id}"
+    if is_withheld_publication(getattr(row, "metadata", None)):
+        return _event(request_id, "assistant", "assistant_completed", {
+            "text": WITHHELD_TEXT, "publication_decision": "withheld",
+        })
     return _event(request_id, "assistant", "assistant_completed", {
         "text": _public(row.content, getattr(row, "channel", "")),
     })

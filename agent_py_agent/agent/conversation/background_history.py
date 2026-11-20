@@ -58,10 +58,12 @@ class BackgroundTurnHistory:
 
     # LLM: finish只冻结首次结束时刻及单调耗时；失败也会调用，故此处不能产生成功计时事件。
     # 函数用途: 标记这份工作片展示已收齐；未调用 finish 的活动快照不能授权客户端丢弃增量。
-    def finish(self) -> None:
+    def finish(self, *, finished_monotonic: float | None = None, completed_at: float | None = None) -> None:
         with self._lock:
             if not self._complete:
-                self._timing = {"duration_s": max(0.0, time.monotonic() - self._started_monotonic), "completed_at": time.time()}
+                finished = time.monotonic() if finished_monotonic is None else finished_monotonic
+                self._timing = {"duration_s": max(0.0, finished - self._started_monotonic),
+                                "completed_at": time.time() if completed_at is None else completed_at}
             self._complete = True
 
     # LLM: 时间随快照复制；只有canonical成功提交才可把冻结时间投影为成功事件，不重置原时钟。

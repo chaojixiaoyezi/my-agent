@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Protocol
+from weakref import ref
 
 from ..agent_core.runtime.loop_models import RunParams
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
@@ -27,6 +28,7 @@ from .background_context import (
     render_background_context,
 )
 from .background_history_seed import prepare_background_history_or_raise, refresh_background_history
+from .background_publication_gate import PublicationWrite, attached_publication_sink
 from .claim_execution_binding import publish_claim_runtime_authority
 from .compact_carry import compact_overflow_carry
 from .compact_guard import CompactCapacityFacts, CompactRecoveryFacts, ConversationCompactError
@@ -229,14 +231,17 @@ def invoke_background_turn(
             turn_trigger=turn_trigger,
             completed_run_callback=completed_run_callback,
         )
-    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
-            RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
-        raise
-    except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
-        activity_sink.finish()
-        raise
-    except Exception as exc:
-        activity_sink.fail(exc)
+    except BaseException as exc:
+        if attached_publication_sink(request) is activity_sink:
+            activity_sink.abandon_publication()
+            object.__delattr__(request, "_background_publication_sink")
+        if isinstance(exc, (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                            RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
+        if isinstance(exc, (BackgroundCompactSliceYield, BackgroundCapacityDeferred)):
+            activity_sink.finish()
+        elif isinstance(exc, Exception):
+            activity_sink.fail(exc)
         raise
     activity_sink.finish()
     snapshot = activity_sink.display_history_snapshot()
@@ -469,7 +474,7 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
     internal_result = str(getattr(result, "internal_response", "") or "")
     if not native and not internal_result:
         return
-    store.messages.append_once({
+    row = {
         "thread_id": request.thread_id, "role": "assistant", "content": "", "channel": request.route_channel,
         "metadata": {
             "conversation_request_id": request.conversation_turn_id,
@@ -479,7 +484,27 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
             "internal_execution_result": internal_result,
             "public_receipt": getattr(result, "public_receipt", None),
         },
-    }, dedupe_key=f"background-native:{request.conversation_turn_id}")
+    }
+    dedupe_key = f"background-native:{request.conversation_turn_id}"
+    sink = attached_publication_sink(request)
+    if sink is None:
+        store.messages.append_once(row, dedupe_key=dedupe_key)
+        return
+
+    receiver = ref(sink)
+
+    def append(value):
+        if (current := receiver()) is not None:
+            # 带有原生字段的 assistant 行也可被公开历史重放。
+            metadata = dict(value["metadata"])
+            projected = {
+                key: metadata.pop(key)
+                for key in (CANONICAL_NATIVE_MESSAGES_METADATA_KEY, "internal_execution_result", "public_receipt")
+            }
+            metadata.update(current.project_publication_payload(projected))
+            store.messages.append_once({**value, "metadata": metadata}, dedupe_key=dedupe_key)
+
+    sink.publication_gate.write("history", PublicationWrite(row, append))
 
 
 # LLM: 只刷新原CAS thread及已冻结范围的来源；不在真实恢复准备前摘要，narrow仍为已知空transcript来源。

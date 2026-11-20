@@ -35,6 +35,13 @@ from .agent_transcript import (
     agent_transcript_attempt_has_events,
     read_agent_transcript_events,
 )
+from .background_publication_gate import (
+    WITHHELD_TEXT,
+    PublicationGate,
+    PublicationWrite,
+    has_publication_provenance,
+    publication_gate_for,
+)
 from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
 from .context_usage import context_usage_from_thread
@@ -90,6 +97,7 @@ class BackgroundMainActivitySink:
         thread_id: str,
         task_id: str,
         lifetime_owner: object | None = None,
+        publication_gate: PublicationGate | None = None,
     ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
@@ -98,12 +106,41 @@ class BackgroundMainActivitySink:
         self._turn_lifetime_owner = lifetime_owner
         self._turn_redaction: object | None = None
         self.started_at = time.time()
+        if publication_gate is None and has_publication_provenance(lifetime_owner):
+            run_id = str(getattr(lifetime_owner, "conversation_turn_id", "") or "")
+            publication_gate = publication_gate_for(run_id) if run_id else PublicationGate(run_id)
         self._transcript = BackgroundTranscriptSink(
             agent,
             thread_id=self.thread_id,
             task_id=self.task_id,
+            publication_gate=publication_gate,
         )
+        if publication_gate is not None and lifetime_owner is not None:
+            # 与该请求已有的脱敏租约共用寿命，跨执行和投递闭合原工作片。
+            object.__setattr__(lifetime_owner, "_background_publication_sink", self)
         self._publish("running", "整理任务上下文", begin=True)
+
+    @property
+    def publication_gate(self) -> PublicationGate:
+        return self._transcript.publication_gate
+
+    @property
+    def saw_tool_display(self) -> bool:
+        return self._transcript._saw_tool_display
+
+    def archive_tool_rows(self, rows) -> dict:
+        return self._transcript.archive_tool_rows(rows)
+
+    def project_publication_payload(self, payload: dict) -> dict:
+        return self._transcript.project_publication_payload(payload)
+
+    def abandon_publication(self) -> None:
+        self._transcript.abandon_publication()
+
+    def resolve_publication(self, decision, *, redactions=()) -> None:
+        self._transcript.resolve_publication(decision, redactions=redactions)
+        if self.publication_gate.decision == "withheld":
+            self._publish("waiting", WITHHELD_TEXT, begin=True, withhold_record=True)
 
     def bind_credential_redaction(self, turn_redaction: object) -> None:
         """幂等绑定当前回合凭据脱敏器，并转发至底层后台转录接收器。"""
@@ -185,10 +222,7 @@ class BackgroundMainActivitySink:
         public = _public_context_usage(usage)
         if not self.thread_id or not public:
             return False
-        publish_main_activity(
-            self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self._transcript.request_id),
-            context_usage=public,
-        )
+        self.publication_gate.write("activity", PublicationWrite(("", "", False, public), self._publish_activity))
         return True
 
     # LLM: Tool activity reads only typed progress fields. The compact row keeps
@@ -288,6 +322,9 @@ class BackgroundMainActivitySink:
     def finish(self) -> None:
         self._transcript.finish()
         self._publish("waiting", "等待后续事件")
+        if self.publication_gate.decision == "pending":
+            # 执行已交接，待决阶段由原请求持有接收器，取消时可直接回收。
+            self._turn_lifetime_owner = None
 
     # LLM: Background main finalization reads only the transcript sink's typed,
     # tool-boundary-confirmed segments; scalar activity text is never promoted.
@@ -332,14 +369,22 @@ class BackgroundMainActivitySink:
 
     # LLM: 前后台只写同一 owner Agent 的线程级快照；不得为后台另设状态源。
     # 函数用途: 将后台真实阶段交给共用的 main 显示发布入口。
-    def _publish(self, phase: str, activity: str, *, begin: bool = False) -> None:
-        safe_activity = self._scrub_text(activity)
+    def _publish(self, phase: str, activity: str, *, begin: bool = False, withhold_record: bool = False) -> None:
+        if self._transcript.publication_closed and not withhold_record:
+            return
+        self.publication_gate.write("activity", PublicationWrite(
+            (phase, activity, begin, None), self._publish_activity, withhold_record,
+        ))
+
+    def _publish_activity(self, value) -> None:
+        phase, activity, begin, context_usage = value
+        safe_activity = self._transcript._scrub_text(activity)
         pulse = getattr(self._transcript, "_im_progress", None)
-        if pulse is not None:
+        if pulse is not None and phase:
             pulse.update(safe_activity)
         publish_main_activity(
             self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self._transcript.request_id),
-            phase=phase, activity=safe_activity, begin=begin,
+            phase=phase, activity=safe_activity, begin=begin, context_usage=context_usage,
         )
 
 
@@ -366,7 +411,11 @@ def publish_main_activity(
     with _main_activity_lock(agent):
         rows = _main_activity_rows(agent)
         current = dict(rows.get(thread_id, {}))
-        if not begin and current.get("projection_id") != source.projection_id:
+        if begin:
+            current_start = current.get("started_at")
+            if isinstance(current_start, (int, float)) and current_start > source.started_at:
+                return
+        elif current.get("projection_id") != source.projection_id:
             return
         if current.get("task_id") != task_id:
             current = {}

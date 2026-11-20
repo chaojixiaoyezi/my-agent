@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import threading
 import time
@@ -21,6 +22,12 @@ from uuid import uuid4
 from .agent_tool_approval import AgentToolApprovalSinkMixin
 from .background_history import BackgroundTurnHistory
 from .background_im_progress import close_background_progress, make_background_progress
+from .background_publication_gate import (
+    WITHHELD_TEXT,
+    PublicationGate,
+    PublicationWrite,
+    publication_gate_for,
+)
 from .channels import (
     project_host_paths_for_channel,
     project_user_reply,
@@ -229,6 +236,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         request_id: str = "",
         event_writer: object | None = None,
         gateway_request_id: str = "",
+        publication_gate: PublicationGate | None = None,
     ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
@@ -237,7 +245,6 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             getattr(agent, "conversation_store", None), self.thread_id
         )
         self.task_id = str(task_id or "").strip()
-        self._im_progress = make_background_progress(agent, self.task_id)
         self.gateway_request_id = gateway_request_id
         self._event_writer = event_writer if callable(event_writer) else None
         self._checkpoint_writer = DisplayCheckpointWriter(agent)
@@ -246,6 +253,17 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             thread_id=self.thread_id,
             task_id=self.task_id,
         )
+        self.publication_gate = publication_gate or publication_gate_for(self.request_id or uuid4().hex)
+        if publication_gate is None:
+            self.publication_gate.resolve("verified")
+        self._im_progress = (make_background_progress(agent, self.task_id)
+                             if self.publication_gate.decision == "verified" else None)
+        self._waiting_for_publication = self.publication_gate.decision == "pending"
+        self._publication_finished = False
+        self._published_withhold = False
+        self._publication_redactions = ()
+        self._saw_tool_display = False
+        self._tool_archive_refs: dict[str, dict] = {}
         self._display_history = (
             BackgroundTurnHistory(self.thread_id, self.task_id, self.request_id)
             if event_writer is None else None
@@ -295,6 +313,10 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
 
     def _scrub_text(self, value: object) -> str:
         text = str(value or "")
+        if self._publication_redactions:
+            for projection in self._publication_redactions:
+                text = projection.redact(text)
+            return text
         if self._redaction_active():
             public_text = getattr(self._turn_redaction, "public_text", None)
             if callable(public_text):
@@ -379,6 +401,11 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         value = str(text or "")
         if not value:
             return
+        if self.publication_gate.decision == "pending":
+            if sys.getsizeof(self._model_text) + sys.getsizeof(value) > self.publication_gate.pending_record_budget():
+                self.publication_gate.mark_overflow()
+                self._model_text = ""
+                return
         self._model_text += value
 
     # LLM: 仅已验同次response提交；复用原正文净化和显示环，call身份幂等，不由文本相等去重或向IM直发。
@@ -430,12 +457,11 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         if not self._thinking_active and self._late_thinking_completion_expected:
             self._late_thinking_completion_expected = False
             full = public_background_transcript_text(safe_text, limit=0, channel=self.channel)
-            extra = ({"display_archive_ref": display_archive_ref} if display_archive_ref
-                     else {} if history_incomplete else _thinking_archive_payload(self, full))
-            if extra.get("display_archive_ref") and self._closed_thinking_block_id:
-                self._event("thinking_completed", "completed", self._closed_thinking_block_id, {
+            extra = {"display_archive_ref": display_archive_ref} if display_archive_ref else {}
+            if (display_archive_ref or not history_incomplete and len(full) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS) and self._closed_thinking_block_id:
+                self._complete_thinking_event(self._closed_thinking_block_id, {
                     "text": public_background_transcript_text(safe_text, channel=self.channel), **extra,
-                })
+                }, full if not display_archive_ref else "", late=True)
             return False
         full_content = public_background_transcript_text(safe_text, limit=0, channel=self.channel)
         content = public_background_transcript_text(safe_text, channel=self.channel)
@@ -444,17 +470,16 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         self._ensure_thinking_started()
         if content:
             self._thinking_text = content
-        self._event(
-            "thinking_completed",
-            "completed",
+        self._complete_thinking_event(
             self._thinking_block_id,
             {
                 "text": self._thinking_text,
                 "duration_seconds": max(0.0, float(duration_seconds or 0.0)),
                 **({"history_incomplete": True} if history_incomplete
                    else {"display_archive_ref": display_archive_ref} if display_archive_ref
-                   else _thinking_archive_payload(self, full_content)),
+                   else {}),
             },
+            full_content if not display_archive_ref and not history_incomplete else "",
         )
         self._thinking_active = False
         self._thinking_block_id = ""
@@ -462,6 +487,18 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         self._thinking_truncated = False
         self._thinking_delta_batcher.reset()
         return True
+
+    def _complete_thinking_event(self, block_id: str, payload: dict, archive_text: str, *, late: bool = False) -> None:
+        if len(archive_text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS:
+            if self.publication_gate.decision == "pending":
+                self._event("thinking_completed", "completed", block_id, payload, thinking_archive=archive_text)
+                return
+            archived = _thinking_archive_payload(self, archive_text)
+            if late and not archived.get("display_archive_ref"):
+                return
+            payload = {**payload, **archived}
+        # 前台 sink 在原调用上合并恢复标记，仅后台待决事件携带私有归档正文。
+        self._event("thinking_completed", "completed", block_id, payload)
 
     # LLM: 仅转发 _structured_tool_progress 的白名单；公共 detail 在实时/终态中同源保留，标题由显示 metadata 统一投影。
     # 函数用途: 工具开始先关闭前一思考，再发布主/子卡片；避免缺失全文终态导致跨轮追加。
@@ -478,11 +515,10 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         if self._redaction_active():
             public = _scrub_turn_payload(self._turn_redaction, public)
         block_id = self._tool_block_id(progress)
-        from .background_im_progress import update_background_progress
-        update_background_progress(
-            self._im_progress,
-            {**dict(progress), **public} if self._redaction_active() else progress,
-        )
+        self._saw_tool_display = True
+        self.publication_gate.write("activity", PublicationWrite(
+            {"tool": public.get("tool"), "phase": progress.get("phase")}, self._publish_tool_activity,
+        ))
         phase = str(progress.get("phase") or "updated").strip().lower()
         if phase == "started":
             self._close_thinking_boundary()
@@ -615,8 +651,47 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
                 self._event(
                     "system_message", "failed", f"{self.request_id}:turn-end", {"text": notice},
                 )
+        self._publication_finished = True
         if self._display_history is not None:
-            self._display_history.finish()
+            self.publication_gate.write("history", PublicationWrite(
+                (time.monotonic(), time.time()), self._finish_display_history,
+            ))
+
+    def _publish_tool_activity(self, progress) -> None:
+        from .background_im_progress import update_background_progress
+
+        safe = {**progress, "tool": self._scrub_text(progress.get("tool"))}
+        update_background_progress(self._im_progress, safe)
+
+    def _finish_display_history(self, times) -> None:
+        self._display_history.finish(finished_monotonic=times[0], completed_at=times[1])
+
+    def abandon_publication(self) -> None:
+        if self.publication_gate.decision == "pending":
+            self.publication_gate.resolve("withheld")
+
+    def resolve_publication(self, decision, *, redactions=()) -> None:
+        if self.publication_gate.decision == "pending":
+            self._publication_redactions = redactions
+            try:
+                self.publication_gate.resolve(decision)
+            finally:
+                self._publication_redactions = ()
+        if self.publication_gate.decision != "withheld" or self._published_withhold:
+            return
+        self._published_withhold = True
+        payload: dict[str, object] = {"text": WITHHELD_TEXT, "publication_decision": "withheld"}
+        try:
+            payload["display_archive_ref"] = self._archive_rows(
+                ({"kind": "withheld", "text": WITHHELD_TEXT},), withhold_record=True,
+            )
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            payload["history_incomplete"] = True
+        self._event("system_message", "completed", f"{self.request_id}:publication", payload, withhold_record=True)
+        if self._display_history is not None:
+            self.publication_gate.write("history", PublicationWrite(
+                (time.monotonic(), time.time()), self._finish_display_history, withhold_record=True,
+            ))
 
     # LLM: 只返回显示副本；runtime 必须随同 canonical final 提交，不能用于模型上下文或机器状态。
     # 函数用途: 取得不受临时环裁剪影响的完整工作片展示。
@@ -624,7 +699,10 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         if self._display_history is None:
             return {}
         snapshot = self._display_history.snapshot()
-        if not self._redaction_active():
+        if self.publication_gate.decision == "pending":
+            snapshot["complete"] = self._publication_finished
+            return snapshot
+        if self._published_withhold or not self._redaction_active():
             return snapshot
         events = snapshot.get("events")
         if isinstance(events, list):
@@ -656,6 +734,8 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # callers persist it before the terminal response using typed assistant part ids.
     # 函数用途: 返回本轮已经确认的过程回复，供主/子代理会话在下一轮继续看到完整上下文。
     def assistant_commentary_messages(self) -> tuple[str, ...]:
+        if self._waiting_for_publication and self.publication_gate.decision != "verified":
+            return ()
         if not self._redaction_active():
             return tuple(self._committed_commentary)
         return tuple(self._scrub_text(item) for item in self._committed_commentary)
@@ -697,7 +777,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         if not content:
             return
         if not canonical_message_id:
-            self._committed_commentary.append(content)
+            self.publication_gate.write("history", PublicationWrite(content, self._record_commentary))
         self._assistant_index += 1
         self._event(
             "assistant_completed",
@@ -712,6 +792,9 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
 
     # LLM: canonical结果仍是终答权威；typed提交按原call身份去重，不因不同消息同文吞final；旧无来源路径保持原展示合同。
     # 函数用途: 将子代理正式回复追加到详情页，已提交调用不重复发布，过程说明不替代不同终答。
+    def _record_commentary(self, text) -> None:
+        self._committed_commentary.append(self._scrub_text(text))
+
     def _publish_final_response(self, text: str) -> None:
         _publish_committed_final(self, text)
 
@@ -733,46 +816,125 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         phase: str,
         block_id: str,
         payload: Mapping[str, object],
+        *,
+        thinking_archive: str = "",
+        withhold_record: bool = False,
+        live: bool = True,
     ) -> None:
-        if self._redaction_active():
-            payload = _scrub_turn_payload(self._turn_redaction, payload)
-        # 已提交assistant正文也须在易失预览裁剪前发表可分页全文；环形缓存不是全文权威。
-        text = payload.get("text")
-        if (kind == "assistant_completed" and type(text) is str
-                and sys.getsizeof(text) > BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 4):
-            try:
-                from .display_archive import archive_display_rows
+        if self.publication_closed and not withhold_record:
+            return
+        # 大段思考随事件持有，只有发布决定确定后才创建归档及引用。
+        if len(thinking_archive) <= BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS:
+            thinking_archive = ""
+        record = (kind, phase, block_id, payload, thinking_archive, withhold_record, live)
+        self.publication_gate.write("history", PublicationWrite(record, self._write_event, withhold_record))
 
-                reference = archive_display_rows(self.agent, thread_id=self.thread_id,
-                    rows=({"kind": "text", "text": text},))
-                payload = {**payload, "display_archive_ref": reference}
-            except Exception:  # noqa: BLE001 展示归档失败不重跑模型，保留原正文检查点与显式未知。
+    def _archive_rows(self, rows, *, withhold_record: bool = False):
+        from .display_archive import archive_display_rows
+
+        return self.publication_gate.publish("archive", PublicationWrite(
+            rows, lambda value: archive_display_rows(self.agent, thread_id=self.thread_id, rows=value),
+            withhold_record,
+        ))
+
+    @property
+    def publication_closed(self) -> bool:
+        return self._waiting_for_publication and self._publication_finished and self.publication_gate.decision != "pending"
+
+    def archive_tool_rows(self, rows) -> dict:
+        if self.publication_closed:
+            return {}
+        if self.publication_gate.decision != "pending":
+            return self._archive_rows(rows) or {}
+        token = uuid4().hex
+        packed = []
+        remaining = self.publication_gate.pending_record_budget()
+        for row in rows:
+            line = json.dumps(row, ensure_ascii=False)
+            remaining -= sys.getsizeof(line)
+            if remaining < 0:
+                self.publication_gate.mark_overflow()
+                return {}
+            packed.append(line)
+        self.publication_gate.write("archive", PublicationWrite((token, "\n".join(packed)), self._flush_tool_archive))
+        return {"schema": "display_archive_pending.v1", "publication_token": token}
+
+    def _flush_tool_archive(self, data) -> None:
+        token, lines = data
+        try:
+            rows = (json.loads(line) for line in lines.split("\n") if line)
+            self._tool_archive_refs[token] = self._archive_rows(
+                ({**row, "text": self._scrub_text(row["text"])} for row in rows),
+            )
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            self._tool_archive_refs[token] = {
+                "schema": "display_archive_error.v1", "error_code": "DISPLAY_ARCHIVE_WRITE_FAILED",
+            }
+
+    def project_publication_payload(self, payload: Mapping[str, object]) -> dict:
+        if self._publication_redactions:
+            from ..tooling.host_output_redaction import _clean_public_structure
+
+            for projection in self._publication_redactions:
+                payload = _clean_public_structure(payload, projection.snapshot.secret_values)
+            return payload
+        if self._redaction_active():
+            return _scrub_turn_payload(self._turn_redaction, payload)
+        return payload
+
+    def _write_event(self, record) -> None:
+        kind, phase, block_id, payload, thinking_archive, withhold_record, live = record
+        if not withhold_record:
+            payload = self.project_publication_payload(payload)
+        pending_ref = payload.get("display_archive_ref")
+        if isinstance(pending_ref, dict) and pending_ref.get("schema") == "display_archive_pending.v1":
+            token = pending_ref.get("publication_token")
+            reference = self._tool_archive_refs.get(token) if isinstance(token, str) else None
+            payload = {key: value for key, value in payload.items() if key != "display_archive_ref"}
+            payload = ({**payload, "display_archive_ref": reference} if reference
+                       else {**payload, "history_incomplete": True})
+        text = payload.get("text")
+        if thinking_archive or (kind == "assistant_completed" and type(text) is str
+                                and sys.getsizeof(text) > BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 4):
+            try:
+                if thinking_archive:
+                    rows = ({"kind": "thinking", "text": row}
+                            for row in self._scrub_text(thinking_archive).split("\n"))
+                else:
+                    rows = ({"kind": "text", "text": text},)
+                payload = {**payload, "display_archive_ref": self._archive_rows(rows)}
+            except Exception:  # noqa: BLE001 - 保留公开预览及明确缺口。
                 payload = {**payload, "history_incomplete": True}
         if self._display_history is not None:
             self._display_history.record(kind, phase, block_id, payload)
-        failed = self._checkpoint_writer.record({
+        failed = self.publication_gate.publish("checkpoint", PublicationWrite({
             "thread_id": self.thread_id, "task_id": self.task_id, "request_id": self.request_id,
             "gateway_request_id": self.gateway_request_id, "kind": kind, "phase": phase,
             "block_id": block_id, "payload": payload,
-        })
+        }, self._checkpoint_writer.record, withhold_record))
+        if not live:
+            return
+        self.publication_gate.write("activity", PublicationWrite(
+            {"kind": kind, "phase": phase, "block_id": block_id, "payload": payload},
+            self._publish_event, withhold_record,
+        ))
+        if failed:
+            self.publication_gate.write("activity", PublicationWrite(
+                {"kind": "system_message", "phase": "failed", "block_id": f"{self.request_id}:history-write-failed",
+                 "payload": {"text": "历史记录暂时保存失败；当前任务继续运行，恢复历史可能不完整。"}},
+                self._publish_event, withhold_record,
+            ))
+
+    def _publish_event(self, event) -> None:
         try:
-            event = {"kind": kind, "phase": phase, "block_id": block_id, "payload": payload}
             if self._event_writer is None:
                 append_background_transcript_event(
-                    self.agent, source=TranscriptSource(self.thread_id, self.task_id, self.request_id, self.gateway_request_id), **event,
+                    self.agent, source=TranscriptSource(self.thread_id, self.task_id, self.request_id, self.gateway_request_id),
+                    **event,
                 )
             else:
                 self._event_writer(self.agent, thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id, **event)
-            if failed:
-                warning = {"kind": "system_message", "phase": "failed", "block_id": f"{self.request_id}:history-write-failed",
-                           "payload": {"text": "历史记录暂时保存失败；当前任务继续运行，恢复历史可能不完整。"}}
-                if self._event_writer is None:
-                    append_background_transcript_event(self.agent, source=TranscriptSource(self.thread_id, self.task_id, self.request_id, self.gateway_request_id), **warning)
-                else:
-                    self._event_writer(self.agent, thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id, **warning)
         except (OSError, RuntimeError, TypeError, ValueError):
-            # 展示投影丢失不能把真实模型轮变成失败；canonical transcript、task
-            # lifecycle 和工具结果仍由各自权威存储收口。
             return
 
 
@@ -885,13 +1047,7 @@ def _record_active_input_display(sink: BackgroundTranscriptSink, message_ids: tu
         block_id = f"{sink.request_id}:input-message:{message_id}"
         payload = {"text": public_background_transcript_text(sink._scrub_text(text), limit=0, channel=sink.channel),
                    "message_id": message_id, "input_state": "submitted"}
-        if sink._display_history is not None:
-            sink._display_history.record("user_message", "completed", block_id, payload)
-        sink._checkpoint_writer.record({
-            "thread_id": sink.thread_id, "task_id": sink.task_id, "request_id": sink.request_id,
-            "gateway_request_id": sink.gateway_request_id, "kind": "user_message", "phase": "completed",
-            "block_id": block_id, "payload": payload,
-        })
+        sink._event("user_message", "completed", block_id, payload, live=False)
 
 
 # LLM: The lock lives on the shared Agent, so every background scheduler thread
@@ -1192,15 +1348,23 @@ def public_background_transcript_text(
 
 # LLM: 完整显式思考只保存公开净化后的字符串，事件仍有界；存档失败不改变模型或任务状态。
 # 函数用途: 超长思考结束时保留不可变原文供Ctrl+E读取，避免12K预览变成永久丢失。
-def _thinking_archive_payload(sink: BackgroundTranscriptSink, text: str) -> dict:
-    if len(text) <= 12_000:
+def _thinking_archive_payload(sink: object | None, text: str) -> dict:
+    if len(text) <= BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS:
         return {}
+    if sink is None:
+        return {"history_incomplete": True}
     try:
-        from .display_archive import archive_display_rows
-        reference = archive_display_rows(sink.agent, thread_id=sink.thread_id,
-                                         rows=({"kind": "thinking", "text": row} for row in text.split("\n")))
+        rows = ({"kind": "thinking", "text": row} for row in text.split("\n"))
+        if isinstance(sink, BackgroundTranscriptSink):
+            if sink.publication_gate.decision != "verified":
+                return {"history_incomplete": True}
+            reference = sink._archive_rows(rows)
+        else:
+            from .display_archive import archive_display_rows
+
+            reference = archive_display_rows(sink.agent, thread_id=sink.thread_id, rows=rows)
         return {"display_archive_ref": reference}
-    except Exception:  # noqa: BLE001 显示失败不得重跑模型，也不得暴露路径/凭据
+    except Exception:  # noqa: BLE001 - 展示失败仍应保留原有的有界预览。
         return {"history_incomplete": True}
 
 
