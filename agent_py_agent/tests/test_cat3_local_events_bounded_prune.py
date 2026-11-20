@@ -147,7 +147,11 @@ def test_lane_can_expire_a_segment_with_exactly_one_tail_window_budget(tmp_path)
         live_id = conn.execute('SELECT event_id FROM events ORDER BY seq DESC LIMIT 1').fetchone()[0]
     segment.write_bytes(_line(live_id))
     result = validate_lane_receipt(maintenance.maintain_local_events_lane(_request(home)))
-    assert segment.exists() and result['complete'], result
+    assert segment.exists() and not result['deleted_items'], result
+    finished = validate_lane_receipt(maintenance.maintain_local_events_lane(
+        _request(home, result['cursor']),
+    ))
+    assert finished['complete'] and finished['cycle_generation'] == 1, finished
 
 
 @pytest.mark.parametrize('tail', [b'broken\n', b'{"event_id":', b'{}\n'])

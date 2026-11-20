@@ -272,19 +272,27 @@ def test_conversation_roots_are_sorted_and_skip_scope_symlink(lane_home, tmp_pat
     assert not missing.owner_home_dir.exists()
 
 
-# 函数用途: 对流式名称只保留limit个最小后继，不要求可重复迭代或全量排序。
-def test_lane_cursor_window_streams_once_and_bounds_results():
-    seen = []
+def test_directory_page_preserves_budget_and_resumes(lane_home):
+    from agent_py_agent.agent.user_space.directory_paging import directory_page
 
-    # 函数用途: 提供只消费一次的逆序名称来源。
-    def names():
-        for value in range(100, 0, -1):
-            seen.append(value)
-            yield f'{value:03}'
+    root = lane_home.owner_home_dir
+    directory = root / "page-test"
+    directory.mkdir()
+    expected = {f"{value:03}" for value in range(100)}
+    for name in sorted(expected, reverse=True):
+        (directory / name).touch()
 
-    assert storage_lanes.lane_cursor_window({'after': '050'}, names(), 3) == ['051', '052', '053']
-    assert len(seen) == 100
-    assert storage_lanes.lane_cursor_window({}, iter(['b', 'a']), 0) == []
+    names, cursor, complete = directory_page(root, ("page-test",), {"after": "050"}, 3)
+    assert len(names) == cursor["last_scanned"] == 3
+    assert not complete
+    assert directory_page(root, ("page-test",), cursor, 0) == ([], cursor, False)
+    visited = list(names)
+    while not complete:
+        names, cursor, complete = directory_page(root, ("page-test",), cursor, 3)
+        assert len(names) <= cursor["last_scanned"] <= 3
+        visited.extend(names)
+    assert len(visited) == len(expected)
+    assert set(visited) == expected
 
 
 # 函数用途: 复用原数据库发现器而不构造新库或建立循环导入。

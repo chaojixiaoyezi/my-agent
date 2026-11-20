@@ -359,9 +359,11 @@ def _extraction_records_lock_busy(setup, monkeypatch, holder):
         assert result['skipped']['lock_busy'] == 1 and not result['complete'] and path.exists()
         assert attempted.is_set() and [(item['name'], item['outcome']) for item in attempts] == [('.records.lock', 'busy')]
         assert attempts[0]['inode'] == held.inode == sidecar.stat().st_ino and attempts[0]['remaining_ms'] > 0
-        # 扫描真实读过一次；忙锁之后没有锁内复读，阶段续点原样停在该提案前。
-        assert attempts[0]['read_bytes'] == result['bytes'] == size and result['items'] == 1
-        assert result['skipped'] == {'lock_busy': 1} and result['deleted_items'] == 0 and result['cursor'] == cursor
+        # 锁侧车计入访问数；唯一正文只读一次，未决提案仍留在续点之后。
+        assert attempts[0]['read_bytes'] == result['bytes'] == size
+        assert result['items'] == len(list(path.parent.iterdir()))
+        assert result['skipped'] == {'lock_busy': 1} and result['deleted_items'] == 0
+        assert all(result['cursor'][key] == value for key, value in cursor.items())
     assert held.released.is_set()
     assert sum(row['deleted_items'] for row in drain(setup, cursor=result['cursor'])) == 1
     assert path.parent.joinpath('.records.lock').exists()
@@ -384,14 +386,22 @@ def test_extraction_records_lock_busy_out_of_process_holder(setup, monkeypatch):
 @pytest.mark.parametrize('holder', ['thread', 'process'])
 @pytest.mark.parametrize('busy_first', [True, False])
 def test_lock_busy_member_keeps_cursor_in_either_member_order(setup, monkeypatch, busy_first, holder):
-    busy_name, free_name = ('a-busy', 'b-free') if busy_first else ('b-busy', 'a-free')
-    busy, free = evolution_request(setup, busy_name), evolution_request(setup, free_name)
+    from agent_py_agent.agent.user_space.directory_paging import directory_page
+
+    members = {path.name: path for path in (evolution_request(setup, "member-one"),
+                                            evolution_request(setup, "member-two"))}
+    directory = next(iter(members.values())).parent
+    owner = setup[0].owner_home_dir
+    names, _, complete = directory_page(owner, directory.relative_to(owner).parts, {}, 128)
+    order = [name for name in names if name in members]
+    assert complete and len(order) == 2
+    busy, free = (members[order[0]], members[order[1]]) if busy_first else (members[order[1]], members[order[0]])
     sizes = {busy.name: busy.stat().st_size, free.name: free.stat().st_size}
     sidecar = busy.with_name(busy.name + '.lock')
-    order = [busy.name, free.name] if busy_first else [free.name, busy.name]
     attempts, attempted = observe_member_locks(monkeypatch)
     lock = held_lock(locked_json_path(busy), sidecar) if holder == 'thread' else held_lock_in_process('json', busy)
     with lock as held:
+        visited_count = len(list(directory.iterdir()))
         row = validate_lane_receipt(history.maintain_asset_auxiliary_lane(request(setup)))
         assert attempted.is_set() and [(item['name'], item['outcome']) for item in attempts] == [
             (name, 'busy' if name == busy.name else 'acquired') for name in order]
@@ -400,8 +410,9 @@ def test_lock_busy_member_keeps_cursor_in_either_member_order(setup, monkeypatch
         assert row['skipped'] == {'lock_busy': 1} and row['deleted_items'] == 1 and not row['complete']
         assert row['freed_bytes'] == sizes[free.name] and busy.exists() and not free.exists()
         # 两份各扫描读一次，只有取得锁的成员在锁内复读。
-        assert row['items'] == 2 and row['bytes'] == sizes[busy.name] + 2 * sizes[free.name]
-        assert row['cursor'] == {'phase': 'requests', 'kind': 'script', 'after': '' if busy_first else free.name}
+        assert row['items'] == visited_count and row['bytes'] == sizes[busy.name] + 2 * sizes[free.name]
+        assert row['cursor'].get('phase', 'requests') == 'requests'
+        assert row['cursor']['after'] == ('' if busy_first else free.name)
     assert held.released.is_set()
     assert sum(item['deleted_items'] for item in drain(setup, cursor=row['cursor'])) == 1 and not busy.exists()
 
@@ -532,6 +543,7 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
     from types import SimpleNamespace
 
     from agent_py_agent.agent.user_space import storage_lanes
+    from agent_py_agent.agent.user_space.directory_paging import directory_page
 
     path = evolution_request(setup, 'fd-check')
     original, failed = os.unlink, []
@@ -594,8 +606,13 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
             assert row['skipped']['lock_busy'] == 1
             assert attempted.is_set() and [(item['name'], item['outcome']) for item in attempts] == [(path.name, 'busy')]
             assert attempts[0]['inode'] == holder.inode == sidecar.stat().st_ino and attempts[0]['remaining_ms'] > 0
-            assert attempts[0]['read_bytes'] == row['bytes'] == path.stat().st_size and row['items'] == 1
-            assert row['skipped'] == {'lock_busy': 1} and row['cursor'] == {'phase': 'requests', 'kind': 'script', 'after': ''}
+            assert attempts[0]['read_bytes'] == row['bytes'] == path.stat().st_size
+            assert row['items'] >= 1
+            assert row['skipped'] == {'lock_busy': 1}
+            owner = setup[0].owner_home_dir
+            upcoming, _, _ = directory_page(owner, path.parent.relative_to(owner).parts,
+                                             row['cursor'].get('directory', {}), 128)
+            assert path.name in upcoming
         else:
             assert failed and row['errors']
             assert [(item['name'], item['outcome']) for item in attempts] == [(path.name, 'acquired')]

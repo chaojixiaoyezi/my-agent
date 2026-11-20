@@ -550,6 +550,58 @@ def _local_events_advance(store, request, snapshot, budget, receipt, *, segments
     return deleted_db, deleted_jsonl, scanned_bytes, vacuum, after, segments_pending
 
 
+def _local_events_database_page(request, cursor, budget, receipt):
+    from ..user_space.owner_maintenance import _local_store_candidate_exists
+    from ..user_space.storage_lanes import (
+        STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT,
+        _real_directory,
+        lane_directory_entry,
+    )
+
+    home = Path(request.home.owner_home_dir)
+    fixed = ("data/local_store.sqlite3", "data/local_store/local.db", "local_store/local.db")
+    parts = ("workspace", "runtime", "workspaces")
+    index = cursor.get("fixed_index", 0)
+    if type(index) is not int or not 0 <= index <= len(fixed):
+        index = 0
+    while not budget.exhausted(receipt["items"], receipt["bytes"]):
+        if index < len(fixed):
+            path = home / fixed[index]
+            index += 1
+            cursor["fixed_index"] = index
+            fixed_candidate = True
+        else:
+            fixed_candidate = False
+            if not _real_directory(home, parts):
+                return None, True
+            try:
+                scope, position, visited, complete = lane_directory_entry(
+                    home, parts, cursor.get("directory", {}), require_dir_fd=os.name != "nt",
+                )
+            except (OSError, ValueError) as exc:
+                receipt["errors"].append({"code": type(exc).__name__, "path": "/".join(parts)})
+                return None, False
+            receipt["items"] += visited
+            cursor["directory"] = position
+            if complete:
+                return None, True
+            if scope is None:
+                continue
+            path = home.joinpath(*parts, scope, "local_store", "local.db")
+        try:
+            exists = _local_store_candidate_exists(home, path, include_event_files=True)
+        except OSError:
+            cursor["cycle_pending"] = True
+            if len(receipt["errors"]) < STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT:
+                receipt["errors"].append({"code": "local_store_discovery", "path": path.relative_to(home).as_posix()})
+            continue
+        if exists:
+            if fixed_candidate:
+                receipt["items"] += 1
+            return path, False
+    return None, False
+
+
 # LLM: owner发现器是唯一路径来源；空闲预检不构造Store，实际维护只沿LocalStore原_local_write写门。
 #   游标额外保存一个布尔cycle_pending，跨DB证明本轮全部空闲；不另建维护状态或配额账。
 # 函数用途: 每片轮转一个库，追平事件与JSONL后回收页，返回严格领域回执。
@@ -561,36 +613,37 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
         STORAGE_LANE_SLICE_BYTES,
         STORAGE_LANE_SLICE_ENTRIES,
         STORAGE_LANE_SLICE_MS,
-        lane_cursor_window,
-        owner_local_store_databases,
+        lane_cycle_generation,
     )
 
-    receipt = {"cursor": {}, "complete": True, "items": 0, "bytes": 0, "deleted_items": 0,
-               "freed_bytes": 0, "backlog": 0, "skipped": {"vacuum_deferred": 0}, "errors": []}
+    generation = lane_cycle_generation(request.cursor)
+    cursor = {"cycle_generation": generation}
+    cursor.update({key: val for key, val in request.cursor.items() if key in {
+        "fixed_index", "directory", "cycle_pending", "after", "phase",
+    } and "fixed_index" in request.cursor})
+    receipt = {"cursor": cursor, "complete": False, "items": 0, "bytes": 0, "deleted_items": 0,
+               "freed_bytes": 0, "backlog": 0, "skipped": {"vacuum_deferred": 0}, "errors": [],
+               "cycle_generation": generation}
     if request.legal_hold:
-        return {**receipt, "deferred_reason": "legal_hold"}
-    paths, discovery_errors = owner_local_store_databases(request.home)
-    for error in discovery_errors[:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]:
-        item = {"code": "local_store_discovery"}
-        source = error.get("source")
-        if isinstance(source, str) and not Path(source).is_absolute() and ".." not in Path(source).parts:
-            item["path"] = source
-        receipt["errors"].append(item)
-    receipt["complete"] = not discovery_errors
-    by_name = {path.relative_to(request.home.owner_home_dir).as_posix(): path for path in paths}
-    names = sorted(by_name)
-    if not names:
+        return {**receipt, "complete": True, "deferred_reason": "legal_hold"}
+    budget = request.budget.capped(
+        items=getattr(request.config, "retention_scan_slice_entries", STORAGE_LANE_SLICE_ENTRIES),
+        size=getattr(request.config, "retention_scan_slice_bytes", STORAGE_LANE_SLICE_BYTES),
+        ms=getattr(request.config, "retention_scan_slice_ms", STORAGE_LANE_SLICE_MS),
+    )
+    if budget.exhausted():
+        return {**receipt, "deferred_reason": "budget_exhausted"}
+    prior = dict(cursor)
+    db_path, complete = _local_events_database_page(request, cursor, budget, receipt)
+    if complete:
+        generation = lane_cycle_generation(cursor, wrapped=True)
+        return {**receipt, "cursor": {"cycle_generation": generation}, "cycle_generation": generation,
+                "complete": not cursor.get("cycle_pending") and not receipt["errors"]}
+    if db_path is None:
         return receipt
-    cursor = request.cursor
-    selected = lane_cursor_window(cursor, names, 1)
-    if not selected:
-        cursor = {}
-        selected = lane_cursor_window(cursor, names, 1)
-    name = selected[0]
+    name = db_path.relative_to(request.home.owner_home_dir).as_posix()
     cycle_pending = bool(cursor.get("cycle_pending", False))
-    receipt.update(cursor={"after": name, "phase": "events", "cycle_pending": cycle_pending},
-                   complete=False, items=1)
-    db_path = by_name[name]
+    cursor.update(after=name, phase="events", cycle_pending=cycle_pending)
     source_failure = []
 
     # LLM: 仍调用原request.commit，不制造授权；区分原门自身异常与operation原异常，拒绝后不再消费来源。
@@ -632,12 +685,9 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
                 vacuum["deferred_reason"] = reason
         initial_work = snapshot is None or event_work or vacuum_work or segment_work
         if initial_work:
-            budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES,
-                                          size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
-            if (request.budget.max_bytes == 0 or request.budget.max_items == 0
-                    or (request.budget.remaining_ms() <= 0 and not event_work)):
+            if budget.remaining_ms() <= 0 and not event_work:
                 receipt["backlog"] = snapshot[0] if snapshot else 0
-                return {**receipt, "cursor": dict(cursor), "deferred_reason": "budget_exhausted"}
+                return {**receipt, "cursor": prior, "deferred_reason": "budget_exhausted"}
             scope = global_write_commit_scope(commit) if request.coordinator else nullcontext()
             with scope:
                 # schema 恢复 pending 时只保留原责任，不在有界通道构造中同步跑完整库。
@@ -662,7 +712,6 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
             receipt["skipped"]["vacuum_deferred"] = 1
             receipt["deferred_reason"] = vacuum["deferred_reason"]
         receipt["cursor"].update(phase="events" if pending else "vacuum", cycle_pending=cycle_pending)
-        receipt["complete"] = name == names[-1] and not cycle_pending and not discovery_errors
     except (sqlite3.Error, OSError) as exc:
         if source_failure and exc is source_failure[0]:
             raise

@@ -24,7 +24,8 @@ from ..user_space.storage_lanes import (
     STORAGE_LANE_SLICE_MS,
     StorageLaneBudget,
     StorageLaneRequest,
-    lane_cursor_window,
+    lane_cycle_generation,
+    lane_directory_entry,
     owner_retention_override,
 )
 from .process_registry import _process_instance_terminated
@@ -166,6 +167,8 @@ class _Pass:
             except (ValueError, TypeError):
                 phase = "invalid"
         self.phase = phase
+        generation = lane_cycle_generation(request.cursor)
+        self.result["cycle_generation"] = cursor["cycle_generation"] = generation
         reap_after = request.cursor.get("reap_after", "")
         self.invalid_cursor = (type(next_prune) not in (int, float) or not math.isfinite(next_prune) or next_prune < 0
                                or type(offset) is not int or offset < 0
@@ -174,8 +177,8 @@ class _Pass:
                                or (phase == "reap_hosts" and not _valid_reap_after(reap_after)))
         if self.invalid_cursor:
             self.result["cursor"] = {"next_prune_at": 0.0, "log_offset": 0, "phase": "prune"}
-        elif phase == "reap_hosts" and reap_after:
-            self.result["cursor"]["reap_after"] = reap_after
+        elif phase == "reap_hosts" and isinstance(request.cursor.get("reap_directory"), dict):
+            cursor["reap_directory"] = request.cursor["reap_directory"]
         if not self.invalid_cursor and phase != "reap_hosts" and self.ledger_generation is None and offset:
             # 无代际的旧续点只能重放，不能把当前台账前缀直接认作已消费。
             self.result["cursor"].update(log_offset=0, phase="logs")
@@ -307,17 +310,16 @@ def _commit_lost_host(p, record):
 def _reap_hosts(p):
     """分片检查活跃目录，未知实例留在原处，随下次到期维护重新核对。"""
     cursor = p.result["cursor"]
-    limit = p.budget.max_items - p.result["items"]
-    with os.scandir(p.root) as entries:
-        names = lane_cursor_window(
-            {"after": cursor.get("reap_after", "")},
-            (entry.name for entry in entries if entry.name.startswith("bg-") and entry.name.endswith(".json")),
-            limit + 1,
-        )
-    for name in names:
-        if not p.available():
-            return False
-        p.result["items"] += 1
+    position = cursor.get("reap_directory", {})
+    while p.available():
+        name, resume, visited, complete = lane_directory_entry(p.root, (), position)
+        p.result["items"] += visited
+        if complete:
+            cursor.pop("reap_directory", None)
+            return True
+        if name is None or not (name.startswith("bg-") and name.endswith(".json")):
+            cursor["reap_directory"] = position = resume
+            continue
         # 读取失败只遗留该行，不阻止其余候选按续点前进。
         try:
             session_id = validate_session_id(name.removesuffix(".json"))
@@ -340,9 +342,8 @@ def _reap_hosts(p):
         else:
             if record is not None and record["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS:
                 _commit_lost_host(p, record)
-        cursor["reap_after"] = name
-    cursor.pop("reap_after", None)
-    return True
+        cursor["reap_directory"] = position = resume
+    return False
 
 
 # 初读只枚举已完成的历史，归档位置证明通知义务此前已结清；实际删除仍在原根目录事务中重读。
@@ -723,6 +724,8 @@ def maintain_process_sessions_lane(request: StorageLaneRequest) -> dict:
                 return p.result
             p.set_phase("prune")
             p.result["complete"] = True
+            generation = lane_cycle_generation(p.result["cursor"], wrapped=True)
+            p.result["cycle_generation"] = p.result["cursor"]["cycle_generation"] = generation
     except BlockingIOError:
         p.skip("lock_busy")
     except (OSError, ValueError, TypeError, RuntimeError):
