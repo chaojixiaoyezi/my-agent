@@ -1,12 +1,5 @@
 # LLM: 权限、Schema、搜索和执行共用快照；仅有search动作才默认收起工具，目录归档不展示内部授权令牌，不热改身份。
 # 模块用途: 装配同源声明和可选反馈的工具并交给唯一执行器，沿原目录与搜索展示工具。
-from __future__ import annotations
-
-import hashlib
-import os
-import weakref
-from queue import SimpleQueue
-
 """Bind tools into one immutable runtime snapshot and delegate canonical calls.
 
 这个文件是工具系统的“前台服务台”：登记工具、冻结每轮可见工具集合、从同一快照渲染目录，
@@ -14,19 +7,28 @@ from queue import SimpleQueue
 也不在执行时重新发现工具或另做一套授权判断。
 """
 
+from __future__ import annotations
+
+import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Collection
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from operator import attrgetter
 from pathlib import Path
+from queue import SimpleQueue
 from typing import TYPE_CHECKING, Any
 
+from ..common import hot_json
 from ..common.cancellation import CancellationToken
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..contracts.tool_manifest_contract import tool_manifest_payload
 from ..memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from ..path_access_policy import effective_owner_scope_root, path_scope_regime
@@ -96,13 +98,11 @@ _NARROWED_MODEL_SPEC_MAX_ENTRIES = 128
 # 函数用途: 在独立安全线程完成回收借用，绝不在GC调用栈获取MCP锁或停止进程。
 def _drain_registry_borrow_releases() -> None:
     while True:
-        owner, completed = _MCP_BORROW_RELEASES.get()
+        owner, completed, view_leases = _MCP_BORROW_RELEASES.get()
         try:
-            _release_registry_borrow(owner)
+            _release_registry_borrow(owner, completed, view_leases)
         except Exception:
             logging.getLogger(__name__).exception("MCP borrowed lease release failed")
-        finally:
-            completed.set()
 
 
 # LLM: Start once per process during normal registry construction, never from a GC callback; no MCP connection is opened.
@@ -120,19 +120,28 @@ def _ensure_registry_borrow_worker() -> None:
 def _register_registry_borrow(facade: ToolRegistry) -> None:
     facade._mcp_adoption_open = False
     facade._mcp_borrow_count[0] += 1
-    facade._mcp_borrow_release_completed = threading.Event()
+    completed = facade._mcp_borrow_release_completed = threading.Event()
+    view_leases = facade._mcp_view_leases if facade._mcp_is_permission_view else None
+    if view_leases is not None:
+        view_leases.add(completed)
     facade._mcp_borrow_finalizer = weakref.finalize(
-        facade, _MCP_BORROW_RELEASES.put, (facade._mcp_catalog_owner, facade._mcp_borrow_release_completed))
+        facade, _MCP_BORROW_RELEASES.put, (facade._mcp_catalog_owner, completed, view_leases))
 
 
 # LLM: 仅由显式关闭或后台释放线程调用，绝不在GC回调内直接运行；生命周期锁串行化借用计数与父级关闭重开，不阻塞于prepare锁。
 # 函数用途: 归还已消失或显式关闭的借用，最后一份退出后完成父级延迟关闭。
-def _release_registry_borrow(owner: ToolRegistry) -> None:
+def _release_registry_borrow(owner: ToolRegistry, completed: threading.Event, view_leases: set | None) -> None:
     with owner._mcp_lifecycle_lock:
-        owner._mcp_borrow_count[0] = max(0, owner._mcp_borrow_count[0] - 1)
-        close_owner = owner._mcp_deferred_close_requested and owner._mcp_borrow_count[0] == 0
-        if close_owner:
-            _close_registry_clients(owner)
+        if completed.is_set():
+            return
+        if view_leases is not None:
+            view_leases.discard(completed)
+        owner._mcp_borrow_count[0] -= 1
+        try:
+            if owner._mcp_deferred_close_requested and owner._mcp_borrow_count[0] == 0:
+                _close_registry_clients(owner)
+        finally:
+            completed.set()
 # tool_search(action=catalog) 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。
 _LIVE_LIST_TOOLS_MAX_BYTES = 12_000
 
@@ -143,7 +152,8 @@ def _agent_config_int(key: str) -> int:
 
 # LLM: 目录设置只控制展示，完整catalog仍读同一快照，deferred不改变执行授权。
 # 类用途: 冻结当前工具目录的分页、截断和按需展示选项。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class CatalogRenderConfig:
     mode: str
     offset: int
@@ -162,7 +172,8 @@ class CatalogRenderConfig:
 
 # LLM: 单一宿主装配配置；defer仅延后实例连接，不清配置、不改变权限；凭据环境上界与 B5 来源/审批仍保持原身份。
 # 类用途: 汇总工作区、权限、工具上限和宿主绑定；远端推送依赖只由core注入，不从模型恢复。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ToolRegistryParams:
     workspace_root: Path
     max_chars: int
@@ -268,6 +279,30 @@ class ToolRegistryParams:
     capability_pack_mcp_idle_stop_seconds: int = 600
 
 
+# 入口字段名称由宿主固定，运行时只读取原配置对象与构造参数。
+_LIVE_BOOL_FIELDS = {
+    "tool_catalog_include_examples": "catalog_include_examples",
+    "tool_vector_search_enabled": "vector_search_enabled",
+    "tool_discovery_cache_pin_enabled": "tool_discovery_cache_pin_enabled",
+    "background_process_listen_scope_enforce": "background_process_listen_scope_enforce",
+    "shell_sandbox_boundary_facts": "shell_sandbox_boundary_facts",
+    "enable_file_syntax_diagnostics": "enable_file_syntax_diagnostics",
+    "plugin_process_sandbox": "plugin_process_sandbox",
+    "capability_pack_mcp_enabled": "capability_pack_mcp_enabled",
+}
+_LIVE_BOOL_READERS = {
+    key: (attrgetter(key), attrgetter(param), ToolRegistryParams.__dataclass_fields__[param].default)
+    for key, param in _LIVE_BOOL_FIELDS.items()
+}
+
+
+def _read_live_bool(reader, source, fallback: bool) -> bool:
+    try:
+        return bool(reader(source))
+    except AttributeError:
+        return fallback
+
+
 # LLM: 目录与搜索共用请求快照；归档只投影规范工具名，动作令牌留在宿主权限里，不更新发现账或加载schema。
 # 函数用途: 为tool_search的catalog动作生成本人可见工具、不可用原因及执行边界。
 def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
@@ -295,9 +330,9 @@ def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
         item["category"] = tool.model_spec.category if tool is not None else "general"
     live_payload = _live_tool_manifest_payload(payload, snapshot,
         {spec.name for spec in registry.specs_for_snapshot(snapshot)}, include_extended_context=context is not None)
-    return ToolHandlerOutcome("tool_search", True, json.dumps(payload, ensure_ascii=False), result_envelope={
+    return ToolHandlerOutcome("tool_search", True, hot_json.dumps(payload, ensure_ascii=False), result_envelope={
         "tool_output_policy": {"preserve_prompt_output": False,
-            "live_prompt_output": json.dumps(live_payload, ensure_ascii=False, separators=(",", ":"))}})
+            "live_prompt_output": hot_json.dumps(live_payload, ensure_ascii=False, compact=True)}})
 
 
 # LLM: tool_search 只能在请求快照中检索；命中即为下一模型回合展开并在同线程累计 Schema，但永远不能扩大 allowed_tools 或恢复不可用工具。
@@ -429,7 +464,7 @@ def _tool_search_invalid_arguments(message: str) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         "tool_search",
         False,
-        json.dumps({"error": message}, ensure_ascii=False),
+        hot_json.dumps({"error": message}, ensure_ascii=False),
         error_code="TOOL_INVALID_ARGUMENTS",
     )
 
@@ -505,10 +540,10 @@ def _search_deferred_tool_result(
     return ToolHandlerOutcome(
         "tool_search",
         True,
-        json.dumps(payload, ensure_ascii=False),
+        hot_json.dumps(payload, ensure_ascii=False),
         result_envelope={"tool_search": {"loaded_tool_names": loaded_names},
                          "tool_output_policy": {"preserve_prompt_output": True,
-                                                "live_prompt_output": json.dumps(live, ensure_ascii=False)}},
+                                                "live_prompt_output": hot_json.dumps(live, ensure_ascii=False)}},
     )
 
 
@@ -648,7 +683,7 @@ def _tool_search_index_spec(spec: ToolModelSpec) -> ToolModelSpec:
                "datasources": ("datasource", "数据源", "sqlite", "database", "数据库", "credential"),
                "workflows": ("workflow", "工作流", "skill", "script", "脚本")}
     words = aliases.get(spec.name, ())
-    return replace(spec, hints=replace(spec.hints, keywords=(*spec.keywords, *words))) if words else spec
+    return fast_replace(spec, hints=fast_replace(spec.hints, keywords=(*spec.keywords, *words))) if words else spec
 
 
 # LLM: 短卡与 native 定义共用同一 ToolModelSpec，哈希是正式规范 Schema 的哈希，不另生成定义。
@@ -805,7 +840,7 @@ class ToolRegistry:
         self._construction_params = params
         self._plugin_owner = params.plugin_owner
         if params.plugin_owner is not None and not self.plugins_enabled:
-            params = replace(params, plugin_owner=None)
+            params = fast_replace(params, plugin_owner=None)
             self._construction_params = params
         self._mcp_prepare_lock = threading.Lock()
         self._mcp_closed = threading.Event()
@@ -814,6 +849,7 @@ class ToolRegistry:
         self._mcp_connected_state: list[bool] = [False]
         self._mcp_servers_state: list[dict[str, Any] | None] = [None]
         self._mcp_catalog_owner = self
+        self._mcp_worker_lazy = False
         self._mcp_lifecycle_lock = threading.RLock()
         self._mcp_borrowed = False
         self._mcp_adoption_open = True
@@ -821,6 +857,9 @@ class ToolRegistry:
         self._mcp_borrow_count = [0]
         self._mcp_borrow_finalizer = None
         self._mcp_borrow_release_completed = None
+        self._mcp_is_permission_view = False
+        self._mcp_permission_views: weakref.WeakSet[ToolRegistry] = weakref.WeakSet()
+        self._mcp_view_leases: set[threading.Event] = set()
         _ensure_registry_borrow_worker()
         self._mcp_owner_pid = os.getpid()
         self._mcp_deferred_close_requested = False
@@ -833,6 +872,7 @@ class ToolRegistry:
         self.owner_type = str(params.owner_type or "main_agent").strip() or "main_agent"
         self.tools: dict[str, BaseTool] = {}
         self._live_tool_gates: dict[str, str] = {}
+        self._live_tool_gate_readers: dict[str, Callable] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.disabled_tool_names = {
             str(item).strip() for item in params.disabled_tools if str(item).strip()
@@ -862,15 +902,15 @@ class ToolRegistry:
 
     # LLM: 只读宿主配置；旧装配缺字段时沿DTO默认值回退，未提供必填向量选项时关闭，不修改工具或权限。
     # 函数用途: 在使用时解析同一配置对象里的开关。
-    def _live_bool(self, key: str, param_key: str | None = None) -> bool:
+    def _live_bool(self, key: str) -> bool:
         params = self._construction_params
-        field_name = param_key or key
-        fallback = getattr(params, field_name, getattr(ToolRegistryParams, field_name, False))
-        return bool(getattr(getattr(params, "live_config", None), key, fallback))
+        read_live, read_param, default = _LIVE_BOOL_READERS[key]
+        fallback = _read_live_bool(read_param, params, default)
+        return _read_live_bool(read_live, getattr(params, "live_config", None), fallback)
 
     @property
     def catalog_include_examples(self) -> bool:
-        return self._live_bool("tool_catalog_include_examples", "catalog_include_examples")
+        return self._live_bool("tool_catalog_include_examples")
 
     # LLM: 只读同一 live_config；无配置时沿 DTO 默认关闭，不冻结开关、不改变工具权限。
     # 函数用途: 每次检索时读取当前的原生工具表钉住策略。
@@ -880,7 +920,7 @@ class ToolRegistry:
 
     @property
     def vector_search_enabled(self) -> bool:
-        return self._live_bool("tool_vector_search_enabled", "vector_search_enabled")
+        return self._live_bool("tool_vector_search_enabled")
 
     @property
     def background_process_listen_scope_enforce(self) -> bool:
@@ -912,7 +952,14 @@ class ToolRegistry:
     # LLM: 权限视图共享状态/锁/池和原目录owner；已开始标记不代表已完成，后继调用须等锁内发现结束再投影。
     # 函数用途: 只执行一次普通MCP初连并同步当前视图目录，关闭后不复活，返回本次是否首次连接。
     def ensure_mcp_connected(self) -> bool:
-        return _ensure_registry_mcp_connected(self)
+        connected = _ensure_registry_mcp_connected(self)
+        if not self._mcp_worker_lazy:
+            _start_declared_registry_clients(self, tuple(self._mcp_clients))
+        return connected
+
+    def defer_declared_mcp_start(self) -> None:
+        """由 runner 标记新建子代理，保留主会话的首次连接时机。"""
+        self._mcp_worker_lazy = True
 
     # LLM: 权限视图只重建基础工具并取得一份MCP借用；创建/释放共生命周期锁，不授新owner权限。
     # 函数用途: 给一个工作片生成独立权限视图，避免切 Full Access 热改同用户其他正在执行的会话。
@@ -928,10 +975,13 @@ class ToolRegistry:
     # 函数用途: 计算MCP连接与宿主凭据环境边界的稳定指纹，不输出配置正文。
     def _mcp_config_fingerprint(self) -> str:
         params = self._construction_params
-        return hashlib.sha256(json.dumps({
-            "servers": _current_registry_mcp_servers(self),
+        servers = _current_registry_mcp_servers(self)
+        return hashlib.sha256(hot_json.dumps({
+            "servers": servers,
+            "catalogs": {name: catalog for name, server in servers.items()
+                         if (catalog := _mcp_server_catalog(server)) is not None},
             "credential_env_names": sorted(params.host_credential_env_names),
-        }, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        }, sort_keys=True, ensure_ascii=False, compact=True).encode()).hexdigest()
 
     # LLM: Only a fresh same-owner same-process facade may adopt identical MCP config; no agent-bound handlers are copied.
     # 函数用途: 引用计数借用同用户父注册表的连接状态，拒绝跨用户或配置漂移。
@@ -953,6 +1003,7 @@ class ToolRegistry:
         self.tools[name] = tool
         if live_gate is not None:
             self._live_tool_gates[name] = live_gate
+            self._live_tool_gate_readers[name] = attrgetter(live_gate)
         self._tool_registry_generation = getattr(self, '_tool_registry_generation', 0) + 1
 
     # LLM: 快照先做硬权限交集，再做无副作用可用性检查；检查异常按不可用 fail-closed。
@@ -1076,7 +1127,7 @@ class ToolRegistry:
         extra_deferred, declared = _extra_deferred_names(self, snapshot, allowed_tools)
         return _render_registry_catalog_section(
             specs,
-            replace(self._catalog_render_config(), declared_deferred_names=declared),
+            fast_replace(self._catalog_render_config(), declared_deferred_names=declared),
             write_inline_max_chars=self._write_inline_max_chars(),
             tool_protocol=tool_protocol,
             presentation_deferred_names=extra_deferred,
@@ -1225,7 +1276,7 @@ class ToolRegistry:
             and exact_read_roots(boundary, invocation_root) is None
         )
         if host_output_redaction is not None:
-            host_output_redaction = replace(host_output_redaction,
+            host_output_redaction = fast_replace(host_output_redaction,
                 force_default=boundary["foreground_admin_full_access"])
         return ToolExecutor().execute(
             ToolExecutorRequest(
@@ -1274,12 +1325,13 @@ def _ensure_registry_lifecycle_fields(registry: ToolRegistry) -> None:
             "_mcp_borrow_count": [0], "_mcp_borrow_finalizer": None,
             "_mcp_borrow_release_completed": None, "_mcp_owner_pid": os.getpid(),
             "_mcp_deferred_close_requested": False,
+            "_mcp_worker_lazy": False, "_mcp_is_permission_view": False,
+            "_mcp_permission_views": weakref.WeakSet(), "_mcp_view_leases": set(),
             "_mcp_connected_state": [bool(getattr(registry, "_mcp_clients", ()))],
             "_mcp_servers_state": [None],
         }
         for name, value in defaults.items():
-            if not hasattr(registry, name):
-                setattr(registry, name, value)
+            registry.__dict__.setdefault(name, value)
         registry._mcp_lifecycle_fields_ready = True
 
 
@@ -1288,7 +1340,7 @@ def _ensure_registry_lifecycle_fields(registry: ToolRegistry) -> None:
 def _registry_with_access_policy(registry, access_mode, path_access_mode, owner_scope_root):
     from copy import copy
 
-    params = replace(registry._construction_params, access_mode=access_mode,
+    params = fast_replace(registry._construction_params, access_mode=access_mode,
                      path_access_mode=path_access_mode, owner_scope_root=owner_scope_root)
     if params == registry._construction_params:
         return registry
@@ -1300,17 +1352,20 @@ def _registry_with_access_policy(registry, access_mode, path_access_mode, owner_
         view = copy(registry)
         view._mcp_borrowed = True
         view._mcp_borrow_released = False
+        view._mcp_is_permission_view = True
         view._construction_params = params
         view.path_access_mode = path_access_mode
         view.owner_scope_root = owner_scope_root
         view.tools = {}
         view._live_tool_gates = {}
+        view._live_tool_gate_readers = {}
         register_base_tools(view, params)
         view.register(ToolSearchTool(view))
         for name, tool in registry.tools.items():
             if name not in view.tools:
                 view.register(tool, live_gate=registry._live_tool_gates.get(name))
         _register_registry_borrow(view)
+        registry._mcp_permission_views.add(view)
         return view
 
 
@@ -1334,9 +1389,15 @@ def _share_registry_mcp_state(registry, source):
                 return False
             if registry._mcp_config_fingerprint() != source._mcp_config_fingerprint():
                 return False
-            for attr in ("_mcp_servers_state", "_mcp_prepare_lock", "_mcp_lifecycle_lock", "_mcp_closed", "_mcp_clients",
-                         "_mcp_connected_state", "_mcp_retry_state", "_mcp_catalog_owner", "_mcp_borrow_count"):
-                setattr(registry, attr, getattr(source, attr))
+            registry._mcp_servers_state = source._mcp_servers_state
+            registry._mcp_prepare_lock = source._mcp_prepare_lock
+            registry._mcp_lifecycle_lock = source._mcp_lifecycle_lock
+            registry._mcp_closed = source._mcp_closed
+            registry._mcp_clients = source._mcp_clients
+            registry._mcp_connected_state = source._mcp_connected_state
+            registry._mcp_retry_state = source._mcp_retry_state
+            registry._mcp_catalog_owner = source._mcp_catalog_owner
+            registry._mcp_borrow_count = source._mcp_borrow_count
             registry._mcp_borrowed = True
             registry._mcp_borrow_released = False
             _register_registry_borrow(registry)
@@ -1525,11 +1586,11 @@ def _narrow_model_spec_for_actions(spec: ToolModelSpec, allowed_actions: frozens
             return cached
     pruned_schema = _prune_schema_for_actions(spec.input_schema, allowed_actions)
     kept_examples = tuple(ex for ex in spec.hints.examples if _example_matches_actions(ex, allowed_actions))
-    narrowed = replace(
+    narrowed = fast_replace(
         spec,
         schema_hash="",
         input_schema=pruned_schema,
-        hints=replace(spec.hints, examples=kept_examples),
+        hints=fast_replace(spec.hints, examples=kept_examples),
     )
     with _NARROWED_MODEL_SPEC_LOCK:
         _NARROWED_MODEL_SPEC_CACHE[cache_key] = narrowed
@@ -1644,7 +1705,7 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
                     and effective_actions == ceiling_actions)
                 else _apply_tool_action_narrowing(tool, runtime.model_spec, frozenset(effective_actions))
             )
-            runtime = replace(runtime, model_spec=narrowed_spec)
+            runtime = fast_replace(runtime, model_spec=narrowed_spec)
         runtimes.append(runtime)
     return ToolRuntimeSnapshot(
         run_id=str(run_id or ""), runtimes=tuple(runtimes),
@@ -1659,7 +1720,7 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
 # LLM: 旧list_tools授权只能变为catalog单动作；限制进入schema哈希，原快照与全局handler不改，不建立影子注册。
 # 函数用途: 为保存的旧目录白名单生成最窄规范合同。
 def _catalog_only_model_spec(spec):
-    return replace(spec, schema_hash="", description="只读本人完整工具目录，不允许搜索或加载。",
+    return fast_replace(spec, schema_hash="", description="只读本人完整工具目录，不允许搜索或加载。",
         input_schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["catalog"]}},
             "required": ["action"], "additionalProperties": False})
 
@@ -1682,26 +1743,41 @@ def _unregister_registry_mcp_proxies(registry, clients=None):
 def _close_registry_mcp_lifecycle(registry):
     _ensure_registry_lifecycle_fields(registry)
     with registry._mcp_lifecycle_lock:
-        facade_clients = tuple(registry._mcp_clients)
-        if getattr(registry, "_mcp_borrowed", False):
-            if registry._mcp_borrow_released:
-                return
-            registry._mcp_borrow_released = True
-            finalizer = getattr(registry, "_mcp_borrow_finalizer", None)
-            if finalizer is not None and finalizer.detach() is not None:
-                _release_registry_borrow(registry._mcp_catalog_owner)
-                registry._mcp_borrow_release_completed.set()
-        elif registry.owns_mcp_lifecycle():
+        if registry._mcp_borrow_released:
+            return
+        owner = registry._mcp_catalog_owner
+        if registry.owns_mcp_lifecycle():
             registry._mcp_deferred_close_requested = True
-            if not registry._mcp_borrow_count[0]:
-                _close_registry_clients(registry)
+        facade_clients = tuple(registry._mcp_clients)
+        views = () if registry._mcp_is_permission_view else tuple(registry._mcp_permission_views)
+        facades = tuple(view for view in views if not view._mcp_borrow_released)
+        if registry._mcp_borrowed:
+            facades = (*facades, registry)
+        # 先撤销所有门面，再归还租约。最后一份归还可能需要打断正在运行的发现。
+        for facade in facades:
+            facade._mcp_borrow_released = True
+            if facade._mcp_borrow_finalizer is not None:
+                facade._mcp_borrow_finalizer.detach()
+            facade._mcp_permission_views.discard(facade)
+        for facade in facades:
+            completed = facade._mcp_borrow_release_completed
+            if completed is not None:
+                view_leases = facade._mcp_view_leases if facade._mcp_is_permission_view else None
+                _release_registry_borrow(owner, completed, view_leases)
+        if not registry._mcp_is_permission_view:
+            # 已回收门面的 finalizer 可能仍排队，使用同一凭据同步归还。
+            for completed in tuple(registry._mcp_view_leases):
+                _release_registry_borrow(owner, completed, registry._mcp_view_leases)
+        if registry is owner and not owner._mcp_borrow_count[0] and not owner._mcp_closed.is_set():
+            _close_registry_clients(owner)
+        if not facades:
             return
-        else:
-            return
-    with registry._mcp_prepare_lock:
-        _unregister_registry_mcp_proxies(registry, facade_clients)
-        registry._mcp_clients = []
-        registry._mcp_connected_state = [False]
+        with registry._mcp_prepare_lock:
+            clients = (*facade_clients, *owner._mcp_clients)
+            for facade in facades:
+                _unregister_registry_mcp_proxies(facade, clients)
+                facade._mcp_clients = []
+                facade._mcp_connected_state = [False]
 
 
 # LLM: Only the owner reopens, serialized with close/discovery; empty-pool proxies cannot collide with the next generation.
@@ -1807,7 +1883,7 @@ def _ensure_registry_mcp_connected(registry: ToolRegistry) -> bool:
         registry._mcp_clients.extend(clients)
         initial_retry_at = time.monotonic() + 1.0
         for client in clients:
-            if not client.is_running():
+            if not getattr(client, "lazy", False) and not client.is_running():
                 registry._mcp_retry_state[id(client)] = (1, initial_retry_at)
         _project_shared_mcp_tools(registry)
         return True
@@ -1841,13 +1917,20 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
         return
     initial_connect = False
     if hasattr(registry, "_mcp_connected_state"):
-        initial_connect = registry.ensure_mcp_connected()
+        initial_connect = _ensure_registry_mcp_connected(registry)
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
     plugin_owner = getattr(registry, "_plugin_owner", registry._construction_params.plugin_owner)
     dynamic_servers = (getattr(registry._construction_params, "mcp_servers_provider", None) is not None
                        or getattr(registry._construction_params, "live_config", None) is not None)
-    if not dynamic_servers and plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
+    if not dynamic_servers and plugin_owner is None and all(
+        not getattr(client, "lazy", False) and client.is_running() and not getattr(client, "tools_changed", False)
+        for client in clients
+    ):
         return
+    from ..plugin_runtime import DeclaredMCPClient
+
+    worker_lazy = getattr(registry, "_mcp_worker_lazy", False)
+    declared_clients = []
     with registry._mcp_prepare_lock:
         if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
             return
@@ -1863,6 +1946,14 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
         for client in list(getattr(registry, "_mcp_clients", ()) or ()):
             if getattr(client, "_registry_policy_retiring", False):
                 continue
+            if worker_lazy:
+                use_catalog = getattr(client, "use_declared_registry_catalog", None)
+                if callable(use_catalog) and use_catalog() and not client.lazy:
+                    # 主会话可能已经连接该插件，继续投影它原来的已验代理。
+                    continue
+            if isinstance(client, DeclaredMCPClient) or getattr(client, "eager_in_main", False):
+                declared_clients.append(client)
+                continue
             if getattr(client, "lazy", False):
                 client.idle_stop_if_due(time.monotonic(), registry._construction_params.capability_pack_mcp_idle_stop_seconds)
                 continue
@@ -1876,6 +1967,30 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
         _project_shared_mcp_tools(registry)
         if plugin_owner is not None:
             project_plugin_tools(registry)
+    if worker_lazy:
+        now = time.monotonic()
+        for client in declared_clients:
+            client.idle_stop_if_due(now, registry._construction_params.capability_pack_mcp_idle_stop_seconds)
+    else:
+        _start_declared_registry_clients(registry, declared_clients)
+
+
+def _start_declared_registry_clients(registry: ToolRegistry, clients) -> None:
+    """主会话保持预连接，等待单服务启动时不持注册表锁。"""
+    if not clients:
+        return
+    from ..plugin_runtime import DeclaredMCPClient
+
+    for client in clients:
+        if registry._mcp_closed.is_set() or registry._mcp_borrow_released:
+            return
+        if not isinstance(client, DeclaredMCPClient) and not getattr(client, "eager_in_main", False):
+            continue
+        try:
+            client.ensure_started()
+        except Exception as exc:
+            if not client.is_closed():
+                logging.getLogger(__name__).warning("MCP server '%s' 预连接失败：%s", client.config.name, exc)
 
 
 # LLM: 回调只生成配置；旧装配可省略新增可选参数；关闭工具时本轮不能连接普通 MCP，不把旧配置作为错误兜底。
@@ -1890,6 +2005,12 @@ def _current_registry_mcp_servers(registry: ToolRegistry) -> dict[str, Any]:
     return deepcopy(dict((provider() if provider is not None else getattr(params, "mcp_servers", None)) or {}))
 
 
+def _mcp_server_catalog(server: object) -> list[dict[str, Any]] | None:
+    from .mcp_declarations import MCPServerWithCatalog
+
+    return server.catalog if isinstance(server, MCPServerWithCatalog) else None
+
+
 # LLM: 调用方持共享 prepare 锁；先撤销旧代理并确认清理，失败阻断本轮，不启动同名替代服务。
 # 函数用途: 在运行边界按服务配置差异关闭、重建客户端，保留普通服务与插件各自生命周期。
 def _synchronize_registry_mcp_servers(registry: ToolRegistry) -> None:
@@ -1901,7 +2022,9 @@ def _synchronize_registry_mcp_servers(registry: ToolRegistry) -> None:
     ordinary = [client for client in owner._mcp_clients if not isinstance(client, PluginMCPClient)]
     present = {client.config.name for client in ordinary}
     retiring = {client.config.name for client in ordinary if getattr(client, "_registry_policy_retiring", False)}
-    changed = ({name for name in previous.keys() | desired.keys() if previous.get(name) != desired.get(name)}
+    changed = ({name for name in previous.keys() | desired.keys()
+                if previous.get(name) != desired.get(name)
+                or _mcp_server_catalog(previous.get(name)) != _mcp_server_catalog(desired.get(name))}
                | retiring | (desired.keys() - present))
     if not changed:
         return
@@ -1922,7 +2045,7 @@ def _synchronize_registry_mcp_servers(registry: ToolRegistry) -> None:
     # 与首次连接采用同一退避，不能在本轮立刻重连刚启动失败的替代客户端。
     initial_retry_at = time.monotonic() + 1.0
     for client in replacements:
-        if not client.is_running():
+        if not getattr(client, "lazy", False) and not client.is_running():
             owner._mcp_retry_state[id(client)] = (1, initial_retry_at)
     owner._mcp_servers_state[0] = desired
 
@@ -2151,7 +2274,7 @@ def _safe_tool_availability(tool: BaseTool, *, registry: ToolRegistry | None = N
                 source = provider() if provider is not None else None
             else:
                 source = getattr(params, "live_config", None)
-            if not getattr(source, gate, False):
+            if not _read_live_bool(registry._live_tool_gate_readers[tool.model_spec.name], source, False):
                 return ToolAvailability.unavailable(f"disabled by {gate}")
         return tool.availability()
     except Exception as exc:
@@ -2172,11 +2295,49 @@ def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | N
     try:
         from .mcp_registration import register_mcp_servers
 
-        return register_mcp_servers(registry, mcp_servers,
-                                    host_credential_env_names=registry._construction_params.host_credential_env_names)
+        env_names = registry._construction_params.host_credential_env_names
+        declared = {name: catalog for name, raw in mcp_servers.items()
+                    if (catalog := _mcp_server_catalog(raw)) is not None}
+        if not declared:
+            return register_mcp_servers(registry, mcp_servers, host_credential_env_names=env_names)
+        clients = []
+        for name, raw in mcp_servers.items():
+            if name in declared:
+                client = _register_declared_mcp_server(registry, str(name), raw, declared[name])
+                if client is not None:
+                    clients.append(client)
+            else:
+                clients.extend(register_mcp_servers(registry, {name: raw}, host_credential_env_names=env_names))
+        return clients
     except Exception:  # 兜底：连接子系统整体异常也不崩主流程。
         logging.getLogger(__name__).exception("MCP server 连接子系统初始化失败，已跳过")
         return []
+
+
+def _register_declared_mcp_server(registry: ToolRegistry, name: str, raw: dict, catalog: list[dict[str, Any]]):
+    from ..plugin_runtime import DeclaredMCPClient
+    from .mcp_client import MCPError, MCPServerConfig
+    from .mcp_declarations import parse_declared_mcp_tools
+
+    params = registry._construction_params
+    try:
+        config = MCPServerConfig.from_mapping(name, raw)
+        config.host_credential_env_names = frozenset(params.host_credential_env_names)
+        tools = parse_declared_mcp_tools(catalog, server_name=name)
+        client = DeclaredMCPClient(config, tools, runtime_repo=params.runtime_repo)
+    except MCPError as exc:
+        logging.getLogger(__name__).warning("MCP server '%s' 声明不可用（%s）：%s", name, exc.code, exc)
+        return None
+    replacement = dict(registry.tools)
+    for tool in client.tools:
+        tool_name = tool.model_spec.name
+        if tool_name in replacement:
+            logging.getLogger(__name__).warning("MCP server '%s' 工具名重复，跳过 '%s'", name, tool_name)
+        else:
+            replacement[tool_name] = tool
+    # 快照读者可能正遍历原映射，目录按服务整批替换。
+    registry.tools = replacement
+    return client
 
 
 def _render_tool_catalog_section(
