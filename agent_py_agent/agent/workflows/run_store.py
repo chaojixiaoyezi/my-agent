@@ -644,6 +644,11 @@ class WorkflowRunStore:
             changed = previous is not None and payload(previous) != payload(step_record)
             if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed', 'skipped') and not resuming):
                 raise ValueError('WORKFLOW_RUN_TERMINAL')
+            if previous is not None and not resuming:
+                old_retry = previous.escalation_result.get('retry', {})
+                new_retry = step_record.escalation_result.get('retry', {})
+                if new_retry.get('consumed_budget', 0) < old_retry.get('consumed_budget', 0):
+                    raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
             if step_record.step_id not in {step.step_id for step in record.steps}:
                 raise ValueError('运行中不存在该步骤')
             self._write_step(workflow_run_id, step_record)
@@ -658,6 +663,27 @@ class WorkflowRunStore:
             _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
             record.revision = data['revision']
             return record
+
+    def reserve_step_retry(self, workflow_run_id, step, *, expected_attempt_id):
+        """原运行锁内比较尝试身份和预算；只有获胜者获得下一次派发权。"""
+        facts = step.escalation_result
+        retry = facts['retry']
+        if (retry['state'] != 'waiting' or facts['attempt_id'] == expected_attempt_id
+                or retry['replay_proof'] != 'not_started' or not math.isfinite(retry['next_eligible_at'])):
+            raise ValueError('无效的工作流重试预约')
+        with self._lock(workflow_run_id):
+            current = self.load_run(workflow_run_id)
+            previous = next((s for s in current.steps if s.step_id == step.step_id), None)
+            if current.status != 'running' or previous is None or previous.status in (
+                    'succeeded', 'escalated_recovered', 'skipped', 'waiting_for_agent'):
+                return None
+            before = previous.escalation_result
+            consumed = before.get('retry', {}).get('consumed_budget', 0)
+            if ((before.get('attempt_id') or expected_attempt_id) != expected_attempt_id
+                    or consumed + 1 != retry['consumed_budget']
+                    or retry['consumed_budget'] >= step.max_attempts):
+                return None
+            return self.save_step_result(workflow_run_id, step)
 
     def begin_control(self, workflow_run_id, *, action, operation_key, expected_revision, intent=None):
         """恢复/取消沿原 run.json 记同键意图，不能用 updated_at 或第二任务账当版本。"""
@@ -1199,7 +1225,7 @@ class WorkflowRunStore:
 
     # LLM: 步骤水位以准确原子快照持久化于原运行各步快照；无全表扫描，共用跨平台 run.json 锁。
     # 函数用途: 保存特定步骤的水位信息 (WF-10)，支持增量读取与断点游标。
-    def save_step_watermark(self, workflow_run_id, step_id, watermark):
+    def save_step_watermark(self, workflow_run_id, step_id, watermark, *, publication=None, expected_attempt_id=None):
         safe_path(self.root, step_id + '.json')
         if not isinstance(watermark, dict):
             raise TypeError('watermark 必须是字典')
@@ -1209,6 +1235,15 @@ class WorkflowRunStore:
             if step is None:
                 raise ValueError('运行中不存在该步骤')
             updated_step = replace(step, watermark=payload(watermark))
+            if publication is not None:
+                facts = step.escalation_result
+                previous = facts.get('watermark_publication')
+                if (facts.get('attempt_id', '') != expected_attempt_id or not previous
+                        or previous['value'] != watermark or step.status not in ('succeeded', 'escalated_recovered')):
+                    raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+                if previous['state'] == 'published':
+                    return step
+                updated_step.escalation_result = {**facts, 'watermark_publication': publication}
             self._write_step(workflow_run_id, updated_step)
             record = replace_run_record(record, dict(
                 steps=tuple(updated_step if s.step_id == step_id else s for s in record.steps)))

@@ -478,11 +478,11 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
     # 摘要进度心跳归高级，后台日志容量归部署；计数覆盖全部正式目录项。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 231, "deployment": 154}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 231, "deployment": 155}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
-    assert len(DEPLOYMENT_ONLY_KEYS) == 131
+    assert len(DEPLOYMENT_ONLY_KEYS) == 132
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 399
+    assert len(registry) == 400
     for key in ("gateway_restart_mode", "gateway_restart_fast_timeout_seconds"):
         assert registry[key].tier == "deployment" and not registry[key].user_editable
     for key in ("technical_cutoff_continuation_enabled", "tool_wait_input_reply_enabled", "workflow_auto_dispatch_reviewers"):

@@ -59,6 +59,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "gateway_control_operation_retention_days",
     "llm_call_records_max_rows", "acp_bridge_agents", "background_dispatch_log_max_bytes",
     "workflow_condition_max_subject_chars",
+    "workflow_foreach_max_parallel",
     "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
     "gateway_event_hub_ring_events", "gateway_event_fallback_poll_seconds", "conversation_actor_workers",
     "owner_epoch_fence_enabled", "background_owner_wake_rescan_seconds",

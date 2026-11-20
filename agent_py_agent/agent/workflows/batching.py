@@ -6,6 +6,8 @@ import re
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
 
+from ..settings.config import DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT
+
 
 class ForeachInvalid(ValueError):
     """声明或运行时输入违反foreach合同。"""
@@ -18,6 +20,21 @@ class ForeachInvalid(ValueError):
         super().__init__(f'{self.error_code}: {message}')
 
 
+_configured_max_parallel = DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT
+
+
+def configure_from_config(config: object) -> None:
+    global _configured_max_parallel
+    limit = getattr(config, 'workflow_foreach_max_parallel', DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT)
+    if type(limit) is not int or limit < 1:
+        raise ValueError('workflow_foreach_max_parallel 必须为正整数')
+    _configured_max_parallel = limit
+
+
+def resolved_max_parallel() -> int:
+    return _configured_max_parallel
+
+
 _FOREACH_ALLOWED_KEYS = frozenset({
     'from', 'batch_size', 'max_parallel', 'concurrency', 'as',
     'max_batch_tokens', 'on_batch_error', 'on_item_error', 'mode', 'item_id_key',
@@ -26,7 +43,8 @@ _FOREACH_ALLOWED_KEYS = frozenset({
 
 # LLM: 配置校验不执行步骤、不访问磁盘；支持WF-07公有形式foreach声明。
 # 函数用途: 校验foreach声明。
-def validate_foreach(value):
+def validate_foreach(value, *, max_parallel_limit: int | None = None):
+    limit = resolved_max_parallel() if max_parallel_limit is None else max_parallel_limit
     if not isinstance(value, dict) or set(value) - _FOREACH_ALLOWED_KEYS:
         raise ForeachInvalid('foreach必须是合法配置对象')
     path = value.get('from')
@@ -40,11 +58,11 @@ def validate_foreach(value):
 
     if 'concurrency' in value:
         concurrency = value['concurrency']
-        if type(concurrency) is not int or not 1 <= concurrency <= 8:
+        if type(concurrency) is not int or not 1 <= concurrency <= limit:
             raise ForeachInvalid('concurrency超出范围')
         if 'max_parallel' in value:
             max_parallel = value['max_parallel']
-            if type(max_parallel) is not int or not 1 <= max_parallel <= 8:
+            if type(max_parallel) is not int or not 1 <= max_parallel <= limit:
                 raise ForeachInvalid('max_parallel超出范围')
             if max_parallel != concurrency:
                 raise ForeachInvalid('max_parallel与concurrency冲突')
@@ -52,7 +70,7 @@ def validate_foreach(value):
             max_parallel = concurrency
     else:
         max_parallel = value.get('max_parallel', 1)
-        if type(max_parallel) is not int or not 1 <= max_parallel <= 8:
+        if type(max_parallel) is not int or not 1 <= max_parallel <= limit:
             raise ForeachInvalid('max_parallel超出范围')
 
     alias = value.get('as', 'items')

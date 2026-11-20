@@ -1369,6 +1369,8 @@ gateway_control_operation_retention_days: 7
 memory_reference_pin_chunk_bytes: 65536
 # 工作流正则每次读取的最大字符数，超限且无法用前缀确认时记录未知，至少 1，重启加载。
 workflow_condition_max_subject_chars: 4096
+# 工作流 foreach 批和 DAG 节点共用的并发上限，至少 1，重启加载。
+workflow_foreach_max_parallel: 8
 # 推理能力探测的输出上限，单位tokens，至少1；仍受模型档案上限约束，模型可调策略，重启加载。
 reasoning_probe_max_output_tokens: 40000
 # 推理能力探测的请求期限，单位秒，严格大于0且有限；模型可调策略，重启加载。

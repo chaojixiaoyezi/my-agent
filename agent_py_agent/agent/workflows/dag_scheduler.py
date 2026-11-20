@@ -13,6 +13,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
 from copy import copy
 from dataclasses import replace
+from heapq import heapify, heappop, heappush
+from itertools import count
 from threading import Lock
 from typing import Any
 
@@ -21,9 +23,11 @@ from ..assets.workflow_store import (
 )
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from .batching import resolved_max_parallel
 from .conditions import ConditionIndeterminate, evaluate_condition, mark_condition_indeterminate
 from .models import StepExecutionRecord, payload
 from .run_store import execution_receipt, replace_run_record, settle_step_effect
+from .step_retry import RetryWake, continuing_retry, pending_retry, start_retry, wait_for_retry
 
 _LOG = logging.getLogger(__name__)
 
@@ -139,14 +143,14 @@ def build_dag(
     queue = [sid for sid, deg in in_degree.items() if deg == 0]
     topo_order: list[str] = []
 
+    heapify(queue)
     while queue:
-        queue.sort()
-        curr = queue.pop(0)
+        curr = heappop(queue)
         topo_order.append(curr)
-        for nxt in sorted(reverse_deps[curr]):
+        for nxt in reverse_deps[curr]:
             in_degree[nxt] -= 1
             if in_degree[nxt] == 0:
-                queue.append(nxt)
+                heappush(queue, nxt)
 
     if len(topo_order) != len(all_step_ids):
         unresolved = [sid for sid, deg in in_degree.items() if deg > 0]
@@ -155,6 +159,25 @@ def build_dag(
         )
 
     return deps, reverse_deps, topo_order
+
+
+class _ReadySteps:
+    def __init__(self, deps, reverse_deps, step_status):
+        self.reverse_deps = reverse_deps
+        self.remaining = {sid: sum(step_status.get(dep) not in SUCCESS for dep in deps[sid])
+                          for sid in deps if step_status[sid] == 'pending'}
+        self.sequence = count()
+        self.ready = [(next(self.sequence), sid) for sid in sorted(self.remaining) if self.remaining[sid] == 0]
+
+    def complete(self, step_id):
+        for downstream in sorted(self.reverse_deps[step_id]):
+            if downstream in self.remaining:
+                self.remaining[downstream] -= 1
+                if self.remaining[downstream] == 0:
+                    self.enqueue(downstream)
+
+    def enqueue(self, step_id):
+        heappush(self.ready, (next(self.sequence), step_id))
 
 
 # LLM: 判断定义是否包含非空 depends_on 或 execution_mode == 'dag'。
@@ -181,19 +204,15 @@ def _is_blocked_by_skipped_upstream(
     step_status: dict[str, str],
 ) -> bool:
     sid = spec['step_id']
-    skipped_deps = [d for d in deps.get(sid, ()) if step_status.get(d) == 'skipped']
+    skipped_deps = {d for d in deps.get(sid, ()) if step_status.get(d) == 'skipped'}
     if not skipped_deps:
         return False
-    explicit = set(spec.get('depends_on') or ())
+    declared = spec.get('depends_on') or ()
+    explicit = {declared} if isinstance(declared, str) else set(declared)
     inputs_map = spec.get('inputs_map') or {}
-    for d in skipped_deps:
-        if d in explicit:
-            return True
-        for ref in inputs_map.values():
-            if isinstance(ref, dict) and ref.get('step_id') == d:
-                if 'fallback' not in ref:
-                    return True
-    return False
+    return bool(skipped_deps & explicit) or any(
+        isinstance(ref, dict) and isinstance(ref.get('step_id'), str)
+        and ref['step_id'] in skipped_deps and 'fallback' not in ref for ref in inputs_map.values())
 
 
 def _clear_unadmitted_worker_effect(step, spec):
@@ -205,6 +224,11 @@ def _clear_unadmitted_worker_effect(step, spec):
     ):
         step.escalation_result['effect_started'] = False
         step.escalation_result.setdefault('effect_outcome', 'not_started')
+
+
+def _run_effect_observed(record):
+    return any(step.escalation_result.get('effect_started') or step.escalation_result.get('cleanup_error')
+               for step in record.steps)
 
 
 def _settle_worker_effect(engine, run_id, step, *, interrupted=False):
@@ -261,6 +285,8 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         else:
             _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
+    except RetryWake as retry:
+        return (step, retry)
     except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
@@ -295,7 +321,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         return record
 
     step_specs = {s['step_id']: s for s in steps}
-    deps, reverse_deps, topo_order = build_dag(steps)
+    deps, reverse_deps, _ = build_dag(steps)
 
     timer = time.monotonic()
     progress = {'seq': record.progress_seq}
@@ -314,7 +340,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         max_parallel_int = int(max_parallel_val)
     except (TypeError, ValueError):
         max_parallel_int = 4
-    max_parallel = min(max(1, max_parallel_int), 8)
+    max_parallel = min(max(1, max_parallel_int), resolved_max_parallel())
 
     outputs: dict[str, Any] = {}
     step_status: dict[str, str] = {}
@@ -339,6 +365,8 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
             p_step = previous_steps.get(sid) or _pending_step(spec)
             engine._step_progress(record, p_step, progress)
 
+    readiness = _ReadySteps(deps, reverse_deps, step_status)
+    delayed = []
     admission_observer = getattr(engine, 'concurrency_admission_observer', None)
 
     halt_event = False
@@ -371,9 +399,21 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         engine._step_progress(record, step, progress)
         state.update(record=record)
         step_status[sid] = 'skipped'
+        readiness.complete(sid)
 
     def _process_completed_step(sid: str, completed_step: StepExecutionRecord, exc: BaseException | None) -> None:
         nonlocal record, halt_event
+        if isinstance(exc, RetryWake):
+            current = engine.store.reserve_step_retry(
+                record.workflow_run_id, exc.step, expected_attempt_id=exc.expected_attempt_id)
+            if current is None:
+                raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+            record = current
+            previous_steps[sid] = exc.step
+            step_status[sid] = 'pending'
+            heappush(delayed, (pending_retry(exc.step)['next_eligible_at'], sid))
+            state.update(record=record)
+            return
         record = replace_run_record(
             record,
             dict(
@@ -394,6 +434,8 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
             return
 
         state.update(record=record, phase='step_publish')
+        if completed_step.status in ('succeeded', 'escalated_recovered'):
+            engine._publish_step_watermark(completed_step, step_specs[sid], outputs, record)
         record = engine.store.save_step_result(record.workflow_run_id, completed_step)
         engine._step_progress(record, completed_step, progress)
         state.update(record=record)
@@ -412,34 +454,28 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 halt_reason['step'] = completed_step
             halt_event = True
         elif completed_step.status in SUCCESS:
+            readiness.complete(sid)
             if completed_step.status != 'skipped':
                 outputs[sid] = payload(completed_step.output_snapshot)
 
-    unstarted_step_ids = {
-        s['step_id'] for s in steps if step_status.get(s['step_id']) == 'pending'
-    }
-
-    def _get_ready_step_ids() -> list[str]:
-        ready: list[str] = []
-        for candidate_id in sorted(unstarted_step_ids):
-            if all(step_status.get(d) in SUCCESS for d in deps.get(candidate_id, ())):
-                ready.append(candidate_id)
-        return ready
-
-    with ThreadPoolExecutor(
-        max_workers=max_parallel, thread_name_prefix='workflow-dag'
-    ) as pool:
+    ready = readiness.ready
+    with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix='workflow-dag') as pool:
         active_futures: dict[Any, tuple[str, dict[str, Any]]] = {}
 
-        while (unstarted_step_ids or active_futures) and not halt_event:
-            ready_sids = _get_ready_step_ids()
-            for sid in ready_sids:
-                if halt_event:
-                    break
+        while (ready or delayed or active_futures) and not halt_event:
+            now = time.time()
+            while delayed and delayed[0][0] <= now:
+                readiness.enqueue(heappop(delayed)[1])
+            while ready and len(active_futures) < max_parallel and not halt_event:
+                _, sid = heappop(ready)
                 spec = step_specs[sid]
+                prev = previous_steps.get(sid)
+                retry = pending_retry(prev) if prev is not None else None
+                if retry and retry['next_eligible_at'] > time.time():
+                    heappush(delayed, (retry['next_eligible_at'], sid))
+                    continue
 
                 if _is_blocked_by_skipped_upstream(spec, deps, step_status):
-                    unstarted_step_ids.remove(sid)
                     _mark_step_skipped(spec, reason='upstream_skipped')
                     continue
 
@@ -447,7 +483,6 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     try:
                         matched = evaluate_condition(spec['condition'], dict(outputs), record.inputs)
                     except ConditionIndeterminate as error:
-                        unstarted_step_ids.remove(sid)
                         step = _pending_step(spec)
                         mark_condition_indeterminate(step, error)
                         step.ended_at = time.time()
@@ -455,28 +490,15 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                         _process_completed_step(sid, step, None)
                         break
                     if not matched:
-                        unstarted_step_ids.remove(sid)
                         _mark_step_skipped(spec, reason='condition_false')
                         continue
 
-                while len(active_futures) >= max_parallel and not halt_event:
-                    done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        done_sid, _ = active_futures.pop(fut)
-                        c_step, c_exc = fut.result()
-                        _process_completed_step(done_sid, c_step, c_exc)
-
-                if halt_event:
-                    break
-
-                # 协调线程在派发前发表 running 状态
-                unstarted_step_ids.remove(sid)
-                prev = previous_steps.get(sid)
+                # 协调线程在派发前发表 running 状态。
                 from .governance import pending_review_not_started
                 pending_review = prev is not None and pending_review_not_started(record, prev)
                 template = (
                     StepExecutionRecord.from_dict(prev.to_dict())
-                    if prev is not None and (spec.get('foreach') is not None or pending_review)
+                    if prev is not None and (spec.get('foreach') is not None or pending_review or continuing_retry(prev))
                     else _pending_step(spec)
                 )
                 step = replace(
@@ -492,7 +514,9 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     pol = spec['retry_policy']
                     if isinstance(pol, dict):
                         step.max_attempts = int(pol.get('max_attempts', 1))
-                if not pending_review:
+                if retry:
+                    start_retry(step, reserve_effect=True)
+                elif not pending_review:
                     step.escalation_result['attempt_id'] = uuid.uuid4().hex
                 step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
                 step.escalation_result.update(effect_state='reserved', effect_started=False)
@@ -517,6 +541,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
 
                 local_record = replace_run_record(record, {})
                 local_record._batch_worker = True
+                local_record._defer_step_retry = True
                 local_outputs = dict(outputs)
                 ctx = copy_context()
                 fut = pool.submit(
@@ -534,29 +559,16 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
             if halt_event:
                 break
 
-            if not active_futures and unstarted_step_ids:
-                if _get_ready_step_ids():
-                    continue
-                newly_handled = False
-                for sid in list(unstarted_step_ids):
-                    spec = step_specs[sid]
-                    if _is_blocked_by_skipped_upstream(spec, deps, step_status):
-                        unstarted_step_ids.remove(sid)
-                        _mark_step_skipped(spec, reason='upstream_skipped')
-                        newly_handled = True
-                if not newly_handled and not active_futures:
-                    _LOG.warning(
-                        'DAG scheduler reached unresolved deadlock with pending steps: %s',
-                        sorted(unstarted_step_ids),
-                    )
-                    break
-
             if active_futures:
-                done, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
+                timeout = max(0.0, delayed[0][0] - time.time()) if delayed and len(active_futures) < max_parallel else None
+                done, _ = wait(active_futures, timeout=timeout, return_when=FIRST_COMPLETED)
                 for fut in done:
                     done_sid, _ = active_futures.pop(fut)
                     c_step, c_exc = fut.result()
                     _process_completed_step(done_sid, c_step, c_exc)
+            elif delayed:
+                state['started'] = _run_effect_observed(record)
+                wait_for_retry(engine, delayed[0][0])
 
         if active_futures:
             wait(active_futures.keys())
@@ -584,10 +596,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
             active_futures.clear()
 
     if halt_reason['type'] == 'cancel':
-        state['started'] = any(
-            item.escalation_result.get('effect_started') or item.escalation_result.get('cleanup_error')
-            for item in record.steps
-        )
+        state['started'] = _run_effect_observed(record)
         raise halt_reason['exc']
 
     if halt_reason['type'] == 'waiting_for_agent':

@@ -79,6 +79,7 @@ from .script_runner import (
     load_script,
     parse_script_output,
 )
+from .step_retry import continuing_retry, pending_retry
 from .subworkflow_steps import (
     apply_child_result,
     child_is_settled,
@@ -456,6 +457,9 @@ class _WorkflowRunLifecycle:
             if record.status in ('cancelled', 'cancelling'):
                 raise ValueError('WORKFLOW_CANCELLED')
             admission = self._authorize_run(record, 'resume')
+            from .step_watermarks import repair_pending_watermarks
+
+            record = repair_pending_watermarks(self, record)
             if _requires_terminal_publication_resume(record):
                 # 不消费对账裁决或修复选项，冻结定义须与原步骤集一致；只沿原结算/发表链补发终态，不执行后缀。
                 if admission is not None or any(option is not None for option in (
@@ -559,7 +563,8 @@ class _WorkflowRunLifecycle:
                                 idx == start
                                 or (sid in incomplete_ids and not (deps.get(sid, set()) & reset_ids))
                             )
-                            and (spec.get('foreach') is not None or self._is_pending_native_review(record.steps[idx]))
+                            and (spec.get('foreach') is not None or self._is_pending_native_review(record.steps[idx])
+                                 or continuing_retry(record.steps[idx]))
                         )
                         if can_preserve_partial:
                             rebuilt.append(replace(record.steps[idx], status='pending', needs_repair=False, error_code='', error_message=''))
@@ -573,7 +578,8 @@ class _WorkflowRunLifecycle:
                 suffix = [_pending(spec) for spec in definition['steps'][start + bool(repaired):]]
                 pending_native_review = (not repaired and start < len(ids)
                     and self._is_pending_native_review(record.steps[start]))
-                if not repaired and start < len(ids) and (definition['steps'][start].get('foreach') is not None or pending_native_review):
+                if not repaired and start < len(ids) and (definition['steps'][start].get('foreach') is not None
+                        or pending_native_review or continuing_retry(record.steps[start])):
                     suffix[0] = replace(record.steps[start], status='pending', needs_repair=False, error_code='', error_message='')
                 steps = record.steps[:start] + ((repaired,) if repaired else ()) + tuple(suffix)
                 drive_start = start + bool(repaired)
@@ -1255,11 +1261,15 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         previous_steps = {step.step_id: step for step in record.steps}
         for spec in definition['steps'][start:]:
             previous = previous_steps.get(spec['step_id'])
+            retry = previous is not None and pending_retry(previous)
             pending_review = (previous is not None
                 and isinstance(previous.escalation_result.get('pending_review'), dict)
                 and previous.escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
                 and not previous.escalation_result.get('effect_started'))
-            template = StepExecutionRecord.from_dict(previous.to_dict()) if previous is not None and (spec.get('foreach') is not None or pending_review) else _pending(spec)
+            template = (StepExecutionRecord.from_dict(previous.to_dict())
+                        if previous is not None and (spec.get('foreach') is not None
+                            or pending_review or continuing_retry(previous))
+                        else _pending(spec))
             step = replace(template, status='running', started_at=time.time(), input_snapshot=payload(record.inputs),
                            error_code='', error_message='', needs_repair=False)
             # 所有真实步骤先落准确 attempt；审核及异步完成都绑定此身份。
@@ -1267,8 +1277,12 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 policy = spec['retry_policy']
                 if isinstance(policy, dict):
                     step.max_attempts = int(policy.get('max_attempts', 1))
-            if not pending_review:
+            if not pending_review and not retry:
                 step.escalation_result['attempt_id'] = uuid.uuid4().hex
+                if continuing_retry(step):
+                    step.escalation_result.pop('effect_state', None)
+                    step.escalation_result.pop('effect_outcome', None)
+                    step.escalation_result['effect_started'] = False
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             clock = time.monotonic()
@@ -1449,19 +1463,14 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         else:
             self._perform(step, spec, outputs, definition, record)
 
-        if step.status in ('succeeded', 'escalated_recovered'):
-            committer = self.watermark_committer
-            if committer is None:
-                try:
-                    from . import step_watermarks
-                    committer = getattr(step_watermarks, 'commit_verified_watermark', None)
-                except ImportError:
-                    committer = None
-            if callable(committer):
-                try:
-                    committer(engine=self, run=record, step=step, spec=spec, outputs=outputs)
-                except Exception:
-                    pass
+        if step.status in ('succeeded', 'escalated_recovered') and not getattr(record, '_batch_worker', False):
+            self._publish_step_watermark(step, spec, outputs, record)
+
+    def _publish_step_watermark(self, step, spec, outputs, record):
+        from .step_watermarks import commit_verified_watermark
+
+        committer = self.watermark_committer or commit_verified_watermark
+        committer(engine=self, run=record, step=step, spec=spec, outputs=outputs)
 
     # LLM: 正式运行终态失败时触发无人值守通知；记录回执于 run.failure_notification，不掩盖失败事实。
     # 函数用途: 当正式运行失败时调用通知扩展，防无限递归 (WF-05)。
@@ -1871,8 +1880,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         debug_metadata = {key: record.escalation_result[key] for key in
                           ('condition_branch', 'dry_run', 'side_effects_blocked') if key in record.escalation_result}
         identity = {key: value for key, value in record.escalation_result.items()
-                    if key in ('attempt_id', 'review_refs', 'effect_started', 'effect_outcome', 'script_execution',
-                               'retry_history', 'query_health')}
+                    if key in ('attempt_id', 'review_refs', 'effect_started', 'effect_state', 'effect_outcome',
+                               'script_execution', 'retry', 'retry_history', 'query_health')}
         record.escalation_result = {**redact_sensitive_value(payload(result.escalation_context or {})), **identity}
         if not record_summary:
             record.escalation_result.update(debug_logs=debug_logs, **debug_metadata)

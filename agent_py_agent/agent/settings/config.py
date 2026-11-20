@@ -58,6 +58,9 @@ _GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS = 7
 # 工作流正则在求值时读取的默认字符预算，与随包 YAML 一致。
 DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS = 4096
 
+# 工作流 foreach 批和 DAG 节点共用的默认并发上限。
+DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT = 8
+
 __all__ = [
     "AgentConfig",
     "DEFAULT_DECISION_AUTONOMY",
@@ -363,6 +366,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     workflow_condition_max_subject_chars: int = field(
         default=DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS, kw_only=True,
         metadata={"bounds": (1, None), "unit": "字符"},
+    )
+    workflow_foreach_max_parallel: int = field(
+        default=DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT, kw_only=True,
+        metadata={"bounds": (1, None), "unit": "个线程"},
     )
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})

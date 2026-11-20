@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from ..common.nofollow_fs import (
     write_text_atomic_beneath,
 )
 from .models import payload
+
+_LOG = logging.getLogger(__name__)
 
 _ALLOWED_WATERMARK_STATUSES: tuple[str, ...] = (
     'succeeded',
@@ -76,6 +79,7 @@ def save_workflow_step_watermark(
     effect_id: str = '',
     scope_key: str = '',
     operation_id: str = '',
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     """保存特定工作流特定步骤的持久化水位检查点 (WF-10)。
 
@@ -100,11 +104,20 @@ def save_workflow_step_watermark(
             try:
                 existing = json.loads(raw)
                 if isinstance(existing, dict):
-                    if scope_key and existing.get('operation_id') == operation_id and existing.get('watermark') == payload(watermark):
+                    same_attempt = (bool(run_id) and existing.get('last_run_id') == run_id
+                                    and existing.get('attempt_id') == step_attempt_id)
+                    same_operation = bool(scope_key and operation_id) and existing.get('operation_id') == operation_id
+                    if (same_attempt or same_operation) and existing.get('watermark') == payload(watermark):
                         return existing
                     prev_rev = int(existing.get('revision', 0))
-            except Exception:
+                elif expected_revision is not None:
+                    raise ValueError('无效的水位检查点')
+            except (ValueError, TypeError):
+                if expected_revision is not None:
+                    raise
                 prev_rev = 0
+        if expected_revision is not None and prev_rev != expected_revision:
+            raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
 
         checkpoint: dict[str, Any] = {
             'schema_version': 'workflow-step-watermark.v1',
@@ -183,48 +196,73 @@ def commit_verified_watermark(
         if watermark_key and isinstance(getattr(step, 'output_snapshot', None), dict) and watermark_key in step.output_snapshot:
             candidate = {'cursor': step.output_snapshot[watermark_key], 'key': watermark_key}
 
-    if not candidate or not isinstance(candidate, dict):
+
+    publication = step.escalation_result.get('watermark_publication')
+    if publication and publication['state'] == 'published':
+        return None
+    if publication:
+        candidate = publication['value']
+
+    if not isinstance(candidate, dict) or not candidate:
         return None
 
-    wm_payload = dict(candidate)
+    owner_home = getattr(engine, 'owner_home', None) or getattr(run, 'owner_home', None)
+    workflow_id = getattr(run, 'workflow_id', '')
+    run_id = getattr(run, 'workflow_run_id', '')
+    store = getattr(engine, 'store', None) if run_id and not getattr(run, 'ephemeral_debug', False) else None
+    facts = step.escalation_result
+    attempt_id = facts.get('attempt_id', '')
+    effect_id = getattr(step, 'effect_id', '') or facts.get('effect_id', '')
+    business_effect = facts.get('business_effect', {})
+    scope_key = business_effect.get('scope_key', '')
+    operation_id = business_effect.get('operation_id', '')
+    step.watermark = dict(candidate)
+    if not owner_home or not workflow_id:
+        return None
 
-    # 1. 持久化至当前 Run 记录（并行 batch worker 在内存记录 watermark，由协调线程原子写盘）
-    if (
-        engine is not None
-        and getattr(engine, 'store', None) is not None
-        and run is not None
-        and not getattr(run, '_batch_worker', False)
-    ):
+    observation_error = None
+    if not publication and store is not None:
         try:
-            updated = engine.store.save_step_watermark(run.workflow_run_id, step.step_id, wm_payload)
-            step.watermark = updated.watermark
-        except Exception:
-            step.watermark = wm_payload
-    else:
-        step.watermark = wm_payload
+            base = load_workflow_step_watermark(owner_home, workflow_id, step.step_id, scope_key=scope_key)
+            facts['watermark_base_revision'] = int((base or {}).get('revision', 0))
+        except (OSError, TypeError, ValueError) as error:
+            # 无法确认旧版本时只允许后续恢复写空槽或认领本次已发表的水位。
+            facts['watermark_base_revision'] = 0
+            observation_error = error
+        facts['watermark_publication'] = {'state': 'pending', 'value': step.watermark}
+        run.revision = store.save_step_result(run_id, step).revision
 
-    # 2. 持久化跨运行 durable (workflow_id, step_id) 检查点
-    owner_home = getattr(engine, 'owner_home', None) or (getattr(run, 'owner_home', None) if run else None)
-    workflow_id = getattr(run, 'workflow_id', '') if run else ''
-    run_id = getattr(run, 'workflow_run_id', '') if run else ''
-    step_attempt_id = ''
-    if isinstance(getattr(step, 'escalation_result', None), dict):
-        step_attempt_id = step.escalation_result.get('attempt_id', '')
-    effect_id = getattr(step, 'effect_id', '')
-    if not effect_id and isinstance(getattr(step, 'escalation_result', None), dict):
-        effect_id = step.escalation_result.get('effect_id', '')
-
-    if owner_home and workflow_id:
-        business_effect = step.escalation_result.get('business_effect', {})
-        return save_workflow_step_watermark(
-            owner_home,
-            workflow_id,
-            step.step_id,
-            wm_payload,
-            run_id=run_id,
-            step_attempt_id=step_attempt_id,
-            effect_id=effect_id,
-            scope_key=business_effect.get('scope_key', ''),
-            operation_id=business_effect.get('operation_id', ''),
+    try:
+        if observation_error is not None:
+            raise observation_error
+        checkpoint = save_workflow_step_watermark(
+            owner_home, workflow_id, step.step_id, step.watermark, run_id=run_id,
+            step_attempt_id=attempt_id, effect_id=effect_id, scope_key=scope_key, operation_id=operation_id,
+            expected_revision=facts.get('watermark_base_revision'),
         )
-    return None
+    except (OSError, RuntimeError, ValueError, TypeError) as error:
+        if store is None:
+            raise
+        _LOG.warning('workflow watermark publication needs repair', extra={
+            'error_code': 'WORKFLOW_EXECUTION_FAILED', 'workflow_run_id': run_id,
+            'step_id': step.step_id, 'error_type': type(error).__name__, 'phase': 'watermark_publication',
+        })
+        state = 'repair'
+        checkpoint = None
+    else:
+        state = 'published'
+    if store is not None:
+        changes = {'state': state, 'value': step.watermark}
+        updated = store.save_step_watermark(run_id, step.step_id, step.watermark,
+                                            publication=changes, expected_attempt_id=attempt_id)
+        step.escalation_result = updated.escalation_result
+    return checkpoint
+
+
+def repair_pending_watermarks(engine, run):
+    """恢复已有成功步骤的水位发表，不调用步骤执行器。"""
+    pending = [step for step in run.steps if step.escalation_result.get(
+        'watermark_publication', {}).get('state') in ('pending', 'repair')]
+    for step in pending:
+        commit_verified_watermark(engine=engine, run=run, step=step, spec={})
+    return engine.store.load_run(run.workflow_run_id) if pending else run

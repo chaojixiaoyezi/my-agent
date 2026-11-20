@@ -83,6 +83,10 @@ def validate_step_eligibility(step):
         except ImportError:
             pass
         raise WorkflowForeachAgentTaskUnsupported(spec['step_id'])
+    if spec.get('foreach') is not None:
+        from ..workflows.batching import validate_foreach
+
+        validate_foreach(spec['foreach'])
 
 
 # LLM: 遍历仅限本次冻结定义，不查任务历史，不写状态；控制操作不调用新内容资格门。
