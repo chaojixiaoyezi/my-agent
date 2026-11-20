@@ -844,6 +844,9 @@ def settle_pending_verification(
             if _managed_reconciliation_claim_is_live(marker, now):
                 return {"settled": False, "reason": "operation_reconciliation_in_flight"}
         status = _manual_verification_payload(payload, row, disposition)
+        if not _manual_result_replayable(row, payload, status, owner_id):
+            # 写出的终态必须能被原重放读口接受；不能则不改行，保持待核对。
+            return {"settled": False, "reason": "operation_result_not_replayable"}
         updated = conn.execute(
             "UPDATE tool_operations AS o SET status=?, settled_at=?, updated_at=?, "
             "outcome_json=?, tool_operation_generation=tool_operation_generation+1 "
@@ -871,15 +874,34 @@ def _manual_verification_payload(payload, row, disposition: str) -> str:
         # 结束人工清单项，保留 UNKNOWN 以继续阻止等价操作自动重放。
         return OP_UNKNOWN
     recorded = disposition == "recorded"
+    # 账本状态沿结算词表（applied/not_started），result 用协调器终态词表（committed/not_started + handler_executed），
+    # 与 tool_operation_coordinator._complete_terminal_result 的读口合同一致。
     effect = SETTLEMENT_APPLIED if recorded else SETTLEMENT_NOT_STARTED
     payload["result"] = {
         "schema_version": "tool_execution_result.v1", "tool": row["operation_type"],
-        "ok": recorded, "effect_outcome": effect,
+        "ok": recorded, "handler_executed": recorded,
+        "effect_outcome": "committed" if recorded else SETTLEMENT_NOT_STARTED,
         "output": "管理员已核实原操作生效。" if recorded else "管理员已核实原操作没有生效。",
     }
     payload["error_code"] = ""
     payload["unknown_reason"] = ""
     return operation_status_for_settlement(effect, ok=recorded).upper()
+
+
+# LLM: 生产者/消费者同一合同：人工核对写出的终态结果先用重放读口自己的校验核一遍，UNKNOWN（abandoned）不产生终态结果。
+# 函数用途: 判断即将提交的人工核对结果能否被 replay_completed_tool_operation 接受。
+def _manual_result_replayable(row, payload, status: str, owner_id: str) -> bool:
+    from ..tooling.tool_operation_coordinator import _complete_terminal_result
+
+    if status == OP_UNKNOWN:
+        return True
+    try:
+        record = replace(_record_from_row(row, owner_id=owner_id),
+                         status=_STATUS_TO_RUNTIME.get(status, TOOL_OPERATION_UNKNOWN),
+                         result=_json_payload(payload.get("result")))
+    except (ToolOperationStateError, TypeError, ValueError):
+        return False
+    return record.status in TOOL_OPERATION_TERMINAL_STATUSES and _complete_terminal_result(record)
 
 
 # LLM: 当前活跃恢复者按owner/root/tool/args核验，跨attempt只增原操作代数和只读标记，执行attempt保持不变。

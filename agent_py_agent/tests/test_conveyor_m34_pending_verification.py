@@ -308,3 +308,71 @@ def test_keyset_uses_existing_index_without_offset(runtime):
     with runtime._runtime_connection() as conn:
         owner_recovery._pending_operation_page(ReadProbe(conn), ("local/main", "", "", "", "", ""), 50, 51)
     assert sum("idx_tool_operations_status" in item and "rowid>?" in item for item in recorded) == 2
+
+
+def _settle(runtime, operation_id, disposition):
+    from agent_py_agent.agent.runtime_db.managed_operation_store import settle_pending_verification
+
+    rows, _ = _query(runtime, owner_id="local/main", operation_id=operation_id, limit=1)
+    assert [row["operation_id"] for row in rows] == [operation_id]
+    return settle_pending_verification(runtime, owner_id="local/main", operation_id=operation_id,
+                                       disposition=disposition, expected_revision=rows[0]["revision"])
+
+
+def _replay(runtime, operation_id):
+    from agent_py_agent.agent.runtime_db.managed_operation_store import _operation_record
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        replay_completed_tool_operation,
+    )
+
+    record = _operation_record(runtime, operation_id, owner_id="local/main", run_id="", task_id="")
+    return record, replay_completed_tool_operation(record)
+
+
+# 读口把成功结果的 committed 投影为空 effect_outcome（与 _result_from_record 一致），原 handler 事实在 original_tool_execution。
+@pytest.mark.parametrize(("disposition", "status", "ok", "effect", "replayed_effect"), [
+    ("recorded", "succeeded", True, "committed", ""),
+    ("confirmed_noop", "failed", False, "not_started", "not_started"),
+])
+def test_manual_verification_result_replays_as_the_confirmed_outcome(
+    runtime, disposition, status, ok, effect, replayed_effect,
+):
+    run = _run(runtime, "run-isolated")
+    op_id = f"tool_operation:{disposition}"
+    _insert_operations(runtime, [(op_id, run, "UNKNOWN", 0, {"args_hash": "original"})])
+
+    outcome = _settle(runtime, op_id, disposition)
+    assert outcome["settled"], outcome
+    record, replayed = _replay(runtime, op_id)
+    assert replayed.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN", replayed
+    assert record.status == status
+    assert record.result.get("handler_executed") is ok and record.result.get("effect_outcome") == effect
+    assert replayed.ok is ok and replayed.effect_outcome == replayed_effect
+    operation = replayed.result_envelope["tool_operation"]
+    assert operation["replayed"] is True and operation["original_tool_execution"]["handler_executed"] is ok
+    assert _query(runtime) == ([], "")
+
+
+def test_abandoned_manual_verification_still_replays_unknown(runtime):
+    run = _run(runtime, "run-isolated")
+    _insert_operations(runtime, [("tool_operation:abandoned", run, "UNKNOWN", 0, {})])
+    assert _settle(runtime, "tool_operation:abandoned", "abandoned")["settled"]
+    record, replayed = _replay(runtime, "tool_operation:abandoned")
+    assert record.status == "unknown"
+    assert replayed.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
+def test_unreplayable_manual_result_fails_closed_without_state_change(runtime, monkeypatch):
+    from agent_py_agent.agent.tooling import tool_operation_coordinator
+
+    run = _run(runtime, "run-isolated")
+    op_id = "tool_operation:guarded"
+    _insert_operations(runtime, [(op_id, run, "UNKNOWN", 0, {"args_hash": "original"})])
+    before = dict(runtime.get_operation(op_id))
+    # 确定性错误用例：模拟读口合同与写出结果漂移。
+    monkeypatch.setattr(tool_operation_coordinator, "_complete_terminal_result", lambda _record: False)
+
+    outcome = _settle(runtime, op_id, "recorded")
+    assert outcome == {"settled": False, "reason": "operation_result_not_replayable"}
+    assert dict(runtime.get_operation(op_id)) == before
+    assert [row["operation_id"] for row in _query(runtime)[0]] == [op_id]
