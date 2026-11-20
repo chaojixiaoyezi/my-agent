@@ -2,7 +2,10 @@
 #   非法配置在执行前被结构化拒绝；不创建新的批处理引擎。
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from agent_py_agent.agent.assets.workflow_store import WorkflowStore
+from agent_py_agent.agent.workflows import batching
 from agent_py_agent.tests.test_business_v12_background_scheduling import (  # noqa: F401 - pytest fixture
     call,
     native,
@@ -32,3 +35,19 @@ def test_foreach_roundtrips_through_native_workflow_schema_and_bad_config_is_rej
         assert status == 400 and payload['effect_outcome'] == 'not_started', (bad, payload)
     status, payload = call(native, 'workflows.get', {'workflow_ref': 'orders-bad'})
     assert status == 404, payload
+
+
+def test_native_foreach_uses_the_configured_ceiling(native, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(batching, '_configured_max_parallel', batching.resolved_max_parallel())
+    batching.configure_from_config(SimpleNamespace(workflow_foreach_max_parallel=12))
+    for spelling in ('max_parallel', 'concurrency'):
+        foreach = {'from': 'inputs.orders', spelling: 12}
+        created = ok(native, 'workflows.create', {'definition': flow(f'orders-{spelling}', foreach)},
+                     idempotency_key=f'foreach-create-ceiling-{spelling}')
+        _, host = native
+        saved = WorkflowStore(host.home_paths.owner_home_dir).get_workflow(created['workflow_ref'])
+        assert saved.steps[0].foreach == foreach
+        status, result = call(native, 'workflows.create',
+                              {'definition': flow(f'orders-invalid-{spelling}', {**foreach, spelling: 13})},
+                              idempotency_key=f'foreach-reject-ceiling-{spelling}')
+        assert status == 400 and result['effect_outcome'] == 'not_started', result

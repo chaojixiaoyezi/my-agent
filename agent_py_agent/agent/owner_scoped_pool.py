@@ -320,9 +320,10 @@ class OwnerScopedAgentPool:
         self._max_agents = _resolved_max_agents(max_agents)
         # 进程内缓存容量随已配置的并发槽位推导（只读现有配置，不新增配置键）。
         cache_capacity.configure_from_config(base_config)
-        from .workflows import conditions
+        from .workflows import batching, conditions
 
         conditions.configure_from_config(base_config)
+        batching.configure_from_config(base_config)
         # 按 owner 分条目的进程级派生缓存（进程记录投影等）跟随本池常驻容量定界。
         register_resident_owner_capacity(self._max_agents)
         # Runtime health is process-scoped and read-only.  Keep the builder's four positional

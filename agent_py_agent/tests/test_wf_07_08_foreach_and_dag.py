@@ -563,35 +563,39 @@ def test_dag_parallel_workers_lock_isolation_and_atomic_persistence(tmp_path):
     worker_held_locks = []
     lock = threading.Lock()
 
-    def analyze(spec, context, skills):
-        sid = spec["step_id"]
-        if sid in ("root", "join"):
-            return {"status": "ok"}
-        # 1. 验证工作线程锁凭据隔离：Worker 绝不继承协调线程的 _HELD_LOCKS.paths (SA-F3)
+    from agent_py_agent.agent.workflows.governance import WorkflowEffectPhase
+
+    def authorize(_run, phase):
+        if not isinstance(phase, WorkflowEffectPhase) or phase.step_id in ("root", "join"):
+            return
+        sid = phase.step_id
         held = getattr(_HELD_LOCKS, "paths", set())
         with lock:
             worker_held_locks.append((sid, set(held)))
             step_attempts[sid] += 1
-            att = step_attempts[sid]
-
-        if att == 1:
-            # 第一次执行：模拟瞬态 I/O 错误触发重试
-            exc = RuntimeError("simulated transient I/O error")
-            exc.error_code = "timeout"
+            first = step_attempts[sid] == 1
+        if first:
+            exc = RuntimeError("simulated pre-admission I/O error")
+            exc.error_code = "TOOL_TIMEOUT"
+            exc.effect_outcome = "not_started"
             raise exc
 
+    def analyze(spec, context, skills):
+        sid = spec["step_id"]
+        if sid in ("root", "join"):
+            return {"status": "ok"}
         # 第二次执行：成功并提交单步验证水位
         return {
             "result": f"result_{sid}",
             "watermark": {"cursor": 100 + int(sid.split("_")[1]), "shard": sid},
         }
 
-    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze, run_authorizer=authorize)
 
     retry_policy = {
         "max_attempts": 2,
         "delay_seconds": 0.02,
-        "retryable_codes": ["timeout", "STEP_EXECUTION_ERROR"],
+        "retryable_codes": ["TOOL_TIMEOUT"],
     }
 
     steps = [{"step_id": "root", "mode": "llm_skill_analysis"}]
@@ -636,7 +640,7 @@ def test_dag_parallel_workers_lock_isolation_and_atomic_persistence(tmp_path):
         history = st.escalation_result.get("retry_history", [])
         assert len(history) == 1
         assert history[0]["attempt"] == 1
-        assert history[0]["error_code"] == "timeout"
+        assert history[0]["error_code"] == "TOOL_TIMEOUT"
         assert st.watermark == {"cursor": 100 + i, "shard": sid}
 
 

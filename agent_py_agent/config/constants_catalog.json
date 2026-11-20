@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1566,
+  "count": 1567,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -9250,6 +9250,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "工作流正则在求值时读取的默认字符预算，与随包 YAML 一致。"
+    },
+    {
+      "name": "DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT",
+      "file": "agent_py_agent/agent/settings/config.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "工作流 foreach 批和 DAG 节点共用的默认并发上限。"
     },
     {
       "name": "_GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS",

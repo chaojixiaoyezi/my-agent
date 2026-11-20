@@ -310,7 +310,8 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
     foreach_schema = {"type": "object", "properties": {
         "from": {"type": "string", "minLength": 3, "maxLength": 512},
         "batch_size": {"type": "integer", "minimum": 1, "maximum": 500},
-        "max_parallel": {"type": "integer", "minimum": 1, "maximum": 8},
+        "max_parallel": {"type": "integer", "minimum": 1},
+        "concurrency": {"type": "integer", "minimum": 1},
         "as": {"type": "string", "minLength": 1, "maxLength": 64},
         "max_batch_tokens": {"type": ["integer", "null"], "minimum": 1},
         "on_batch_error": {"type": "string", "enum": ["fail_fast", "continue"]},
