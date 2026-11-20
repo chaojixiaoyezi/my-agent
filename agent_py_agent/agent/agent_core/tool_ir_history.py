@@ -25,9 +25,8 @@ text 协议路径一字不动。
   历史尾。assistant 文本取该轮 ``ModelResponse.text``（首个调用时落定）。
 - 「同一轮」用 ``tool_rounds`` 标定：同轮的多个工具调用共享一条 AssistantTurn（对齐
   Anthropic「一条 assistant 消息里多个 tool_use」）。轮号变化即新开一条 AssistantTurn。
-- ``ToolResult`` 是 ``frozen`` 不可变值；要为 Step 3/4 的「ToolCall+ToolResult 整对增删」
-  铺路，这里提供 ``drop_tool_call_pairs`` 按 ``tool_call_id`` 集合整对摘除（assistant
-  turn 里删 ToolCall、历史里删配对的 ToolResult），保持配对不变量。
+- ``ToolResult`` 是 ``frozen`` 不可变值；工具对按计划中的调用位置、回执位置和原调用身份
+  整对摘除。旧裸 ID 接口只选择窗口内唯一的完整对。
 - ``UserTurn`` 不属于工具结果窗口，工具 compact 不得删除；需要缩短时由上层 active-turn/thread
   compact 处理。
 - ``RuntimeFactsTurn`` 是宿主状态快照，不是真实用户输入；完整摘要覆盖的旧工具前缀回收时，可一并
@@ -46,10 +45,10 @@ import hashlib
 import json
 import sys
 import threading
-from collections import OrderedDict
-from collections.abc import Mapping
+from collections import Counter, OrderedDict
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from operator import attrgetter
 from types import SimpleNamespace
 from typing import Any
@@ -62,7 +61,7 @@ from ..backends.tool_ir import (
     RuntimeFactsTurn,
     UserTurn,
 )
-from ..common.fast_dataclass import slot_setter
+from ..common.fast_dataclass import fast_frozen, slot_setter
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..prompting_parts.runtime_injection import (
     is_runtime_injection_source,
@@ -264,27 +263,110 @@ def native_tool_ir_history(params: object) -> list[Any]:
     return history
 
 
-# LLM: Source identity comes from the actual preceding canonical ToolCall, never current params.
-# Duplicate full identities fail closed; repeated provider call_id in different turns is valid.
-# 函数用途: 为原生结果解析真实run/attempt/turn/call四元来源，供局部桩与投影共享，未知来源不猜补。
-def native_tool_result_sources(history: list[Any]) -> list[tuple[tuple[str, str, str, str], ToolResult]]:
-    from ..conversation.compact_guard import ConversationCompactError
+@fast_frozen
+@dataclass(frozen=True, slots=True)
+class RetirementEntry:
+    call_position: int
+    result_position: int
+    identity: tuple[str, str, str, str]
 
-    calls, resolved, seen = {}, [], set()
-    for item in history:
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
+class RetirementPlan:
+    entries: tuple[RetirementEntry, ...]
+    non_retirable: tuple[tuple[str, str, str, str], ...]
+
+
+def _call_identity(call: ToolCall) -> tuple[str, str, str, str]:
+    return call.run_id, call.attempt_id, call.turn_id, call.call_id
+
+
+def _tool_results_at(item: object) -> Sequence[ToolResult]:
+    if isinstance(item, ToolResult):
+        return (item,)
+    if isinstance(item, (list, tuple)) and all(isinstance(result, ToolResult) for result in item):
+        return item
+    return ()
+
+
+def _scan_tool_pairs(history: list[Any]) -> tuple[RetirementPlan, list[ToolResult], bool]:
+    groups: list[tuple[int, AssistantTurn, list[tuple[int, ToolResult]]]] = []
+    identities: Counter[tuple[str, str, str, str]] = Counter()
+    call_counts: Counter[str] = Counter()
+    result_counts: Counter[str] = Counter()
+    withheld: dict[tuple[str, str, str, str], None] = {}
+    for position, item in enumerate(history):
         if isinstance(item, AssistantTurn):
-            calls = {call.call_id: (call.run_id, call.attempt_id, call.turn_id, call.call_id)
-                     for call in item.tool_calls}
-        results = (item,) if isinstance(item, ToolResult) else item if isinstance(item, (list, tuple)) else ()
-        for result in results:
-            if not isinstance(result, ToolResult) or result.call_id not in calls:
-                continue
-            source = calls[result.call_id]
-            if source in seen:
-                raise ConversationCompactError("原生工具结果来源重复，不能推断降级对象", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
-            seen.add(source)
-            resolved.append((source, result))
-    return resolved
+            groups.append((position, item, []))
+            for call in item.tool_calls:
+                if isinstance(call, ToolCall):
+                    identities[_call_identity(call)] += 1
+                    call_counts[call.call_id] += 1
+            continue
+        for result in _tool_results_at(item):
+            result_counts[result.call_id] += 1
+            if groups:
+                groups[-1][2].append((position, result))
+            else:
+                withheld[("", "", "", result.call_id)] = None
+
+    entries: list[RetirementEntry] = []
+    resolved: list[ToolResult] = []
+    duplicate_source = False
+    for position, turn, results in groups:
+        calls = {call.call_id: call for call in turn.tool_calls if isinstance(call, ToolCall)}
+        result_ids = {result.call_id for _, result in results}
+        checks = [_call_identity(call) for call in turn.tool_calls if isinstance(call, ToolCall)]
+        duplicate_identity = any(identities[identity] > 1 for identity in checks)
+        if duplicate_identity:
+            duplicate_source |= any(identities[_call_identity(calls[call_id])] > 1
+                                     for call_id in result_ids.intersection(calls))
+        if len(result_ids) != len(results):
+            duplicate_source |= any(count > 1 and call_id in calls
+                for call_id, count in Counter(result.call_id for _, result in results).items())
+        complete = (
+            len(calls) == len(turn.tool_calls) == len(results) == len(result_ids)
+            and not duplicate_identity
+            and all(result.call_id in calls and result.tool_name == calls[result.call_id].tool_name
+                    for _, result in results)
+        )
+        if not complete:
+            withheld.update(dict.fromkeys(checks))
+            for _, result in results:
+                if result.call_id not in calls:
+                    withheld[("", "", "", result.call_id)] = None
+            continue
+        for result_position, result in results:
+            entries.append(RetirementEntry(position, result_position, _call_identity(calls[result.call_id])))
+            resolved.append(result)
+
+    # 空的前三段只标注不能单用裸 ID；不同四元身份的完整对仍可按位置回收。
+    for counts in (call_counts, result_counts):
+        for call_id, count in counts.items():
+            if count > 1:
+                withheld[("", "", "", call_id)] = None
+    return RetirementPlan(tuple(entries), tuple(withheld)), resolved, duplicate_source
+
+
+def tool_pair_retirement_plan(history: list[Any]) -> RetirementPlan:
+    """按回执位置排列完整工具对，并报告不可证明的身份。"""
+    plan, _, _ = _scan_tool_pairs(history)
+    return plan
+
+
+def _native_tool_sources(history: list[Any]):
+    plan, results, duplicate_source = _scan_tool_pairs(history)
+    if duplicate_source:
+        from ..conversation.compact_guard import ConversationCompactError
+
+        raise ConversationCompactError("原生工具结果来源重复，不能推断降级对象", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+    return zip(plan.entries, results)
+
+
+def native_tool_result_sources(history: list[Any]) -> list[tuple[tuple[str, str, str, str], ToolResult]]:
+    """从原顺序配对的调用中读取回执的四元来源。"""
+    return [(entry.identity, result) for entry, result in _native_tool_sources(history)]
 
 
 # LLM: 插话身份及媒体由原 guidance packet 传入并与正文一起留在 IR；此处不读取图片或更改授权。
@@ -343,16 +425,18 @@ def project_native_prompt_history(
     stubs = getattr(params, "compact_degradation_stubs", None) or {}
     history = list(getattr(params, "tool_ir_history", None) or [])
     if stubs:
-        overrides = {id(result): stubs.get(source, result) for source, result in native_tool_result_sources(history)}
-        projected = []
-        for item in history:
+        overrides: dict[int, dict[str, ToolResult]] = {}
+        for entry, _ in _native_tool_sources(history):
+            if entry.identity in stubs:
+                overrides.setdefault(entry.result_position, {})[entry.identity[-1]] = stubs[entry.identity]
+        for position, replacements in overrides.items():
+            item = history[position]
             if isinstance(item, list):
-                projected.append([overrides.get(id(result), result) for result in item])
+                history[position] = [replacements.get(result.call_id, result) for result in item]
             elif isinstance(item, tuple):
-                projected.append(tuple(overrides.get(id(result), result) for result in item))
+                history[position] = tuple(replacements.get(result.call_id, result) for result in item)
             else:
-                projected.append(overrides.get(id(item), item))
-        history = projected
+                history[position] = replacements[item.call_id]
     layout = prompt_cache_layout(prompt)
     if layout is None:
         return prompt, history
@@ -565,29 +649,64 @@ def drop_tool_call_pairs(
     *,
     drop_completed_tool_turns: bool = False,
 ) -> int:
-    """按 tool_use id 集合「整对」摘除 ToolCall 与配对的 ToolResult。
-
-    Step 3/4 的 compact 在丢弃最老工具往返时调用这里，保证 assistant 消息里不留下
-    没有对应 tool_result 的孤儿 tool_use（Anthropic 会拒绝），也不留下指向已删
-    tool_use 的孤儿 tool_result。只有 ``drop_completed_tool_turns=True`` 且调用方已经持有
-    完整替代摘要时，才连同已无保留调用的旧 assistant 正文、连续退休工具前缀中的旧状态一起删除。
-    各来源最新快照、真实用户输入和未退休工具尾部始终保留。返回实际摘除的「对」数（以 ToolResult 计）。
-    """
+    """只接受窗口内唯一的旧式裸 ID，返回实际摘除的回执数。"""
     if not call_ids:
         return 0
     history = native_tool_ir_history(params)
-    removed = sum(
-        1 for item in history if isinstance(item, ToolResult) and item.call_id in call_ids
-    )
+    plan = tool_pair_retirement_plan(history)
+    selected_ids = call_ids - {identity[-1] for identity in plan.non_retirable if not any(identity[:3])}
+    return _drop_planned_tool_pairs(history, [
+        entry for entry in plan.entries if entry.identity[-1] in selected_ids
+    ], drop_completed_tool_turns=drop_completed_tool_turns)
+
+
+def drop_tool_call_pairs_at(
+    params: object,
+    positions: Sequence[RetirementEntry],
+    *,
+    drop_completed_tool_turns: bool = False,
+) -> int:
+    """核对位置和四元身份后摘除工具对，忽略已失效的计划记录。"""
+    if not positions:
+        return 0
+    history = native_tool_ir_history(params)
+    requested = set(positions)
+    selected = [entry for entry in tool_pair_retirement_plan(history).entries if entry in requested]
+    return _drop_planned_tool_pairs(history, selected, drop_completed_tool_turns=drop_completed_tool_turns)
+
+
+def _drop_planned_tool_pairs(
+    history: list[Any],
+    positions: Sequence[RetirementEntry],
+    *,
+    drop_completed_tool_turns: bool = False,
+) -> int:
+    """应用当前原始窗口的已验证计划，预算试探可在重置原历史后重用。"""
+    if not positions:
+        return 0
+    calls_by_position: dict[int, set[str]] = {}
+    results_by_position: dict[int, set[str]] = {}
+    for entry in positions:
+        call_id = entry.identity[-1]
+        calls_by_position.setdefault(entry.call_position, set()).add(call_id)
+        results_by_position.setdefault(entry.result_position, set()).add(call_id)
+
     retired_facts = (
-        _summarized_runtime_fact_indexes(history, call_ids)
+        summarized_runtime_fact_indexes(history, {
+            position for position, ids in calls_by_position.items()
+            if len(ids) == len(history[position].tool_calls)
+        } | {
+            position for position, ids in results_by_position.items()
+            if len(ids) == len(_tool_results_at(history[position]))
+        })
         if drop_completed_tool_turns
         else set()
     )
     rebuilt = [
         _rewritten_history_item(
             item,
-            call_ids,
+            calls_by_position.get(index),
+            results_by_position.get(index),
             drop_completed_tool_turns=drop_completed_tool_turns,
         )
         for index, item in enumerate(history)
@@ -598,7 +717,7 @@ def drop_tool_call_pairs(
         for item in rebuilt
         if item is not None and not _is_empty_assistant_turn(item)
     ]
-    return removed
+    return len(positions)
 
 
 _NON_SUPERSEDED_RUNTIME_FACT_SOURCES = frozenset({
@@ -611,18 +730,6 @@ _NON_SUPERSEDED_RUNTIME_FACT_SOURCES = frozenset({
 })
 
 
-# LLM: 仅从 typed 调用/结果的顺序计算已摘要覆盖位置；跳过未覆盖调用不会删除其生效期间的治理快照，但后续已覆盖轮次内已被更新的具名快照可安全退休。
-# 函数用途: 将已摘要调用转换为覆盖位置，复用联合恢复的旧状态退休规则，保留每个来源的最新状态与治理快照。
-def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> set[int]:
-    positions = {
-        index for index, item in enumerate(history)
-        if (isinstance(item, ToolResult) and item.call_id in call_ids)
-        or (isinstance(item, AssistantTurn) and item.tool_calls
-            and all(call.call_id in call_ids for call in item.tool_calls))
-    }
-    return summarized_runtime_fact_indexes(history, positions)
-
-
 # LLM: 位置集合必须来自调用方已证明覆盖的完整工具组；具名点时快照仅在其后存在更新同源快照、且不作为任意保留工具调用生效期治理快照时退休；
 #   非替代类宿主事件/指引/媒体事件及匿名旧记录跨过保留屏障时一律保守保留。
 # 函数用途: 为运行中及联合恢复共用运行时事实退休规则，防止早期保留工具锁死后续数百轮具名快照同时守住增量义务与媒体原事件。
@@ -631,25 +738,26 @@ def summarized_runtime_fact_indexes(history: list[Any], retired_positions: set[i
     contiguous_open = True
     last_retired_through = -1
     latest_by_source: dict[str, int] = {}
-    active_by_source: dict[str, int] = {}
+    unprotected_by_source: dict[str, int] = {}
     protected: set[int] = set()
 
     for index, item in enumerate(history):
         if isinstance(item, RuntimeFactsTurn):
             latest_by_source[item.source] = index
-            active_by_source[item.source] = index
+            unprotected_by_source[item.source] = index
             continue
-        is_tool_item = isinstance(item, ToolResult) or (isinstance(item, AssistantTurn) and bool(item.tool_calls))
-        if not is_tool_item:
+        has_results = bool(_tool_results_at(item))
+        if not has_results and not (isinstance(item, AssistantTurn) and item.tool_calls):
             continue
         if index in retired_positions:
-            if isinstance(item, ToolResult):
+            if has_results:
                 if contiguous_open:
                     contiguous_retired_through = index
                 last_retired_through = index
         else:
             contiguous_open = False
-            protected.update(active_by_source.values())
+            protected.update(unprotected_by_source.values())
+            unprotected_by_source.clear()
 
     return {
         index for index, item in enumerate(history)
@@ -669,17 +777,20 @@ def summarized_runtime_fact_indexes(history: list[Any], retired_positions: set[i
 # 函数用途: 重写一条原生历史记录，并按调用方的摘要覆盖事实决定是否整轮删除旧 assistant 内容。
 def _rewritten_history_item(
     item: Any,
-    call_ids: set[str],
+    call_ids: set[str] | None,
+    result_ids: set[str] | None,
     *,
     drop_completed_tool_turns: bool = False,
 ) -> Any:
     """摘除命中的工具对；完整替代摘要存在时也可删除其所属旧 assistant 轮。"""
-    if isinstance(item, ToolResult):
-        return None if item.call_id in call_ids else item
-    if isinstance(item, AssistantTurn):
-        matched = any(call.call_id in call_ids for call in item.tool_calls)
+    if result_ids:
+        if isinstance(item, ToolResult):
+            return None
+        kept = [result for result in item if result.call_id not in result_ids]
+        return (tuple(kept) if isinstance(item, tuple) else kept) if kept else None
+    if call_ids:
         rewritten = _assistant_turn_without(item, call_ids)
-        if drop_completed_tool_turns and matched and not rewritten.tool_calls:
+        if drop_completed_tool_turns and not rewritten.tool_calls:
             return None
         return rewritten
     return item

@@ -238,7 +238,7 @@ class _SummaryBackend:
 
 
 # LLM: 空响应夹具仍接受真实分段协议，不允许用不兼容的函数签名阻止预算路径。
-# 类用途: 测试有界重试耗尽后的机械投影与原 Compact 提交。
+# 类用途: 测试有界重试耗尽后保留原 Compact 检查点和 IR。
 class _EmptySummaryBackend:
     name = "anthropic_compatible"
 
@@ -1221,7 +1221,10 @@ def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     )
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
-    agent.backend.generate = lambda *_args, **_kwargs: SimpleNamespace(text="S" * 12_000)
+    # 候选先通过六段合同，才能观察预算超限后的回滚。
+    agent.backend.generate = lambda *_args, **_kwargs: SimpleNamespace(
+        text=_valid_live_handoff("oversized") + "S" * 12_000
+    )
     agent.config.model_context_window_tokens = 10_000
     agent.config.memory_compact_trigger_percent = 90
     # 该用例专门验证候选回滚；提高恢复目标，确保先进入 live-tool 候选分支。
@@ -1410,7 +1413,7 @@ def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_p
     assert sink.progress_rows[-1]["phase"] == "completed"
 
 
-def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_path):
+def test_persistent_native_window_keeps_checkpoint_after_empty_summary_budget(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(
         {
@@ -1438,22 +1441,20 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
         effective_on_chunk=(sink := _ContextCompactionSink()),
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
 
-    build_tool_loop_prompt(agent, params)
+    with pytest.raises(ConversationCompactError) as caught:
+        build_tool_loop_prompt(agent, params)
 
+    assert caught.value.code == "COMPACT_EMPTY_BUDGET_EXHAUSTED"
     updated = store.threads.load(thread.thread_id)
-    summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert updated is not None
-    assert updated.compact_generation == 1
-    assert updated.compact_consecutive_failures == 0
-    assert updated.compact_source_tool_pairs > 0
-    # 空段沿原有界纠正后生成机械候选；调用数不再等于逻辑 Compact 代数。
-    assert len(agent.backend.calls) >= 3 and len(agent.backend.calls) % 3 == 0
-    assert len(summaries) == 1
-    assert summaries[0].text.startswith("# Earlier Conversation Summary (generation 1)\n[compact-mechanical-fallback]")
-    assert "checkpoint" in summaries[0].text
-    assert sink.progress_rows[-1]["phase"] == "completed"
-    assert not any(row["phase"] == "failed" for row in sink.progress_rows)
+    assert updated.compact_generation == 0
+    assert updated.compact_checkpoint_id == ""
+    assert updated.compact_source_tool_pairs == 0
+    assert params.tool_ir_history == before_ir
+    assert len(agent.backend.calls) > 1
+    assert not any(row["phase"] == "completed" for row in sink.progress_rows)
 
 
 # LLM: 最新四对本身过大，摘要空后确定性降级也不能安全发送；原IR、代次、检查点与失败进度断言均保留。

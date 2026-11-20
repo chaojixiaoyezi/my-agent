@@ -347,12 +347,15 @@ def test_edit_preview_uses_changed_location_not_preexisting_new_text():
 
 def test_native_compact_search_is_logarithmic_and_keeps_smallest_prefix():
     from agent_py_agent.agent.agent_core.tool_ir_compact import compact_native_ir_to_token_budget
-    from agent_py_agent.agent.backends.tool_ir import ToolResult
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolResult
     from agent_py_agent.tests._tool_runtime_harness import (
         canonical_history_call,
         canonical_history_result,
     )
-    history = [canonical_history_result(canonical_history_call("read_file", {}, call_id=f"call-{n}"), "x") for n in range(128)]
+    history = []
+    for index in range(128):
+        call = canonical_history_call("read_file", {}, call_id=f"call-{index}")
+        history.extend((AssistantTurn(tool_calls=[call]), canonical_history_result(call, "x")))
     params = SimpleNamespace(tool_ir_history=history)
     calls = []
     def estimate():
@@ -360,7 +363,10 @@ def test_native_compact_search_is_logarithmic_and_keeps_smallest_prefix():
         return len([x for x in params.tool_ir_history if isinstance(x, ToolResult)]) * 100
     assert compact_native_ir_to_token_budget(params, max_tokens=4000, token_estimator=estimate) == 88
     assert len(calls) <= 10
-    assert len(params.tool_ir_history) == 40
+    assert [item.call_id for item in params.tool_ir_history if isinstance(item, ToolResult)] == [
+        f"call-{index}" for index in range(88, 128)
+    ]
+    assert len(params.tool_ir_history) == 80
 
 
 def test_pty_windows_discovery_reports_conpty_unavailable(monkeypatch):

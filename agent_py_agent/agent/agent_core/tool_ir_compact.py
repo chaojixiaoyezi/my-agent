@@ -14,7 +14,7 @@ tool_result」的孤儿 → Anthropic 直接 HTTP 400。
 
 所以 native 下 compact 对 IR 的操作粒度必须是「**整对**」：丢一个工具往返就同时丢它的
 ``ToolCall``（assistant 侧）和配对 ``ToolResult``（user 侧），由
-``tool_ir_history.drop_tool_call_pairs`` 保证无孤儿。本模块把 text compact 的两条
+``tool_ir_history`` 的位置计划保证无孤儿。本模块把 text compact 的两条
 **会真正改变发往 provider 内容**的突变路径，映射成 IR 整对摘除：
 
 - ``window``（``window_tool_context_for_live_prompt``）：超预算时保留近期、归档其余。
@@ -26,12 +26,8 @@ tool_result」的孤儿 → Anthropic 直接 HTTP 400。
   最旧 fraction 比例（至少 1 对）的工具往返整对，返回摘除对数（0 表示无可摘，调用方
   停止重试落回重量级 compact）。
 
-为什么直接从 IR 自身算丢弃集合、而非解析被回收的文本条目：IR 的 ``ToolResult`` 序列
-本身就是「工具结果按时间排列」的权威表达，每个都自带 ``tool_call_id``（真实 provider
-tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略，再整对摘除，既不依赖
-脆弱的文本解析，又天然 orphan-safe。``tool_use_ids_for_tool_records`` 另外提供「文本
-条目 → tool_use id」的映射（按 ``[tool-record round=N index=M]`` 标记 join），供需要
-从文本回收联动 IR 的场景与单测使用。
+回收计划依原回执顺序排列，记录同组调用与回执的位置及原调用的四元身份。
+``tool_use_ids_for_tool_records`` 通过同一计划解析旧文本标记，只返回窗口内唯一的工具 ID。
 
 本模块只在 ``native_tool_use_active`` 为真时被调用，不生成摘要或另写 Compact 代次。
 旧的记忆拼接 CompressionService 已移除；正式会话摘要由 ConversationStore/checkpoint 链负责。
@@ -49,10 +45,11 @@ from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..conversation.tool_context_window import record_native_ir_window
 from ..tooling.runtime_contracts import ToolContentBlock, ToolResult
 from .tool_ir_history import (
-    drop_tool_call_pairs,
+    _drop_planned_tool_pairs,
     native_tool_ir_history,
     native_tool_result_sources,
     replace_compaction_summary_ir,
+    tool_pair_retirement_plan,
 )
 
 # 与 _tool_loop_service._record_tool_call 写入的文本条目头一致：
@@ -187,12 +184,12 @@ def reclaim_oldest_native_ir_pairs(params: object, *, fraction: float) -> int:
     落回重量级 compact/resume）。与 text 侧 ``reclaim_oldest_tool_results_for_ptl``
     的语义对齐（持久突变、丢最旧），但粒度是 IR 整对而非文本挖正文。
     """
-    ordered_ids = _ordered_tool_call_ids(native_tool_ir_history(params))
-    if not ordered_ids:
+    history = native_tool_ir_history(params)
+    entries = tool_pair_retirement_plan(history).entries
+    if not entries:
         return 0
-    count = max(1, int(len(ordered_ids) * fraction))
-    drop_ids = set(ordered_ids[:count])
-    return drop_tool_call_pairs(params, drop_ids)
+    count = max(1, int(len(entries) * fraction))
+    return _drop_planned_tool_pairs(history, entries[:count])
 
 
 # LLM: The caller supplies the single full-request token estimator. Ordinary windowing preserves
@@ -224,21 +221,21 @@ def compact_native_ir_to_token_budget(
     """
     if max_tokens <= 0:
         return 0
-    ordered_ids = _ordered_tool_call_ids(native_tool_ir_history(params))
-    if not ordered_ids or _nonnegative_estimate(token_estimator) <= max_tokens:
+    history = native_tool_ir_history(params)
+    entries = tool_pair_retirement_plan(history).entries
+    if not entries or _nonnegative_estimate(token_estimator) <= max_tokens:
         return 0
-    candidates = ordered_ids[:-1] if preserve_newest_pair else ordered_ids
+    candidates = entries[:-1] if preserve_newest_pair else entries
     if not candidates:
         return 0
-    history = native_tool_ir_history(params)
     original = list(history)
     lower, upper = 1, len(candidates)
     try:
         while lower < upper:
             middle = (lower + upper) // 2
             history[:] = original
-            drop_tool_call_pairs(
-                params, set(candidates[:middle]),
+            _drop_planned_tool_pairs(
+                history, candidates[:middle],
                 drop_completed_tool_turns=drop_completed_tool_turns,
             )
             if _nonnegative_estimate(token_estimator) <= max_tokens:
@@ -247,9 +244,9 @@ def compact_native_ir_to_token_budget(
                 lower = middle + 1
     finally:
         history[:] = original
-    return drop_tool_call_pairs(
-            params,
-            set(candidates[:lower]),
+    return _drop_planned_tool_pairs(
+        history,
+        candidates[:lower],
             drop_completed_tool_turns=drop_completed_tool_turns,
         )
 
@@ -268,10 +265,21 @@ def tool_use_ids_for_tool_records(history: list[Any], tool_record_entries: list[
     wanted = _wanted_round_index_markers(tool_record_entries)
     if not wanted:
         return set()
-    ids: set[str] = set()
-    for item in history:
-        ids.update(_marked_turn_ids_in(item, wanted))
-    return ids
+    plan = tool_pair_retirement_plan(history)
+    refused = {identity[-1] for identity in plan.non_retirable if not any(identity[:3])}
+    complete = {(entry.call_position, entry.identity[-1]) for entry in plan.entries}
+    matches: dict[tuple[int, int], tuple[int, str] | None] = {}
+    for position, item in enumerate(history):
+        if not isinstance(item, AssistantTurn):
+            continue
+        round_no = getattr(item, "_tool_round", None)
+        if round_no is None:
+            continue
+        for index, call in enumerate(item.tool_calls, start=1):
+            marker = (int(round_no), index)
+            if marker in wanted:
+                matches[marker] = None if marker in matches else (position, call.call_id)
+    return {match[-1] for match in matches.values() if match in complete and match[-1] not in refused}
 
 
 def _wanted_round_index_markers(tool_record_entries: list[str]) -> set[tuple[int, int]]:
@@ -281,30 +289,6 @@ def _wanted_round_index_markers(tool_record_entries: list[str]) -> set[tuple[int
         if match is not None:
             wanted.add((int(match.group(1)), int(match.group(2))))
     return wanted
-
-
-def _marked_turn_ids_in(item: Any, wanted: set[tuple[int, int]]) -> set[str]:
-    """带轮号标记的 AssistantTurn 里，命中 (round, 第M个调用) 的 tool_use id 集合。"""
-    round_no = getattr(item, "_tool_round", None)
-    if not isinstance(item, AssistantTurn) or round_no is None:
-        return set()
-    return {
-        call.call_id
-        for position, call in enumerate(item.tool_calls, start=1)
-        if (int(round_no), position) in wanted and call.call_id
-    }
-
-
-def _ordered_tool_call_ids(history: list[Any]) -> list[str]:
-    """IR 历史里全部工具往返的 tool_use id，按时间（最旧在前）排列。
-
-    以 ``ToolResult`` 出现顺序为准——它紧随其发起调用，等价于工具往返的时间序。
-    """
-    return [
-        item.call_id
-        for item in history
-        if isinstance(item, ToolResult) and item.call_id
-    ]
 
 
 # LLM: Estimator failures are programming errors and must propagate; returning zero would silently
