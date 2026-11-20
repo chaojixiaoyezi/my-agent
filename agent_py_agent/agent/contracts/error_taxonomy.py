@@ -11785,3 +11785,53 @@ ERROR_CONTRACTS.update({
         recovery_hint="准确唤醒记录无法读取，未认定其已消费；核对 wake_signal_id 对应原记录与 cause，保留信号并修复读取，勿重复发起业务。",
     ),
 })
+
+
+# LLM: 本人OAuth的结构化原因、停止控制入口与压缩交接校验原因只登记恢复口径；顶层错误码、effect事实与重放授权仍由原产生方决定。
+ERROR_CONTRACTS.update({
+    "EXECUTION_SCOPE_INACTIVE": ErrorContract(
+        code="EXECUTION_SCOPE_INACTIVE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原任务执行范围已结束或不再是当前执行，未发本人授权卡；由用户在活跃的私人会话回合重新发起，不冒用其它任务或执行上下文。",
+    ),
+    "GROUP_SESSION_OAUTH_UNSUPPORTED": ErrorContract(
+        code="GROUP_SESSION_OAUTH_UNSUPPORTED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="群会话没有共享的本人飞书身份，未发起授权；群共享资源改用应用身份工具，本人授权由用户在私人助手会话发起，不借群成员或管理员身份。",
+    ),
+    "OAUTH_CARD_DELIVERY_FAILED": ErrorContract(
+        code="OAUTH_CARD_DELIVERY_FAILED", category="network", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="本人授权卡没有可核验的送达回执；以effect_outcome和delivery阶段为准：已收口失败的核对私聊通道后再发起，结果未确认的保留原待处理请求，先查询状态由用户完成或撤销原卡，不直接重复发卡。",
+    ),
+    "OAUTH_CONFIGURATION_UNAVAILABLE": ErrorContract(
+        code="OAUTH_CONFIGURATION_UNAVAILABLE", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主本人OAuth开关、HTTPS回调、授权范围或应用凭据未有效配置，未发起授权；由部署者修正宿主配置，不让用户发送应用密钥或改用局部配置。",
+    ),
+    "OAUTH_PENDING_REQUEST_EXISTS": ErrorContract(
+        code="OAUTH_PENDING_REQUEST_EXISTS", category="state", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="已有未到期的本人授权请求，未重复发卡；请用户完成原登录卡，或先查询状态、必要时撤销原请求后再发起，不并行发送第二张卡。",
+    ),
+    "PERSONAL_IDENTITY_UNAVAILABLE": ErrorContract(
+        code="PERSONAL_IDENTITY_UNAVAILABLE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前owner没有可核验的本人飞书身份或管理员私人绑定已失效，未发起授权；在本人飞书私聊或恢复原管理员通道绑定后再授权，不按显示名或参数猜身份。",
+    ),
+    "CONTROL_SERVICE_UNAVAILABLE": ErrorContract(
+        code="CONTROL_SERVICE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主停止控制服务未初始化，本次停止未执行；核对Gateway服务装配后再提交，不改用其它入口或强制结束进程绕过。",
+    ),
+    "INVALID_ARGUMENTS": ErrorContract(
+        code="INVALID_ARGUMENTS", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="请求参数不符合接口契约，本次未执行；按接口声明修正字段或类型后再提交，不要原样重试。",
+    ),
+    "INVALID_HANDOFF": ErrorContract(
+        code="INVALID_HANDOFF", category="compact", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="压缩候选的六段交接摘要未通过结构校验，未提交；宿主只在同一尝试预算内发出纠正请求，用完后保留旧检查点与覆盖游标，不把不完整交接当作摘要提交。",
+    ),
+})

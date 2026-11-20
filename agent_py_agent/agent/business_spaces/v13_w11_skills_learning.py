@@ -374,6 +374,80 @@ def _mutation_conflict():
     }, effect_outcome='unknown')
 
 
+# 类用途: 原生写入前的 CAS 已在资产锁内确认前像变化，本次请求没有写入任何原生字节。
+class _SkillCasRefused(BusinessError):
+    pass
+
+
+def _cas_refused():
+    return _SkillCasRefused('REVISION_CONFLICT', details={
+        'attribution': 'other_writer',
+        'reason': 'skill_mutation_cas_refused',
+        'next_action': '技能已被其它修改改变，本次没有写入；重新读取技能和当前版本，确认后用新的幂等键提交。',
+    }, effect_outcome='not_started')
+
+
+# 常量用途: 已结清技能操作的逐键终态事实前缀，键为该操作的回执键。
+_SETTLED_OPERATION_PREFIX = 'skill-mutation-settled:'
+
+
+# 函数用途: 生成一次被冲突结清的技能操作终态事实，保留原准备行作为来源记录。
+def _settlement(prepared, error):
+    return {'request_fingerprint': prepared['request_fingerprint'], 'operation': {**prepared, 'state': 'conflict'},
+            'error': {'code': error.code, 'details': dict(error.details), 'effect_outcome': error.effect_outcome}}
+
+
+# LLM: 先看未物化日志里的本笔事实，再点查逐键行；只读不恢复。
+# 函数用途: 读取一个回执键对应的已结清技能操作，没有则返回 None。
+def _settled_operation(store, state, receipt_key):
+    fact_key = _SETTLED_OPERATION_PREFIX + receipt_key
+    settled = (state.get('metadata_facts') or {}).get(fact_key)
+    if settled is None:
+        settled = store._rows('skill_operations').get('metadata', fact_key)
+    if settled is not None and (type(settled.get('error')) is not dict
+                                or type(settled.get('request_fingerprint')) is not str):
+        raise BusinessError('STORE_UNAVAILABLE')
+    return settled
+
+
+# 函数用途: 在孤立准备行自己的前像口径下读取当前摘要与暂存位置。
+def _orphan_state(call, skill_id, orphan):
+    if orphan['action'] in ('skills.activate', 'skills.retire'):
+        plan = _toggle_plan(call, orphan['action'] == 'skills.activate')
+        return plan['original_sha'], plan['staged_ref']
+    return _body_sha(_existing_text(call, skill_id)), ['skills', skill_id, 'SKILL.md']
+
+
+# LLM: 旧准备行在自己的口径下既不是原像也不是计划像时，哈希不能证明它是否执行过，同键重放也永远无法结清它。
+#   只有带当前版本的 skills.update 才能结清：旧键按未知冲突永久封存，占位在同一日志事务释放，新请求再走自己的 CAS。
+#   原像或计划像仍可由旧键恢复（含原生写后回执前崩溃），这时新键照旧拒绝。
+# 函数用途: 处理不同键遇到的在途占位，可结清的孤立占位结清后返回，其余按结果未知拒绝。
+def _reconcile_orphan(call, skill_id, store, digest, active_key, orphan, observe):
+    pending = BusinessError('OUTCOME_UNKNOWN', details={
+        'reason': 'skill_mutation_pending',
+        'next_action': '使用上次操作的幂等键重试并核对回执；若技能已被改成第三种内容，先读取当前版本，再用 skills.update 带上它提交。',
+    }, effect_outcome='unknown')
+    if call.action != 'skills.update':
+        raise pending
+    try:
+        current = observe()
+        orphan_sha, orphan_ref = _orphan_state(call, skill_id, orphan)
+    except (BusinessError, OSError, ValueError) as exc:
+        raise pending from exc
+    if (current['original_revision'] != call.params['expected_version_ref']
+            or (orphan_ref == orphan['staged_ref'] and orphan_sha in (orphan['original_sha'], orphan['planned_sha']))):
+        raise pending
+
+    def reconcile(metadata, _result):
+        if metadata.get(active_key) != orphan:
+            raise BusinessError('STORE_UNAVAILABLE')
+        metadata.seal_fact(_SETTLED_OPERATION_PREFIX + orphan['receipt_key'], _settlement(orphan, _mutation_conflict()))
+        metadata.pop(active_key)
+
+    store.transaction('skill_operations', lambda _rows: {}, idempotency_key=uuid4().hex,
+                      params_digest=digest, metadata_update=reconcile, record_receipt=False)
+
+
 # LLM: 准入后在同一个原生资产锁内重读目标、比较CAS并做live末核；原子nofollow写不越owner。
 # 函数用途: 原子写入一个用户层 Skill 正文。
 def _write_skill_staged(call, skill_id, body, *, creating=False, plan=None):
@@ -391,7 +465,7 @@ def _write_skill_staged(call, skill_id, body, *, creating=False, plan=None):
         with asset_root_lock(home):
             existing = _existing_text(call, skill_id)
             if plan is not None and _body_sha(existing) != plan['original_sha']:
-                raise _mutation_conflict()
+                raise _cas_refused()
             if creating:
                 if existing is not None and existing != body:
                     raise BusinessError('STATE_CONFLICT')
@@ -488,6 +562,13 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
         result = copy_value(receipt['result'])
         result.pop('_skill_operation', None)
         return result
+    settled = _settled_operation(store, state, receipt_key)
+    if settled is not None:
+        # 已结清的冲突对原键是终态：同键重放只返回原结论，不再比较或写入原生资产。
+        if settled['request_fingerprint'] != fingerprint:
+            raise BusinessError('IDEMPOTENCY_CONFLICT')
+        error = settled['error']
+        raise BusinessError(error['code'], details=copy_value(error['details']), effect_outcome=error['effect_outcome'])
 
     active_key = 'skill-mutation:' + skill_id
     prepared = state.get('metadata', {}).get(active_key)
@@ -497,12 +578,12 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
                 or not {'receipt_key', 'request_fingerprint', 'original_sha', 'planned_sha', 'staged_ref'} <= prepared.keys()):
             raise BusinessError('STORE_UNAVAILABLE')
         if prepared.get('receipt_key') != receipt_key:
-            raise BusinessError('OUTCOME_UNKNOWN', details={
-                'reason': 'skill_mutation_pending',
-                'next_action': '使用上次操作的幂等键重试并核对回执。',
-            }, effect_outcome='unknown')
-        if prepared.get('request_fingerprint') != fingerprint or prepared.get('action') != call.action:
+            _reconcile_orphan(call, skill_id, store, digest, active_key, prepared, observe)
+            prepared = None
+        elif prepared.get('request_fingerprint') != fingerprint or prepared.get('action') != call.action:
             raise BusinessError('IDEMPOTENCY_CONFLICT')
+    # 只有本次调用自己写下的准备行才能把写前 CAS 拒绝当作整次操作未开始的证明。
+    prepared_here = prepared is None
 
     try:
         observed = observe()
@@ -511,7 +592,8 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
             raise _mutation_conflict() from exc
         raise
     if prepared is None:
-        if call.action == 'skills.create' and observed['original_sha'] is not None:
+        # 创建按正文 CAS：已有同正文是免写成功，异正文才是状态冲突，冲突不留占位。
+        if call.action == 'skills.create' and observed['original_sha'] not in (None, observed['planned_sha']):
             raise BusinessError('STATE_CONFLICT')
         if (call.action == 'skills.update'
                 and observed['original_revision'] != call.params['expected_version_ref']):
@@ -539,6 +621,14 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
             raise BusinessError('STORE_UNAVAILABLE')
         metadata.pop(active_key)
 
+    def settle(refusal):
+        def update(metadata, _result):
+            if metadata.get(active_key) != prepared:
+                raise BusinessError('STORE_UNAVAILABLE')
+            metadata.seal_fact(_SETTLED_OPERATION_PREFIX + receipt_key, _settlement(prepared, refusal))
+            metadata.pop(active_key)
+        return update
+
     if observed['staged_ref'] != prepared['staged_ref']:
         raise _mutation_conflict()
     rollback = None
@@ -547,6 +637,17 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
     elif observed['original_sha'] == prepared['original_sha']:
         try:
             result, rollback = staged(prepared)
+        except _SkillCasRefused as refusal:
+            if not prepared_here:
+                # 旧准备行的历史效果不能由哈希推断：保留占位，按未知冲突留给同键或带当前版本的新请求处理。
+                raise _mutation_conflict() from refusal
+            # 写前拒绝是确定的未开始：同一日志事务封存本键终态并释放占位，不改动其它修改留下的内容。
+            try:
+                store.transaction('skill_operations', lambda _rows: {}, idempotency_key=uuid4().hex,
+                                  params_digest=digest, metadata_update=settle(refusal), record_receipt=False)
+            except Exception as settlement_error:
+                refusal.add_note('skill_mutation_settlement:' + type(settlement_error).__name__)
+            raise
         except BusinessError as exc:
             if exc.effect_outcome == 'not_started':
                 try:
@@ -634,7 +735,7 @@ def _toggle_plan(call, enabled):
 
 
 def _toggle_staged(call, enabled, *, plan=None):
-    from ..assets.skill_adapter import SkillAdapter, SkillSnapshotError
+    from ..assets.skill_adapter import SKILL_ENABLED_CAS_REFUSED, SkillAdapter, SkillSnapshotError
 
     _require(call)
     skill_id = _safe_skill_id(call.params['skill_id'])
@@ -651,6 +752,8 @@ def _toggle_staged(call, enabled, *, plan=None):
                 descriptor['id'], enabled, expected_sha=None if plan is None else plan['original_sha'],
             )
         except SkillSnapshotError as error:
+            if error.reason == SKILL_ENABLED_CAS_REFUSED:
+                raise _cas_refused() from error
             raise _mutation_conflict() from error
         except (ValueError, FileNotFoundError) as error:
             raise BusinessError('STATE_CONFLICT') from error

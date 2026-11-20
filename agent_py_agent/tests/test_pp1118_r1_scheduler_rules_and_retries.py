@@ -18,6 +18,7 @@ from agent_py_agent.agent.scheduler.active_run_closeout import (
     SchedulerRunOutcome,
     close_active_run,
 )
+from agent_py_agent.agent.scheduler.postcheck import snapshot_execution_root
 from agent_py_agent.agent.scheduler.repository import (
     SchedulerJobCreateRequest,
     SchedulerRepository,
@@ -68,9 +69,12 @@ def _setup_owner(tmp_path):
     return workspace, store, repository, service, agent
 
 
-def _claim(repository: SchedulerRepository, run_id: str, *, now: float) -> SchedulerRunClaim:
+def _claim(repository: SchedulerRepository, run_id: str, *, now: float, execution_root=None) -> SchedulerRunClaim:
     row = repository.claim_run(run_id, lease_seconds=300, now=now)
     assert row is not None
+    if execution_root is not None:
+        repository.mark_run_running(run_id, str(row["claim_id"]), now=now,
+                                    execution_root_ref=snapshot_execution_root(execution_root))
     return SchedulerRunClaim(run_id=str(row["run_id"]), claim_id=str(row["claim_id"]), run=row)
 
 
@@ -283,7 +287,8 @@ def test_p1_06_postcheck_bumps_generation_and_stale_or_paused_runs_preserve_new_
     # 先领取两个代次 2（不同前后顺序）的运行：领取 gen-2 run_stale_fail 后，将任务升级到代次 3。
     run_stale_fail = repository.reserve_manual_run(job["job_id"], now=1010.0)
     claim_stale_fail = _claim(repository, str(run_stale_fail["run_id"]), now=1011.0)
-    repository.mark_run_running(claim_stale_fail.run_id, claim_stale_fail.claim_id, now=1011.0)
+    repository.mark_run_running(claim_stale_fail.run_id, claim_stale_fail.claim_id, now=1011.0,
+                                execution_root_ref=snapshot_execution_root(_ws))
 
     gen3_job = repository.update_job(
         job["job_id"],
@@ -323,14 +328,15 @@ def test_p1_06_postcheck_bumps_generation_and_stale_or_paused_runs_preserve_new_
 
     # 先让代次 4 产生 1 次真实失败，建立 failure_streak(count=1)。
     run_gen4_fail = repository.reserve_manual_run(job["job_id"], now=1021.0)
-    claim_gen4_fail = _claim(repository, str(run_gen4_fail["run_id"]), now=1022.0)
+    claim_gen4_fail = _claim(repository, str(run_gen4_fail["run_id"]), now=1022.0, execution_root=_ws)
     service.finish(claim_gen4_fail, status="failed", error_code="E_GEN4", now=1023.0)
     assert repository.get_job(job["job_id"])["failure_streak"]["count"] == 1
 
     # 预约并启动另一轮代次 4 运行，在其在途期间将任务定义升级到代次 5。
     run_stale_done = repository.reserve_manual_run(job["job_id"], now=1025.0)
     claim_stale_done = _claim(repository, str(run_stale_done["run_id"]), now=1026.0)
-    repository.mark_run_running(claim_stale_done.run_id, claim_stale_done.claim_id, now=1026.0)
+    repository.mark_run_running(claim_stale_done.run_id, claim_stale_done.claim_id, now=1026.0,
+                                execution_root_ref=snapshot_execution_root(_ws))
 
     gen5_job = repository.update_job(
         job["job_id"],
@@ -350,7 +356,7 @@ def test_p1_06_postcheck_bumps_generation_and_stale_or_paused_runs_preserve_new_
     # 当前代次 5 的真实成功运行（产物存在且满足 postcheck）收口：正常清除 failure_streak。
     (_ws / "out-v3.txt").write_text("healthy-v5-output", encoding="utf-8")
     run_gen5_done = repository.reserve_manual_run(job["job_id"], now=1032.0)
-    claim_gen5_done = _claim(repository, str(run_gen5_done["run_id"]), now=1033.0)
+    claim_gen5_done = _claim(repository, str(run_gen5_done["run_id"]), now=1033.0, execution_root=_ws)
     service.finish(claim_gen5_done, status="done", response="current gen ok", now=_ws.joinpath("out-v3.txt").stat().st_mtime + 1.0)
     assert repository.get_job(job["job_id"])["failure_streak"] is None
 
@@ -494,7 +500,7 @@ def test_p1_07_composite_monitor_rule_postcheck_and_independent_rule_streaks(tmp
     # 3. r_report 运行成功返回，但 daily-report.json 缺失 -> postcheck 判为 failed，触发 r_report 专属调查与重试。
     r_rep_1 = repository.reserve_manual_run(job_id, rule_id="r_report", now=1010.0)
     assert r_rep_1["postcheck"]["artifacts"][0]["path"] == "daily-report.json"
-    c_rep_1 = _claim(repository, str(r_rep_1["run_id"]), now=1011.0)
+    c_rep_1 = _claim(repository, str(r_rep_1["run_id"]), now=1011.0, execution_root=workspace)
     term_rep_1 = service.finish(c_rep_1, status="done", response="claimed done without file", now=1015.0)
     assert term_rep_1 is not None
     assert term_rep_1["status"] == "failed"
@@ -551,7 +557,7 @@ def test_p1_07_composite_monitor_rule_postcheck_and_independent_rule_streaks(tmp
 
     # 6. 写入合法产物后完成 retry_run -> postcheck 通过，r_report 的 failure_streak 归零清除。
     (workspace / "daily-report.json").write_text('{"valid": true}\n', encoding="utf-8")
-    c_retry = _claim(repository, retry_id, now=1106.0)
+    c_retry = _claim(repository, retry_id, now=1106.0, execution_root=workspace)
     term_retry = service.finish(c_retry, status="done", response="fixed", now=1108.0)
     assert term_retry is not None and term_retry["status"] == "done"
     cleared_rules = {r["id"]: r for r in repository.get_job(job_id)["rules"]}

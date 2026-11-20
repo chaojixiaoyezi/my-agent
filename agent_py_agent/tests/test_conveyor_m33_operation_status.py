@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import subprocess
@@ -9,25 +10,40 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from threading import Barrier
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.common.request_execution_ports import RequestExecutionContextUnavailable
 from agent_py_agent.agent.contracts.effect_settlement import (
     classify_effect_settlement,
     operation_status_for_settlement,
 )
+from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+from agent_py_agent.agent.contracts.recovery import RECOVERY_ACTIONS
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+from agent_py_agent.agent.conversation.input_dependencies import input_dependency_path
+from agent_py_agent.agent.delivery import ChannelCapabilities
+from agent_py_agent.agent.gateway_parts.feishu_oauth_service import oauth_callback_payload
 from agent_py_agent.agent.gateway_parts.turn_recovery_control import execute_turn_recovery_control
 from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.tooling import tool_operation_coordinator as coordinator
-from agent_py_agent.agent.tooling.feishu_auth_tool import _classify_oauth_runtime_failure
+from agent_py_agent.agent.tooling.feishu_auth_tool import (
+    FeishuAuthTool,
+    _classify_oauth_runtime_failure,
+)
 from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 from agent_py_agent.agent.user_space import feishu_oauth as oauth
 from agent_py_agent.cli.chat_parts.control_runtime import _recover_command_text
 from agent_py_agent.tests.ft.test_ft_lock_wait_gate import _ensure_open_file_limit
+from agent_py_agent.tests.test_feishu_oauth import _api, _row
+from agent_py_agent.tests.test_feishu_oauth import background as background
+from agent_py_agent.tests.test_feishu_oauth import ctx as ctx
 
 
 @pytest.fixture
@@ -283,3 +299,159 @@ def _check_concurrent_settlement(ledger):
         ), ok=receipt["ok"]), row["operation_id"]
         if status == "failed":
             assert receipt["effect_outcome"] in {"not_started", "failed"}
+
+
+_OAUTH_REASONS = (
+    "EXECUTION_SCOPE_INACTIVE", "GROUP_SESSION_OAUTH_UNSUPPORTED", "OAUTH_CARD_DELIVERY_FAILED",
+    "OAUTH_CONFIGURATION_UNAVAILABLE", "OAUTH_PENDING_REQUEST_EXISTS", "PERSONAL_IDENTITY_UNAVAILABLE",
+)
+_DELIVERED = {"message_id": "om_m33", "chat_id": "oc_private"}
+
+
+@pytest.mark.parametrize("reason", _OAUTH_REASONS)
+def test_typed_oauth_reason_resolves_to_its_own_contract(reason):
+    contract = error_contract(reason)
+    assert contract.code == reason and contract.category not in {"", "unknown"}
+    assert contract.retryable is False and contract.recommended_action in RECOVERY_ACTIONS
+    assert contract.recovery_hint
+
+
+@pytest.mark.parametrize(("reason", "effect"), [
+    ("EXECUTION_SCOPE_INACTIVE", "not_started"),
+    ("GROUP_SESSION_OAUTH_UNSUPPORTED", "not_started"),
+    ("OAUTH_CONFIGURATION_UNAVAILABLE", "not_started"),
+    ("OAUTH_PENDING_REQUEST_EXISTS", "not_started"),
+    ("PERSONAL_IDENTITY_UNAVAILABLE", "not_started"),
+    ("OAUTH_CARD_DELIVERY_FAILED", "failed"),
+])
+def test_typed_oauth_reason_keeps_its_tool_outcome(reason, effect):
+    error = oauth.FeishuOAuthError("deterministic error case", phase="authorize", reason_code=reason)
+    _, settled, _, details = _classify_oauth_runtime_failure(None, "authorize", error, {})
+    assert settled == effect and details["phase"] == "authorize"
+    assert error_contract(details["reason_code"]).code == details["reason_code"]
+
+
+def _authorize_operation(ctx, ledger, operation_id):
+    tool = FeishuAuthTool(ctx.agent)
+    request = _request(ledger, operation_id, lambda: tool.execute({"action": "authorize"}))
+    return coordinator.execute_tool_operation(replace(request, tool_name="feishu_auth"))
+
+
+def _card_adapter(ctx, reply):
+    accepted = []
+
+    def send(_target, card, **_options):
+        accepted.append(card)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    ctx.agent.channel_registry.register_adapter(
+        "feishu", SimpleNamespace(send_control_card=send),
+        capabilities=ChannelCapabilities(control_cards=True, proactive=True),
+    )
+    return accepted
+
+
+def _input_status(ctx, input_id):
+    payload = read_json_object_report(input_dependency_path(ctx.agent, input_id), context="test.m33").payload
+    return (payload or {}).get("status")
+
+
+@pytest.mark.parametrize(("failure", "stage", "delivered", "fact"), [
+    ("acknowledgement_lost", "delivery", "unknown", ("exception_type", "TimeoutError")),
+    ("adapter_exception", "delivery", "unknown", ("error_code", "CHANNEL_CONTROL_IO_FAILED")),
+    ("receipt_missing", "delivery", "unknown", ("error_code", "CHANNEL_CONTROL_RECEIPT_MISSING")),
+    ("receipt_commit", "receipt_commit", "confirmed", ("exception_type", "OSError")),
+])
+def test_unacknowledged_card_stays_unknown_with_its_pending_input(
+    ctx, ledger, monkeypatch, failure, stage, delivered, fact,
+):
+    repo, *_ = ledger
+    replies = {"adapter_exception": TimeoutError("simulated I/O error"),
+               "receipt_missing": {"message_id": "", "chat_id": ""}}
+    accepted = _card_adapter(ctx, replies.get(failure, _DELIVERED))
+    if failure == "acknowledgement_lost":
+        deliver = ctx.agent.delivery_service.deliver_control_card
+
+        def lose_acknowledgement(*args, **options):
+            assert deliver(*args, **options).ok
+            raise TimeoutError("simulated I/O error")
+
+        monkeypatch.setattr(ctx.agent.delivery_service, "deliver_control_card", lose_acknowledgement)
+    if failure == "receipt_commit":
+        save = oauth._save_credential_row
+
+        def fail_receipt_save(admission, target, row):
+            if "im_control" in row:
+                raise OSError(errno.EIO, "simulated I/O error")
+            return save(admission, target, row)
+
+        monkeypatch.setattr(oauth, "_save_credential_row", fail_receipt_save)
+    sid = f"oauth-{failure}"
+    result = _authorize_operation(ctx, ledger, sid)
+    status, receipt = _saved(repo, sid)
+    details = result.result_envelope["error_details"]
+    row = _row(ctx)
+    assert (result.ok, result.error_code, result.reported_error_code, result.effect_outcome) == (
+        False, "TOOL_OPERATION_OUTCOME_UNKNOWN", "FEISHU_USER_AUTH_REQUIRED", "unknown")
+    assert status == "UNKNOWN" and receipt["result"]["effect_outcome"] == "unknown"
+    assert sid in _recover(ledger).details["unsettled_operation_ids"]
+    assert details["reason_code"] == "OAUTH_CARD_DELIVERY_FAILED" and details["phase"] == "authorize"
+    delivery = details["delivery"]
+    assert (delivery["stage"], delivery["effect_outcome"], delivery[fact[0]]) == (stage, delivered, fact[1])
+    assert delivery["input_id"] == row["input_id"] and len(accepted) == 1
+    assert row["status"] == "pending" and row["ciphertext"] and "im_control" not in row
+    assert _input_status(ctx, row["input_id"]) == "pending"
+
+    retry = FeishuAuthTool(ctx.agent).execute({"action": "authorize"})
+    assert retry.effect_outcome == "not_started" and len(accepted) == 1
+    assert retry.result_envelope["error_details"]["reason_code"] == "OAUTH_PENDING_REQUEST_EXISTS"
+
+    state = parse_qs(urlsplit(accepted[0]["elements"][1]["actions"][0]["url"]).query)["state"][0]
+    _api(ctx, monkeypatch)
+    completed = oauth.complete_oauth(ctx.agent, oauth_callback_payload(ctx.agent, state), state, "Synthetic-Code")
+    assert completed == {"ok": True, "status": "ready"}
+    assert _row(ctx)["status"] == "ready" and _input_status(ctx, row["input_id"]) == "ready"
+
+
+@pytest.mark.parametrize("failure", ["provider_rejected", "input_registration"])
+def test_confirmed_non_delivery_settles_failed_and_closes_the_request(ctx, ledger, monkeypatch, failure):
+    repo, *_ = ledger
+    rejected = {"error_code": "CHANNEL_CONTROL_PROVIDER_REJECTED", "provider_code": 230002}
+    accepted = _card_adapter(ctx, rejected if failure == "provider_rejected" else _DELIVERED)
+    if failure == "input_registration":
+        def refuse_registration(*_args, **_options):
+            raise ValueError("TASK_INPUT_CAPACITY_EXCEEDED")
+
+        monkeypatch.setattr(oauth, "create_input_dependency", refuse_registration)
+    sid = f"oauth-{failure}"
+    result = _authorize_operation(ctx, ledger, sid)
+    status, receipt = _saved(repo, sid)
+    delivery = result.result_envelope["error_details"]["delivery"]
+    row = _row(ctx)
+    assert (result.error_code, result.effect_outcome, status) == ("FEISHU_USER_AUTH_REQUIRED", "failed", "FAILED")
+    assert receipt["result"]["effect_outcome"] == "failed" and _recover(ledger).details is None
+    assert delivery["effect_outcome"] == "not_started" and delivery["input_id"] == row["input_id"]
+    assert row["status"] == "failed" and not row["ciphertext"]
+    if failure == "provider_rejected":
+        assert delivery["stage"] == "delivery" and len(accepted) == 1
+        assert (delivery["error_code"], delivery["provider_code"]) == ("CHANNEL_CONTROL_PROVIDER_REJECTED", 230002)
+        assert _input_status(ctx, row["input_id"]) == "failed"
+    else:
+        assert delivery["stage"] == "input_registration" and accepted == []
+        assert _input_status(ctx, row["input_id"]) is None
+
+
+def test_unsettled_host_error_from_card_delivery_propagates_unchanged(ctx, monkeypatch):
+    raised = RequestExecutionContextUnavailable("simulated execution context loss")
+
+    def lose_context(*_args, **_options):
+        raise raised
+
+    monkeypatch.setattr(ctx.agent.delivery_service, "deliver_control_card", lose_context)
+    with pytest.raises(RequestExecutionContextUnavailable) as caught:
+        FeishuAuthTool(ctx.agent).execute({"action": "authorize"})
+    row = _row(ctx)
+    assert caught.value is raised
+    assert row["status"] == "pending" and _input_status(ctx, row["input_id"]) == "pending"

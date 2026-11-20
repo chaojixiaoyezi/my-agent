@@ -230,14 +230,229 @@ def test_prepared_update_rechecks_original_and_planned_body(r3_native, monkeypat
         assert reply["data"]["skill"]["description"] == "second"
 
 
-def test_equal_create_body_under_new_key_has_no_mutation_receipt(r3_native):
-    server, _ = r3_native
+def test_equal_create_body_under_new_key_is_a_no_write_success(r3_native):
+    server, agent = r3_native
     name = "same-body"
     params = {"skill_id": name, "body_markdown": _skill_markdown(name, "existing")}
     key = "m43-original-create-key"
     status, created = _http_business(server, "skills.create", params, idempotency_key=key)
     assert status == 200, created
+    path = agent.home_paths.owner_home_dir / "skills" / name / "SKILL.md"
+    before = path.stat()
     status, reply = _http_business(server, "skills.create", params, idempotency_key="m43-independent-key")
-    assert status == 409 and reply["error"]["code"] == "STATE_CONFLICT"
+    assert status == 200, reply
+    assert reply["data"]["skill"]["version_ref"] == created["data"]["skill"]["version_ref"]
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert _reservation(agent, name) is None
+    changed = {**params, "body_markdown": _skill_markdown(name, "changed")}
+    status, reply = _http_business(server, "skills.create", changed, idempotency_key="m43-changed-body-key")
+    assert status == 409, reply["error"]
+    assert reply["error"]["code"] == "STATE_CONFLICT"
+    assert _reservation(agent, name) is None and path.read_text() == params["body_markdown"]
     status, replay = _http_business(server, "skills.create", params, idempotency_key=key)
     assert status == 200 and replay["data"] == created["data"]
+
+
+def _skill(server, name):
+    status, reply = _http_business(server, "skills.get", {"skill_id": name})
+    assert status == 200, reply
+    return reply["data"]["skill"]
+
+
+def _reservation(agent, name):
+    state = V13Store.read_only(agent.home_paths.owner_home_dir)._read("skill_operations")
+    return state.get("metadata", {}).get("skill-mutation:" + name)
+
+
+# 在准备行已持久化、原生写入之前改动同一个技能，模拟所有者的并发编辑。
+def _edit_before_native_write(monkeypatch, agent, name, staged_name, body):
+    staged = getattr(business, staged_name)
+    path = agent.home_paths.owner_home_dir / "skills" / name / "SKILL.md"
+
+    def edit_then_stage(*args, **kwargs):
+        assert _reservation(agent, name) is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return staged(*args, **kwargs)
+
+    monkeypatch.setattr(business, staged_name, edit_then_stage)
+    return path
+
+
+@pytest.mark.parametrize("action", ["skills.create", "skills.update", "skills.activate", "skills.retire"])
+def test_known_pre_write_cas_refusal_settles_the_original_key(r3_native, monkeypatch, action):
+    server, agent = r3_native
+    name = "cas-" + action.split(".")[1]
+    params = {"skill_id": name}
+    if action == "skills.create":
+        params["body_markdown"] = _skill_markdown(name, "first")
+    else:
+        status, created = _http_business(server, "skills.create", {
+            "skill_id": name, "body_markdown": _skill_markdown(name, "first"),
+        }, idempotency_key="m43-cas-seed-0001")
+        assert status == 200, created
+        if action == "skills.update":
+            params.update(body_markdown=_skill_markdown(name, "second"),
+                          expected_version_ref=created["data"]["skill"]["version_ref"])
+        if action == "skills.activate":
+            status, retired = _http_business(server, "skills.retire", params, idempotency_key="m43-cas-retire-0001")
+            assert status == 200 and retired["data"]["skill"]["enabled"] is False, retired
+    owner_edit = _skill_markdown(name, "owner edit")
+    staged_name = "_write_skill_staged" if action in {"skills.create", "skills.update"} else "_toggle_staged"
+    key = "m43-cas-refused-0001"
+    with monkeypatch.context() as patch:
+        path = _edit_before_native_write(patch, agent, name, staged_name, owner_edit)
+        status, refused = _http_business(server, action, params, idempotency_key=key)
+    assert status == 409 and refused["error"]["code"] == "REVISION_CONFLICT", refused
+    assert refused["effect_outcome"] == "not_started" and "skill_mutation_cas_refused" in str(refused["error"])
+    assert path.read_text() == owner_edit and _reservation(agent, name) is None
+
+    # 原键是终态：重放返回同一结论且不再写入；同键换参数仍是幂等冲突。
+    status, replay = _http_business(server, action, params, idempotency_key=key)
+    assert status == 409 and replay["effect_outcome"] == "not_started", replay
+    assert replay["error"]["code"] == "REVISION_CONFLICT" and "skill_mutation_cas_refused" in str(replay["error"])
+    status, changed = _http_business(server, action, {**params, "skill_id": "cas-other"}, idempotency_key=key)
+    assert status == 409 and changed["error"]["code"] == "IDEMPOTENCY_CONFLICT", changed
+    assert path.read_text() == owner_edit
+
+    current = _skill(server, name)
+    if action == "skills.update":
+        status, stale = _http_business(server, action, params, idempotency_key="m43-cas-stale-0001")
+        assert status == 409 and stale["error"]["code"] == "REVISION_CONFLICT", stale
+        assert stale["effect_outcome"] == "not_started" and path.read_text() == owner_edit
+    status, fresh = _http_business(server, "skills.update", {
+        "skill_id": name, "body_markdown": _skill_markdown(name, "fresh"), "expected_version_ref": current["version_ref"],
+    }, idempotency_key="m43-cas-fresh-update-0001")
+    assert status == 200 and fresh["data"]["skill"]["description"] == "fresh", fresh
+    status, retired = _http_business(server, "skills.retire", {"skill_id": name}, idempotency_key="m43-cas-fresh-retire-0001")
+    assert status == 200 and retired["data"]["skill"]["enabled"] is False, retired
+
+
+def test_settlement_committed_before_materialization_replays_after_recovery(r3_native, monkeypatch):
+    import errno
+    import json
+
+    from agent_py_agent.agent.business_spaces import v13_store as store_module
+
+    server, agent = r3_native
+    name = "cas-journal"
+    status, created = _http_business(server, "skills.create", {
+        "skill_id": name, "body_markdown": _skill_markdown(name, "first"),
+    }, idempotency_key="m43-journal-seed-0001")
+    assert status == 200, created
+    params = {"skill_id": name, "body_markdown": _skill_markdown(name, "second"),
+              "expected_version_ref": created["data"]["skill"]["version_ref"]}
+    write = store_module.write_bytes_atomic_beneath
+    fault = {"journal": False, "raised": False}
+
+    def stop_after_commit_point(root, parts, raw, *args, **kwargs):
+        if fault["journal"] and not fault["raised"]:
+            fault["raised"] = True
+            raise OSError(errno.EIO, "simulated I/O error after the journal commit")
+        if parts[-1] == ".transaction.json" and raw and not fault["raised"]:
+            facts = json.loads(raw).get("states", {}).get("skill_operations", {}).get("metadata_facts", {})
+            fault["journal"] = any(item.startswith("skill-mutation-settled:") for item in facts)
+        return write(root, parts, raw, *args, **kwargs)
+
+    key = "m43-journal-refused-0001"
+    with monkeypatch.context() as patch:
+        path = _edit_before_native_write(patch, agent, name, "_write_skill_staged", _skill_markdown(name, "owner edit"))
+        patch.setattr(store_module, "write_bytes_atomic_beneath", stop_after_commit_point)
+        status, refused = _http_business(server, "skills.update", params, idempotency_key=key)
+    assert fault == {"journal": True, "raised": True}
+    assert status == 409 and refused["effect_outcome"] == "not_started", refused
+    # 终态只在未物化日志里：新的存储句柄仍读到已释放的占位和原键终态。
+    assert _reservation(agent, name) is None
+    status, replay = _http_business(server, "skills.update", params, idempotency_key=key)
+    assert status == 409 and "skill_mutation_cas_refused" in str(replay["error"]), replay
+    status, fresh = _http_business(server, "skills.update", {
+        **params, "expected_version_ref": _skill(server, name)["version_ref"],
+    }, idempotency_key="m43-journal-fresh-0001")
+    assert status == 200 and fresh["data"]["skill"]["description"] == "second", fresh
+    status, replay = _http_business(server, "skills.update", params, idempotency_key=key)
+    assert status == 409 and replay["effect_outcome"] == "not_started", replay
+    assert path.read_text() == _skill_markdown(name, "second")
+
+
+def test_uncertain_orphan_needs_current_version_authorization(r3_native, monkeypatch):
+    server, agent = r3_native
+    name = "orphan-skill"
+    status, created = _http_business(server, "skills.create", {
+        "skill_id": name, "body_markdown": _skill_markdown(name, "first"),
+    }, idempotency_key="m43-orphan-seed-0001")
+    assert status == 200, created
+    original_version = created["data"]["skill"]["version_ref"]
+    params = {"skill_id": name, "body_markdown": _skill_markdown(name, "second"), "expected_version_ref": original_version}
+    old_key = "m43-orphan-update-0001"
+
+    def stop_before_write(*args, **kwargs):
+        raise OSError("simulated interruption after preparation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(business, "_write_skill_staged", stop_before_write)
+        status, reply = _http_business(server, "skills.update", params, idempotency_key=old_key)
+        assert status == 503, reply
+    path = agent.home_paths.owner_home_dir / "skills" / name / "SKILL.md"
+    third = _skill_markdown(name, "external")
+    path.write_text(third, encoding="utf-8")
+    orphan = _reservation(agent, name)
+
+    # 第三种内容下旧键的历史效果未知：同键重放不清除占位，没有当前版本授权的新请求也不能越过它。
+    status, reply = _http_business(server, "skills.update", params, idempotency_key=old_key)
+    assert status == 409 and reply["effect_outcome"] == "unknown", reply
+    status, reply = _http_business(server, "skills.retire", {"skill_id": name}, idempotency_key="m43-orphan-retire-0001")
+    assert status == 503 and reply["error"]["code"] == "OUTCOME_UNKNOWN", reply
+    status, reply = _http_business(server, "skills.update", params, idempotency_key="m43-orphan-stale-0001")
+    assert status == 503 and reply["error"]["code"] == "OUTCOME_UNKNOWN", reply
+    assert _reservation(agent, name) == orphan and path.read_text() == third
+
+    # 其它技能不受这个占位影响。
+    status, other = _http_business(server, "skills.create", {
+        "skill_id": "independent-skill", "body_markdown": _skill_markdown("independent-skill", "first"),
+    }, idempotency_key="m43-orphan-other-0001")
+    assert status == 200, other
+
+    current = _skill(server, name)["version_ref"]
+    status, reconciled = _http_business(server, "skills.update", {
+        **params, "body_markdown": _skill_markdown(name, "reconciled"), "expected_version_ref": current,
+    }, idempotency_key="m43-orphan-current-0001")
+    assert status == 200 and reconciled["data"]["skill"]["description"] == "reconciled", reconciled
+    assert _reservation(agent, name) is None
+    status, reply = _http_business(server, "skills.update", params, idempotency_key=old_key)
+    assert status == 409 and reply["effect_outcome"] == "unknown" and "attribution" in str(reply["error"]), reply
+    assert path.read_text() == _skill_markdown(name, "reconciled")
+    status, retired = _http_business(server, "skills.retire", {"skill_id": name}, idempotency_key="m43-orphan-retire-0002")
+    assert status == 200 and retired["data"]["skill"]["enabled"] is False, retired
+
+
+def test_recoverable_prepared_entry_still_requires_the_original_key(r3_native, monkeypatch):
+    server, agent = r3_native
+    name = "recoverable-skill"
+    status, created = _http_business(server, "skills.create", {
+        "skill_id": name, "body_markdown": _skill_markdown(name, "first"),
+    }, idempotency_key="m43-recover-seed-0001")
+    assert status == 200, created
+    params = {"skill_id": name, "body_markdown": _skill_markdown(name, "second"),
+              "expected_version_ref": created["data"]["skill"]["version_ref"]}
+    key = "m43-recover-update-0001"
+    original = V13Store.transaction
+
+    def lose_receipt(self, collection, mutate, **kwargs):
+        if collection == "skill_operations" and kwargs["idempotency_key"] == key:
+            raise OSError("simulated receipt interruption")
+        return original(self, collection, mutate, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(V13Store, "transaction", lose_receipt)
+        patch.setattr(business, "_has_durable_skill_receipt", lambda *args: None)
+        status, reply = _http_business(server, "skills.update", params, idempotency_key=key)
+        assert status == 503, reply
+    # 原生写已经落盘、回执未提交：当前内容是计划像，旧键仍可恢复，所以带当前版本的新请求也不能结清它。
+    status, reply = _http_business(server, "skills.update", {
+        **params, "body_markdown": _skill_markdown(name, "third"), "expected_version_ref": _skill(server, name)["version_ref"],
+    }, idempotency_key="m43-recover-fresh-0001")
+    assert status == 503 and reply["error"]["code"] == "OUTCOME_UNKNOWN", reply
+    status, reply = _http_business(server, "skills.update", params, idempotency_key=key)
+    assert status == 200 and reply["data"]["skill"]["description"] == "second", reply
+    assert _reservation(agent, name) is None
