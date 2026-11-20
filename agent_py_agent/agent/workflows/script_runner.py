@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -90,6 +91,11 @@ _JSON_OUTPUT_TYPES = {
     'string': (str,), 'integer': (int,), 'number': (int, float),
     'boolean': (bool,), 'object': (dict,), 'array': (list,), 'null': (type(None),),
 }
+# 嵌套 shell 启动前拒绝的下一步：只给不放宽执行环境的恢复路径。
+_NESTED_SHELL_NEXT_ACTION = (
+    '本次范围约束需要系统沙箱，bash/sh 固化脚本无法由 Python 守卫执行，未启动子进程；恢复系统沙箱后端后重试，'
+    '或把脚本改写为 python3 后在同一范围内运行；不要放宽执行环境或改用未受控 shell 绕过。'
+)
 _PYTHON_GUARD_CODE = """# LLM: Python守卫只作OS沙箱的补充，冻结路径与端口；用户代码执行前安装，不冒称内核隔离。
 # 函数用途: 初始化脚本的文件metadata与网络出口检查。
 def _init_guard():
@@ -732,6 +738,16 @@ def _environment(metadata, folder, input_json, sources, *, host_credential_env_n
 @lru_cache(maxsize=128)
 def _summary_warning_clock(error_type):
     return [float('-inf')]
+
+
+# LLM: 只给离开本次 run_script 的异常写入当次 launch_id（覆盖同一异常对象上旧尝试的值），不改类型、消息或因果链；
+#   冻结异常对象拒绝写属性时保留原异常，不能让回执字段掩盖真实失败。
+# 函数用途: 让启动前拒绝与执行期异常都带本次启动尝试的身份，供上层回执原样复制。
+def _stamp_launch_id(exc: BaseException, launch_id: str) -> None:
+    try:
+        exc.launch_id = launch_id
+    except AttributeError:
+        pass
 
 
 # LLM: 摘要失败不能覆盖执行事实；按签名兼容旧Store，正式Store走spool且不重试已进入的写操作。
@@ -1398,7 +1414,11 @@ class ScriptRunner:
                 env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps(guard_cfg)
                 command = [executable, '-I', '-B', str(guard), str(entrypoint)]
             elif enforces_scope and not applied_sandbox:
-                raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
+                refusal = SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
+                refusal.inner_code, refusal.stage, refusal.effect_outcome = (
+                    'NESTED_SHELL_SANDBOX_UNAVAILABLE', 'sandbox_prepare', 'not_started')
+                refusal.next_action = _NESTED_SHELL_NEXT_ACTION
+                raise refusal
             command = ds_runtime.wrap_command(command, interpreter, guarded=bool(guarded))
             timings['environment_setup_ms'] += (time.monotonic() - clock) * 1000
             clock = time.monotonic()
@@ -1444,6 +1464,8 @@ class ScriptRunner:
         if type(record_summary) is not bool:
             raise ValueError('record_summary必须是布尔值')
         cred_lease: ScriptCredentialLease | None = getattr(self, '_credential_lease', None)
+        # 每次启动尝试在第一道启动前闸门之前取得唯一 launch_id；重试同一逻辑任务会得到新值，不能用可重现的 run_id 代替。
+        launch_id = uuid.uuid4().hex
         started_at, timer = time.time(), time.monotonic()
         metadata, sources, output, stdout, stderr, error, exit_code = {}, {}, {}, '', '', '', None
         cleanup, capture, execution_error = {}, {'phase': 'preflight', 'timings': dict.fromkeys(_TIMING_FIELDS, 0.0)}, {}
@@ -1489,14 +1511,14 @@ class ScriptRunner:
                 self._admit_delivery(intents, output, metadata, capture.get('work_context'), receipts=delivery_receipts)
                 if batch is not None and batch.artifacts:
                     output_dir, output_artifacts = batch.publish()
-        except (SandboxUnavailableError, SandboxUnavailable, CredentialInputError):
-            if cred_lease is not None and not capture.get('started'):
-                raise
+        except (SandboxUnavailableError, SandboxUnavailable, CredentialInputError) as exc:
+            _stamp_launch_id(exc, launch_id)
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
             if cred_lease is not None and not capture.get('started') and not isinstance(
                 exc, (_EntrypointMissing, _HistorySnapshotMissing, AssetDisabledError, ScriptInputTransportError, RunOutError)
             ) and any(tok in str(exc) for tok in ('凭据', '不属于', '身份无法核验', '无权', '已过期', '已撤销', '未就绪')):
+                _stamp_launch_id(exc, launch_id)
                 raise
             cleanup = capture.get('cleanup_error', cleanup)
             exit_code = capture.get('exit_code', exit_code)
@@ -1513,6 +1535,10 @@ class ScriptRunner:
             execution_error = {'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)}
             if isinstance(exc, RunOutError):
                 execution_error.update(exc.diagnostics())
+        except Exception as exc:
+            # 本层不转成回执的其它异常（如取消）原样上抛，只补本次 launch_id。
+            _stamp_launch_id(exc, launch_id)
+            raise
         finally:
             if batch is not None and not batch.published:
                 try:
@@ -1558,6 +1584,8 @@ class ScriptRunner:
         result.output_dir, result.output_artifacts = output_dir, output_artifacts
         result.preparation_timings = capture['timings']
         result.delivery_receipts = tuple(delivery_receipts)
+        # 效果回执与下方回收回执绑定同一次启动尝试。
+        result.launch_id = launch_id
         if cred_lease is not None:
             from ..user_space.task_credential_material import build_credential_telemetry
 
@@ -1574,6 +1602,7 @@ class ScriptRunner:
                 fd_closed=bool(capture.get('cred_fd_closed', True)),
                 scratch_cleaned=bool(capture.get('cred_scratch_cleaned', True)),
                 process_tree_reaped=not bool(cleanup),
+                launch_id=launch_id,
             )
         if record_summary:
             _record_summary(self.owner_home, result)

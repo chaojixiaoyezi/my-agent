@@ -4598,6 +4598,25 @@ ERROR_CONTRACTS.update({
 })
 
 
+# 2026-11-19：Conveyor M04 登记两个首次以结构化字段发出的码。L21：Goal 续跑被扣下是待核暂停状态，分类不授予自动续跑、重放或改写目标的权限；
+#   L22：嵌套 shell 拒绝只作 SANDBOX_UNAVAILABLE 的 inner_code，外码不变，分类不授予放宽执行环境的权限。
+ERROR_CONTRACTS.update({
+    "GOAL_CONTINUATION_WITHHELD": ErrorContract(
+        code="GOAL_CONTINUATION_WITHHELD", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="持续目标仍为 active，但上一片的结构化结束原因（turn_end_reason/runtime_reason/runtime_status）扣下了自动续跑，"
+                      "未排下一片；保留暂停原因、下一步与原目标。继续条件：用户执行 /goal resume 或在同一会话直接回复后才继续，"
+                      "也可用 /goal pause 显式暂停；勿自动重放上一片或改写目标。",
+    ),
+    "NESTED_SHELL_SANDBOX_UNAVAILABLE": ErrorContract(
+        code="NESTED_SHELL_SANDBOX_UNAVAILABLE", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="SANDBOX_UNAVAILABLE 的内因：bash/sh 固化脚本所需的路径范围约束只能由系统沙箱执行，本次沙箱未生效，子进程未启动；"
+                      "恢复系统沙箱后端后重试，或把脚本改写为 python3 后在同一范围内运行；不放宽执行环境，也不改用未受控 shell 绕过。",
+    ),
+})
+
+
 # LLM: 仅按显式错误码大写查表，未登记码统一回退到UNKNOWN_ERROR合同，不猜自然语言。
 # 函数用途: 根据结构化错误码返回对应的ErrorContract对象。
 def error_contract(code: str) -> ErrorContract:

@@ -35,13 +35,19 @@ class _CommandStream:
         self.disconnected = threading.Event()
         self.lock = threading.Lock()
 
-    # LLM: 同一锁序列化心跳和原事件；I/O 失败只关闭当前命令，不吞成成功回执。
-    # 函数用途: 写出一条消息并及时冲刷到客户端。
-    def publish(self, kind: str, payload: dict) -> None:
-        raw = CommandStreamFrame(self.request_id, kind, payload).encode()
+    # LLM: 本流唯一写者：同一把本连接锁内先裁决（已断连或已提交终帧即拒绝）再序列化写出，终帧与 finished 在同一临界区提交，
+    #   心跳在同一临界区先看 finished，故终帧之后不再产出任何帧；锁只属于本连接，写入受 socket timeout 约束，不是全局锁。
+    #   I/O 失败只关闭当前命令，不吞成成功回执。
+    # 函数用途: 写出一条消息并及时冲刷到客户端；final=True 时同时提交本流终帧标记。
+    def publish(self, kind: str, payload: dict, *, final: bool = False) -> None:
         with self.lock:
             if self.disconnected.is_set():
                 raise OSError("命令连接已关闭")
+            if self.finished.is_set():
+                raise OSError("命令流已提交终帧")
+            raw = CommandStreamFrame(self.request_id, kind, payload).encode()
+            if final:
+                self.finished.set()
             try:
                 self.handler.wfile.write(raw)
                 self.handler.wfile.flush()
@@ -92,7 +98,7 @@ def serve_command_stream(handler, paths: GatewayPaths, owner: OwnerIdentity, req
         heartbeat.start()
         # 心跳运输不代表存在人工审批；普通命令继续由原授权链裁决无人审批。
         result = execute(request_permission if interactive else None, token)
-        stream.publish("result", result)
+        stream.publish("result", result, final=True)
     except OSError:
         stream.disconnected.set()
     finally:

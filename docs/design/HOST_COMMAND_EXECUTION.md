@@ -110,3 +110,25 @@ handler 构造使用同一次安装快照的目录及目标，写入时原安装
 准备器冻结一次原 claim，ManagedOperationStore.require_authority 的显式 claim/scopes 分支核对当前操作、代数、epoch 和锁；
 默认分支继续支持 handler 前尚未 claim 的检查。PID 与退出回执沿原 ProcessSessionStore，不写进 operation holder 或新建进程表。
 同步等待继续检查原操作，交接后的寿命通过原 host 的明确参数控制。原请求 UNKNOWN 或终态不重新准备；此接线不代表完整插件启用已开放。
+
+## 2026-11-19 M04：命令流终帧单写者、嵌套脚本内因与启动身份、索引截短再核对（Conveyor）
+
+本节记录 Conveyor M04（Astra-R3 L21、L22、L24、L26；Verdict 3B.1 D08.7、D10.19；CI 行 5、17、23、27、28）建立的不变量与验收证据。基线 `d9caa95af`，父提交 `7e94753e8`（M03）。只加附加字段和两条错误分类登记，外码与存储格式不变，`~/.my-agent` 无需迁移，不加配置键。
+
+**不变量**
+
+- 命令流单写者（L24）：`gateway_parts/command_stream.py` 的 `_CommandStream.publish` 是本连接唯一写入口。它在本连接锁内先裁决已断连、已提交终帧，再编码写出；`final=True` 的终帧与 `finished` 在同一临界区提交。心跳走同一入口，终帧取得写权后才到期的心跳只会被拒绝，终帧之后不再产出任何帧。这把锁只属于本连接，不是全局锁，写入受原 socket 超时约束；终帧写失败只标记断连，不补发第二个终帧。
+- 嵌套脚本内因（L22）：bash/sh 固化脚本缺系统沙箱时，`workflows/script_runner.py` 仍抛外码 `SANDBOX_UNAVAILABLE`，并在异常上附 `inner_code=NESTED_SHELL_SANDBOX_UNAVAILABLE`、`stage=sandbox_prepare`、`effect_outcome=not_started` 与 `next_action`。`classify_credential_exception` 只读这些结构化属性，不解析消息；产出方未挂内因时记 `unknown`。不自动放宽执行环境。
+- 启动身份（D08.7）：`run_script` 每次调用在第一道启动前闸门之前取一个 `launch_id`（`uuid4().hex`），可重现的 `run_id` 不作替代。启动前拒绝和其它离开 `run_script` 的异常、结果上的效果回执（`effect_outcome`）、凭据回收回执（`credential_execution` 的进程树回收、临时目录清理、FD 关闭）带同一个值。`tooling/scripts_tool.py` 在 run 的每个分支原样复制；只有 runner 从未进入（如凭据授权在进入前被拒）时为 `""`。同一逻辑任务重试得到新值。
+- 索引完成证明绑定文件身份（L26、D10.19）：`reconcile_home_index_page` 在推进游标或阶段前，用已持有的 FD 再 `fstat`，比较 `(st_dev, st_ino)` 与本页冻结身份、实际长度与冻结 `end`。截短或身份不符走原 `INDEX_SOURCE_CHANGED`：回偏移 0，重新打开文件幂等重读，不读旧缓冲。Python 3.14 的 `io.DEFAULT_BUFFER_SIZE` 为 128 KiB（3.12 为 8 KiB），会把整页预取进缓冲，此前同 inode 截短碰不到真实 EOF。
+- 分类登记（L21；C23）：`contracts/error_taxonomy.py` 新增两条。`GOAL_CONTINUATION_WITHHELD` 为 state、不可重试、manual_review，继续条件是 `/goal resume` 或同会话直接回复，也可 `/goal pause`，不自动重放或改写目标。`NESTED_SHELL_SANDBOX_UNAVAILABLE` 为 tool、不可重试、change_strategy，只作内因。`goal_progress_fuse.py` 发出的细节已带目标、修订、唤醒信号与结构化结束原因，未改。
+
+**验收证据**
+
+- 红到绿：CI 行 17（码未登记）和行 27、28（缺 `inner_code`）在父提交于 3.12 与 3.14t 失败；行 23 在父提交于 3.14t 失败（3.12 通过）。行 5 在父提交加慢终帧探针（终帧编码后延迟 0.25 s）后于两个版本都失败。本模块后全部通过，行 5 在 3.14t `-X gil=0` 连续 200 次通过。
+- 新增 `tests/test_conveyor_m04_base_cures.py` 六项，在父提交全部失败：
+  - Event 定序的“终帧取得写权后心跳才到期”，送达与写超时两种，断言只产出一个终帧且其后无心跳；
+  - 整页预取后同 inode 截短，断言出现 `INDEX_SOURCE_CHANGED`，续跑后收敛到 `done`；
+  - 经 `ScriptsTool` 的 D08.7 三种情形：启动前拒绝、非零退出并回收进程树、重试换新 id；
+  - 目标续跑扣下码的分类与继续条件。
+- 目标、CI 节点与影响测试在 Python 3.12 与 3.14t（`-X gil=0`）通过；静态门（ruff、导入边界、`git diff --check`、clean package）通过。

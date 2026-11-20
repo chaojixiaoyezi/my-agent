@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -424,6 +425,14 @@ def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
                         result['unknown'] += 1
                         if len(result['errors']) < 16:
                             result['errors'].append({'code': 'CANONICAL_INDEX_SOURCE_UNAVAILABLE', 'reason': type(exc).__name__})
+                # 推进游标或阶段前用已持有的 FD 再 fstat：缓冲已预取整页时同 inode 截短不会碰到真实 EOF。
+                # 截短或身份不符走原 INDEX_SOURCE_CHANGED，回偏移 0 重新打开幂等重读（不读旧缓冲）；完成只凭这份同身份证明。
+                if _held_source_changed(stamp, identity, end):
+                    if len(result['errors']) < 16:
+                        result['errors'].append({'code': 'INDEX_SOURCE_CHANGED'})
+                    offset = 0
+                    progress = {'owner': owner_id, 'phase': phase, 'offset': 0}
+                    continue
                 progress = dict(owner=owner_id, phase=phase, offset=offset, identity=identity, end=end,
                                 **({'discard': True} if progress.get('discard') else {}))
                 if offset < end:
@@ -480,3 +489,10 @@ def _index_source_stamp(path):
         return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     except FileNotFoundError:
         return None
+
+
+# LLM: 只读已持有 FD 的 fstat，不重新按路径打开；身份须等于本页记入游标的 (st_dev, st_ino)，实际长度不得小于冻结 end。
+# 函数用途: 判断本页索引源在推进前是否已被截短或身份不符，供完成证明绑定文件身份。
+def _held_source_changed(fd: int, identity: list[int], end: int) -> bool:
+    st = os.fstat(fd)
+    return [st.st_dev, st.st_ino] != identity or st.st_size < end

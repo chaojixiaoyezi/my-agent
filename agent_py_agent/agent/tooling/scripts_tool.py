@@ -159,8 +159,18 @@ def _raw(value):
     if (isinstance(data, dict) and not isinstance(value, dict)
             and ('workflow_run_id' in data or 'exit_code' in data and 'output_data' in data)):
         data.update({name: getattr(value, name) for name in ('execution_definition_ref', 'workflow_run_id',
-            'phase', 'effect_outcome', 'confirmed_step_refs', 'preparation_timings', 'delivery_receipts') if hasattr(value, name)})
+            'phase', 'effect_outcome', 'confirmed_step_refs', 'preparation_timings', 'delivery_receipts',
+            'launch_id') if hasattr(value, name)})
     return data
+
+
+# LLM: 只服务 scripts run：launch_id 原样取自本次 runner 结果或 runner 抛出的异常；runner 未进入时为 ""，不猜也不沿用旧尝试。
+# 函数用途: 给 run 动作的成功、失败与拒绝回执补上启动身份字段，其它动作原样返回。
+def _with_launch_id(params, data, exc=None):
+    if params.get('action') != 'run' or not isinstance(data, dict):
+        return data
+    launch_id = data.get('launch_id') if exc is None else getattr(exc, 'launch_id', '')
+    return {**data, 'launch_id': str(launch_id or '')}
 
 
 # LLM: 只用于模型可见投影，保留领域版本字段并共用有限JSON安全codec，不能作为更新的旧值。
@@ -531,7 +541,7 @@ class ScriptsTool(BaseTool):
         if invalid is not None:
             return invalid
         try:
-            data = _dispatch(self, params, context=context)
+            data = _with_launch_id(params, _dispatch(self, params, context=context))
             ok = params['action'] != 'run' or data.get('ok') is True
             next_act = ''
             err_code = 'TOOL_EXECUTION_FAILED' if not ok else ''
@@ -550,7 +560,7 @@ class ScriptsTool(BaseTool):
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('scripts', exc, params=params)
         except AssetActionError as exc:
-            return _outcome('scripts', exc.data, False, exc.code, effect_outcome='not_started')
+            return _outcome('scripts', _with_launch_id(params, exc.data, exc), False, exc.code, effect_outcome='not_started')
         except (CredentialInputError, SandboxUnavailable) as exc:
             cred_ref = str(params.get('credential_ref') or '')
             classified = classify_credential_exception(
@@ -560,9 +570,12 @@ class ScriptsTool(BaseTool):
                 default_stage='authorization',
                 effect_outcome='not_started',
             )
+            # 外码不变；内因（仅沙箱拒绝有）、阶段与 launch_id 是附加字段，回收回执与本回执取同一次尝试的 launch_id。
             err_body = {
                 'error': classified['message'],
                 'error_code': classified['error_code'],
+                **({'inner_code': classified['inner_code']} if 'inner_code' in classified else {}),
+                'stage': classified['detail_stage'],
                 'failure_stage': classified['failure_stage'],
                 'effect_outcome': classified['effect_outcome'],
                 'next_action': classified['next_action'],
@@ -571,11 +584,12 @@ class ScriptsTool(BaseTool):
                     status_code=classified['error_code'],
                     failure_stage=classified['failure_stage'],
                     effect_outcome=classified['effect_outcome'],
+                    launch_id=str(getattr(exc, 'launch_id', '') or ''),
                 ),
             }
             return _outcome(
                 'scripts',
-                err_body,
+                _with_launch_id(params, err_body, exc),
                 False,
                 classified['error_code'],
                 effect_outcome=classified['effect_outcome'],
@@ -593,22 +607,22 @@ class ScriptsTool(BaseTool):
                 )
                 return _outcome(
                     'scripts',
-                    {
+                    _with_launch_id(params, {
                         'error': classified['message'],
                         'error_code': classified['error_code'],
                         'failure_stage': classified['failure_stage'],
                         'effect_outcome': classified['effect_outcome'],
                         'next_action': classified['next_action'],
-                    },
+                    }, exc),
                     False,
                     classified['error_code'],
                     effect_outcome=classified['effect_outcome'],
                     failure_stage=classified['failure_stage'],
                     next_action=classified['next_action'],
                 )
-            return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
+            return _outcome('scripts', _with_launch_id(params, {'error': str(exc)}, exc), False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
-            return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
+            return _outcome('scripts', _with_launch_id(params, {'error': str(exc)}, exc), False, 'TOOL_EXECUTION_FAILED')
 
     # LLM: action精确枚举；check_sources刷新而get稳定，运行仍经源硬门；workspace/runner仅取原宿主绑定。
     # 函数用途: 将公开动作交给原领域存储、实时检查或执行器。

@@ -516,16 +516,18 @@ def classify_credential_exception(
 
     ref_hint = credential_ref if is_valid_credential_ref(credential_ref) else "cred_<32位十六进制>"
     if isinstance(exc, SandboxUnavailable):
+        # 外码保持 SANDBOX_UNAVAILABLE；内因、阶段与下一步只取产出方挂在异常上的结构化字段，不解析消息文本，未挂时内因记 unknown。
         return {
             "error_code": "SANDBOX_UNAVAILABLE",
+            "inner_code": str(getattr(exc, "inner_code", "") or "unknown"),
             "failure_stage": "runtime_gate",
-            "detail_stage": "sandbox_prepare",
+            "detail_stage": str(getattr(exc, "stage", "") or "sandbox_prepare"),
             "effect_outcome": effect_outcome,
             "message": f"{tool_name} 无法为携卡执行建立受保护 OS 沙箱隔离（{type(exc).__name__}），未启动子进程。",
-            "next_action": (
+            "next_action": str(getattr(exc, "next_action", "") or (
                 f'改用已授权的 HTTP 入口 web_fetch(url="...", credential_ref="{ref_hint}") '
                 "或受保护浏览器入口，或恢复当前系统沙箱后端后再重试。"
-            ),
+            )),
         }
     if isinstance(exc, CredentialInputError):
         code = str(exc.code or "CREDENTIAL_INPUT_UNAVAILABLE")
@@ -604,8 +606,9 @@ def build_credential_telemetry(
     fd_closed: bool = True,
     scratch_cleaned: bool = True,
     process_tree_reaped: bool = True,
+    launch_id: str = "",
 ) -> dict[str, object]:
-    """构造不含任何秘密值、宿主机文件路径或请求正文的 C6 结构化审计回执。"""
+    """构造不含任何秘密值、宿主机文件路径或请求正文的 C6 结构化审计回执；launch_id 非空时绑定本次启动尝试。"""
     safe_origin = ""
     if origin:
         with contextlib.suppress(ValueError):
@@ -633,6 +636,8 @@ def build_credential_telemetry(
         receipt["request_id"] = str(request_id)
     if call_id:
         receipt["call_id"] = str(call_id)
+    if launch_id:
+        receipt["launch_id"] = str(launch_id)
     if failure_stage:
         receipt["failure_stage"] = str(failure_stage)
     return receipt
