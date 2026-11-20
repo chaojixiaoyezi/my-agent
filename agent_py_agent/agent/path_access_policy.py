@@ -318,7 +318,7 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
-        aggregate = next((root for root in self.business_aggregate_roots if _host_source_contains(resolved, root)), None)
+        aggregate = self._business_aggregate_store_of(resolved)
         if aggregate is not None:
             return PathAccessDecision(False, "PATH_HOST_MANAGED_STORE_BLOCKED",
                 "当前业务范围不能用通用文件入口读取宿主跨项目记忆/会话/业务资产原始聚合账；未读取正文。"
@@ -454,7 +454,30 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             return None
-        return next((root for root in self.business_aggregate_roots if _host_source_contains(resolved, root)), None) or self._host_managed_store_of(resolved)
+        return self._business_aggregate_store_of(resolved) or self._host_managed_store_of(resolved)
+
+    def _business_aggregate_store_of(self, resolved: Path) -> Path | None:
+        return next((root for root in self.business_aggregate_roots if _host_source_contains(resolved, root)), None)
+
+    def is_host_managed_store_resolved(self, resolved: Path) -> bool:
+        """目录遍历已知真实路径时，沿用托管区与例外判据。"""
+        if self._business_aggregate_store_of(resolved) is not None:
+            return True
+        root = self.agent_home_root
+        return (
+            root is not None
+            and host_managed_store_resolved(resolved, root)
+            and not self._is_admin_readable_service_log(resolved)
+        )
+
+    def is_admin_readable_service_log_ancestor(self, resolved: Path) -> bool:
+        """只沿获准服务日志的声明路径进入隐藏目录。"""
+        parts = self._admin_service_log_parts(resolved)
+        return (
+            parts is not None
+            and any(len(parts) < len(log) and log[:len(parts)] == parts for log in ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS)
+            and self._business_aggregate_store_of(resolved) is None
+        )
 
     # LLM: 管理员身份及regular日志形状由同一helper核验；只豁免H2，H3写门及services整体隐藏不变。
     # 函数用途: 为Full/Auto/Ask管理员开放规范日志只读，其他owner仍由原托管存储门拒绝。
@@ -468,18 +491,21 @@ class PathAccessPolicy:
     # LLM: 冻结owner墙必须为空或casefold精确等于local/main；再核home白名单及单链接regular元数据，不授跨租户或写权。
     # 函数用途: 在唯一读例外中识别Full/Auto/Ask管理员，排除其他本地/Provider用户及所有队列、目录、链接别名。
     def _is_admin_readable_service_log(self, resolved: Path) -> bool:
-        if self.agent_home_root is None:
-            return False
-        main = self.agent_home_root / "owners" / "local" / "main"
-        if self.owner_scope_root is not None and _relative_folded(self.owner_scope_root, main) != ():
-            return False
-        if _relative_folded(resolved, main) not in ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS:
+        if self._admin_service_log_parts(resolved) not in ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS:
             return False
         try:
             info = resolved.stat()
         except OSError:
             return False
         return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+    def _admin_service_log_parts(self, resolved: Path) -> tuple[str, ...] | None:
+        if self.agent_home_root is None:
+            return None
+        main = self.agent_home_root / "owners" / "local" / "main"
+        if self.owner_scope_root is not None and _relative_folded(self.owner_scope_root, main) != ():
+            return None
+        return _relative_folded(resolved, main)
 
     # LLM: 只有 owner 普通墙拒绝允许原明确授权根复核，跨 owner/控制面等拒绝不能覆盖；复核保留冻结工作区与宿主专属根。
     # 函数用途: 为核心文件工具和隔离插件统一检查已授权的墙外工作路径。
@@ -679,6 +705,11 @@ def host_managed_store_for_path(path: Path, agent_home_root: Path) -> Path | Non
     if home is None:
         return None
     return _declared_root_containing(path, home, HOST_MANAGED_OWNER_STORE_PARTS)
+
+
+def host_managed_store_resolved(resolved_path: Path, agent_home_root: Path) -> bool:
+    """仅按规范路径归类托管存储，调用方另行核验身份和日志例外。"""
+    return host_managed_store_for_path(resolved_path, agent_home_root) is not None
 
 
 # LLM: 读口不调用此门；两端realpath消除firmlink/链接别名，大小写按已有宿主路径合同折叠。
@@ -1285,6 +1316,7 @@ __all__ = [
     "host_state_for_path",
     "host_managed_store_dirs",
     "host_managed_store_for_path",
+    "host_managed_store_resolved",
     "inheritable_declared_work_roots",
     "normalize_path_access_mode",
     "owner_home_containing",

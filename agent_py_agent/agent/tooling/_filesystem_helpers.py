@@ -401,24 +401,30 @@ def _internal_agent_status_ref(
     *,
     include_agent_directory: bool = False,
 ) -> dict[str, object] | None:
+    run_id = _internal_agent_status_run_id(path, include_agent_directory=include_agent_directory)
+    return _internal_agent_status_payload(path, run_id) if run_id is not None else None
+
+
+def _internal_agent_status_run_id(path: Path, *, include_agent_directory: bool = False) -> str | None:
+    """只识别路径形状，让目录遍历能在消费内部状态之前剪枝。"""
     parts = path.parts
     for index in range(len(parts) - 1):
-        if parts[index] != "work" or index + 1 >= len(parts) or parts[index + 1] != "agents":
+        if parts[index] != "work" or parts[index + 1] != "agents":
             continue
         relative = parts[index + 2 :]
         if include_agent_directory and not relative:
-            return _internal_agent_status_payload(path, "")
+            return ""
         if not relative:
             continue
         run_id = relative[0]
-        if not str(run_id).startswith(("subagent-", "run-")):
+        if not run_id.startswith(("subagent-", "run-")):
             continue
         if include_agent_directory:
-            return _internal_agent_status_payload(path, run_id)
+            return run_id
         leaf = relative[1] if len(relative) > 1 else ""
         if leaf not in _INTERNAL_AGENT_STATUS_FILES and leaf not in _INTERNAL_AGENT_STATUS_DIRS:
             continue
-        return _internal_agent_status_payload(path, run_id)
+        return run_id
     return None
 
 
