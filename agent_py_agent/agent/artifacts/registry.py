@@ -574,8 +574,17 @@ def _append_record(
     except (OSError, ValueError, sqlite3.Error) as error:
         logging.getLogger(__name__).warning('ARTIFACT_LOCATOR_PREPARE_FAILED error_type=%s next_action=bounded_locator_recovery', type(error).__name__)
     if atomic_publish:
+        encoded = line.encode("utf-8")
+        # 写锁内见证旧源代：新代正是旧代全部字节加一行，派生上传投影据此保留已核验进度而不从零重建。
+        from ..gateway_parts.business_upload_registry import upload_extension_witness
+
+        witness = upload_extension_witness(anchor, parts)
         previous = read_bytes_beneath(anchor, parts) or b""
-        write_bytes_atomic_beneath(anchor, parts, previous + line.encode("utf-8"))
+        if witness is not None and not witness.confirm(previous):
+            witness = None
+        write_bytes_atomic_beneath(anchor, parts, previous + encoded)
+        if witness is not None:
+            witness.rebind(len(previous) + len(encoded))
     else:
         append_text_beneath(anchor, parts, line)
     # 索引失败不把已成功原登记谎报成未执行；正式查询沿原run索引有界自愈，miss始终不作确定不存在。

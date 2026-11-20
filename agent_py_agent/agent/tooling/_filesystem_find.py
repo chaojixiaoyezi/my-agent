@@ -371,14 +371,15 @@ class FindFilesTool(FileSystemTool):
 
         walk = _LazyListWalk.for_discovery(
             self, target, include_ignored=request.include_ignored,
-            after_entry=cursor.after_entry, file_filter=matches,
+            after_entry=cursor.after_entry, file_filter=matches, scan_after=cursor.scan_after,
         )
         deadline = time.monotonic() + _FALLBACK_SCAN_MAX_SECONDS
-        has_prior_progress = bool(cursor.after_entry or cursor.skip)
+        has_prior_progress = bool(cursor.after_entry or cursor.skip or cursor.scan_after)
         rows: list[str] = []
         scanned = 0
         more = False
-        while (found := walk.next_visible(deadline=deadline if rows else None)) is not None:
+        # 走查器越过续扫起点后才按时限和文件工作量停下，零命中页因此也会交回严格前进的游标。
+        while (found := walk.next_visible(deadline=deadline)) is not None:
             item, _ = found
             scanned += 1
             if cursor.skip:
@@ -392,19 +393,25 @@ class FindFilesTool(FileSystemTool):
             cursor.after_entry = cursor.candidate = item.relative_to(target).as_posix()
             rows.append(self.display_path(item))
         raise_if_cancelled()
+        cursor.scan_after = walk.processed_entry() or cursor.scan_after
         cursor.phase = "known_matches" if more else "discovery"
         partial = more or walk.scan_incomplete
         next_cursor = _encode_discovery_cursor(cursor) if partial else ""
         batch = _FindMatchBatch(
             rows, request.offset + len(rows), partial, not partial, "ordered_walk", scanned, True,
-            "time_limit" if walk.scan_incomplete else "",
+            walk.limit_reason if walk.scan_incomplete else "",
         )
         envelope = _find_result_envelope(_FindDirectoryResultRequest(self, target, request, batch))
         envelope["page_window"].update(kind="cursor_page", next_offset=0, cursor=next_cursor)
         envelope.update(cursor=next_cursor, scan_incomplete=walk.scan_incomplete)
         if partial or has_prior_progress:
             envelope["file_search_result"].update(total="unknown", total_code="PAGE_WINDOW")
-        message = "\n".join(rows) or ("剩余范围没有匹配文件" if has_prior_progress else "没有找到匹配文件")
+        if rows:
+            message = "\n".join(rows)
+        elif walk.scan_incomplete:
+            message = f"本页扫描到预算上限（{walk.limit_reason}），已覆盖的范围没有匹配文件，其余范围尚未扫描。"
+        else:
+            message = "剩余范围没有匹配文件" if has_prior_progress else "没有找到匹配文件"
         if next_cursor:
             message += f"\ncursor={next_cursor}\n继续时保留查询条件，并原样传入 cursor。"
         return ToolHandlerOutcome("find_files", True, message, result_envelope=envelope)

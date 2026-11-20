@@ -1838,6 +1838,7 @@ def _stop_settled_background_processes(agent) -> int:
     report = freeze_settled_leftover_processes(
         owner_home,
         store_root=_background_store_root(agent),
+        config=getattr(agent, "config", None),
     )
     active_rows = report["active_processes"]
     settled_rows = report["settled_processes"]
@@ -2005,6 +2006,7 @@ def run_cold_start_settled_sweep_step(
                 owner_home,
                 min_settled_age_seconds=resolved_ttl,
                 store_root=store_root,
+                config=getattr(agent, "config", None),
             )
             for key, value in (report.get("counts") or {}).items():
                 if key in totals:

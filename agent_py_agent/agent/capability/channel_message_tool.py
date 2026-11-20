@@ -392,6 +392,8 @@ class SendMessageTool(BaseTool):
             reported_refs=reported_refs,
         )
         payload['component_receipts'] = list(getattr(receipt, 'component_receipts', ()))
+        # 经宿主 spool 发出时给出完整规范回执键；20 位 receipt_id 只是展示编号，不能单独作身份。
+        spool = self._delivery.registry.capabilities_for(provider).component_receipts
         return _success_result(
             provider,
             message,
@@ -400,6 +402,7 @@ class SendMessageTool(BaseTool):
             evidence_refs=evidence_refs,
             reply_binding=_source_reply_binding(self.agent, scope, delivery_context),
             preserve_host_paths=preserve_host_paths,
+            delivery_ref=f"host-delivery:{receipt_key}" if spool else "",
         )
 
 
@@ -1041,6 +1044,7 @@ def _success_result(
     evidence_refs: list[str],
     reply_binding: dict[str, str] | None = None,
     preserve_host_paths: bool = False,
+    delivery_ref: str = "",
 ) -> ToolHandlerOutcome:
     output = dict(payload)
     return ToolHandlerOutcome(
@@ -1053,6 +1057,7 @@ def _success_result(
                 "delivery_status": "sent",
                 "source_owner_delivery": True,
                 **({"reply_binding": reply_binding} if reply_binding else {}),
+                **({"delivery_ref": delivery_ref} if delivery_ref else {}),
                 "channel": provider,
                 "content": project_message_paths_for_channel(
                     project_user_reply(message).content, provider, preserve_host_paths=preserve_host_paths

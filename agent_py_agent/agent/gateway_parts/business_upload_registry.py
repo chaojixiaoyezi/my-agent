@@ -4,8 +4,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
+import sqlite3
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -78,7 +80,8 @@ def _read(fd, offset, count):
     return b''.join(chunks)
 
 
-def _read_checkpoint(db, stamp):
+def _bound_checkpoint(db, stamp):
+    """返回严格绑定到该源代的检查点；字段缺失、换代或不自洽时返回 None。"""
     metadata = dict(db.execute(
         'SELECT key,value FROM ori_meta WHERE key IN (?,?,?)',
         (_WATERMARK, _RECEIPT, _TABLE_GENERATION),
@@ -101,9 +104,16 @@ def _read_checkpoint(db, stamp):
             and type(largest) is int and 0 <= largest <= _MAX_RECORD_BYTES
             and type(receipt['largest_row_offset']) is int and 0 <= receipt['largest_row_offset'] <= offset
         ):
-            return watermark, receipt, pending, False
+            return watermark, receipt, pending
     except (KeyError, ValueError, TypeError):
         pass
+    return None
+
+
+def _read_checkpoint(db, stamp):
+    bound = _bound_checkpoint(db, stamp)
+    if bound is not None:
+        return (*bound, False)
 
     # 仅重建上传投影。其它 ORI 领域和既有源检查点保持原代。
     if db.execute('SELECT 1 FROM ori_upload_registry LIMIT 1').fetchone() is not None:
@@ -196,6 +206,77 @@ def _advance(db, fd, stamp, *, max_bytes, max_steps, max_total_bytes, record_lim
     if reset or progressed:
         _write_checkpoint(db, watermark, receipt, pending, stamp[2])
     return watermark, progressed
+
+
+class UploadExtensionWitness:
+    """原子发布边界上的前缀连续性见证：只由持写锁的规范写入方创建，不授予登记或读取权限。"""
+
+    def __init__(self, owner: Path, previous_stamp: tuple):
+        self._owner = owner
+        self._previous = previous_stamp
+        self._confirmed = False
+
+    def confirm(self, previous: bytes) -> bool:
+        # 写入方读出的旧字节必须正是见证时的源代全部字节，且结束在完整行上，
+        # 否则旧投影里按 EOF 收尾的末行会与新行拼接，不能沿用。
+        self._confirmed = False
+        if len(previous) != self._previous[2] or (previous and not previous.endswith(b'\n')):
+            return False
+        try:
+            fd = open_readonly_file_beneath(self._owner, _SOURCE)
+        except OSError:
+            return False
+        try:
+            self._confirmed = _stamp(fd) == self._previous
+        finally:
+            os.close(fd)
+        return self._confirmed
+
+    def rebind(self, published_size: int) -> bool:
+        """把绑定在旧源代上的上传投影改绑到刚发布的新源代；进度、残行和行代原样保留。"""
+        if not self._confirmed or published_size <= self._previous[2]:
+            return False
+        try:
+            fd = open_readonly_file_beneath(self._owner, _SOURCE)
+            try:
+                stamp = _stamp(fd)
+                if stamp[2] != published_size:
+                    return False
+                with OwnerReadIndex(self._owner).upload_registry_transaction() as db:
+                    bound = _bound_checkpoint(db, self._previous)
+                    if bound is None:
+                        return False
+                    watermark, receipt, pending = bound
+                    watermark.update(st_dev=stamp[0], st_ino=stamp[1])
+                    receipt['source_stamp'] = list(stamp)
+                    _write_checkpoint(db, watermark, receipt, pending, stamp[2])
+                    return True
+            finally:
+                os.close(fd)
+        except (OSError, ValueError, sqlite3.Error, OwnerReadUnavailable) as error:
+            # 规范登记已成功；投影改绑失败只让下次查询按原规则重建，不把发布谎报为失败。
+            logging.getLogger(__name__).warning(
+                'UPLOAD_PROJECTION_REBIND_FAILED canonical_registry_committed=true error_type=%s '
+                'next_action=rebuild_on_next_lookup', type(error).__name__)
+            return False
+
+
+def upload_extension_witness(anchor, parts) -> UploadExtensionWitness | None:
+    """仅对 owner 业务上传登记返回见证；其它登记或源缺失时返回 None。调用方须持业务写锁。"""
+    anchor = Path(anchor).absolute()
+    if tuple(parts) != tuple(REGISTRY_RELATIVE_PATH.parts) or anchor.parts[-len(_ROOT):] != _ROOT:
+        return None
+    owner = anchor.parents[len(_ROOT) - 1]
+    try:
+        fd = open_readonly_file_beneath(owner, _SOURCE)
+    except OSError:
+        return None
+    try:
+        return UploadExtensionWitness(owner, _stamp(fd))
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _source_matches(owner, fd, stamp):
