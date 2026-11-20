@@ -333,6 +333,9 @@ _RECONCILE_SITE = _LoopSite("dispatcher", "gateway_input_reconcile.iteration", "
 # 锁 sidecar 清扫节拍：孤儿锁宽限 24 小时（gateway_parts.io._ORPHAN_LOCK_MIN_AGE_SECONDS），每小时扫一遍目录就够，不必跟着秒级 tick 跑。
 _LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS = 3600.0
 _LOCK_SIDECAR_CLEANUP_SITE = _LoopSite("dispatcher", "gateway_lock_sidecar_cleanup.iteration", "lock-sidecar-cleanup")
+# 控制操作回执退役段：每个维护轮都跑一片（预算取自已加载配置），上一片 budget_exhausted 时下一轮沿原游标续扫，
+# 不能挂在小时级 sidecar 节拍里，否则每小时最多退役一片，忙碌 gateway 的 control_operations/ 无界增长。
+_CONTROL_RETENTION_SITE = _LoopSite("dispatcher", "gateway_control_operation_retention.iteration", "control-retention")
 
 
 # LLM: 单一 tick 的后台循环（维护、调度器到期、孤儿恢复）统一节奏：成功等 interval 并清零退避，出错记账、限流打印、
@@ -522,6 +525,13 @@ class _RequestDispatcher:
         self._note_segment_progress()
         closing_backoff = self.__dict__.setdefault("_closing_backoff", LoopErrorBackoff())
         self._run_segment(_CLOSING_SITE, closing_backoff, self._closing_deadline_once)
+        # 与 closing 段同为每轮有界段（retention_scan_slice_ms 限时），只刷新看门狗不插重派发；
+        # 失败按本段退避推迟，成功时下一轮立即继续上一片留下的游标。
+        if time.monotonic() >= self.__dict__.get("_next_control_retention_at", 0.0):
+            self._note_segment_progress()
+            retention_backoff = self.__dict__.setdefault("_control_retention_backoff", LoopErrorBackoff())
+            delay = self._run_segment(_CONTROL_RETENTION_SITE, retention_backoff, self._retain_control_operations_once)
+            self._next_control_retention_at = time.monotonic() + delay if delay else 0.0
         if self._recover_throttle.due():
             self._note_segment_progress()
             self._redispatch_if_inbox_changed()
@@ -672,17 +682,17 @@ class _RequestDispatcher:
             )
         )
 
-    # LLM: 锁 sidecar 清扫段：只删数据文件已不存在、超过 24 小时宽限、且非阻塞拿得到 flock 的 <name>.lock；
-    #   活锁、数据文件还在、宽限内的一律不动；单文件失败在 cleanup_orphan_lock_files 内只跳过。
-    # 函数用途: 清理请求目录里累积的孤儿锁文件，失败不拖垮其它段。
-    def _cleanup_lock_sidecars_once(self) -> None:
+    # LLM: 控制操作回执退役段：每个维护轮跑一片 prune（天数、条数、毫秒预算都取自已加载配置），并回收一次空闲 SQLite 连接。
+    #   prune 抛错时 retire 仍在 finally 里照跑；异常交给段守卫记账、限流打印并按本段退避推迟（两步都失败时以 retire 的为准，prune 的挂在 __context__）。
+    # 函数用途: 按配置预算退役一片超龄终态控制回执，并回收空闲 SQLite 连接。
+    def _retain_control_operations_once(self) -> None:
         from ..agent.gateway_parts.control_operation_service import (
             prune_terminal_control_operations,
         )
         from ..agent.io.sqlite_pool import retire_idle_connections
 
+        config = getattr(self.bootstrap_agent, "config", None)
         try:
-            config = getattr(self.bootstrap_agent, "config", None)
             prune_terminal_control_operations(
                 self.paths,
                 now=time.time(),
@@ -692,12 +702,13 @@ class _RequestDispatcher:
                 max_entries=getattr(config, "retention_scan_slice_entries", AgentConfig.retention_scan_slice_entries),
                 max_ms=getattr(config, "retention_scan_slice_ms", AgentConfig.retention_scan_slice_ms),
             )
-        except Exception as exc:
-            _print_gateway_loop_error("gateway.control_operation_retention", "dispatcher", exc)
-        try:
+        finally:
             retire_idle_connections()
-        except Exception as exc:
-            _print_gateway_loop_error("gateway.sqlite_idle_retirement", "dispatcher", exc)
+
+    # LLM: 锁 sidecar 清扫段：只删数据文件已不存在、超过 24 小时宽限、且非阻塞拿得到 flock 的 <name>.lock；
+    #   活锁、数据文件还在、宽限内的一律不动；单文件失败在 cleanup_orphan_lock_files 内只跳过。
+    # 函数用途: 清理请求目录里累积的孤儿锁文件，失败不拖垮其它段。
+    def _cleanup_lock_sidecars_once(self) -> None:
         for directory in gateway_lock_sidecar_dirs(self.paths):
             cleanup_orphan_lock_files(directory)
 

@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from http.client import HTTPConnection
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -258,12 +259,11 @@ def test_claim_winning_the_race_gets_a_durable_stop_fence(gateway, monkeypatch):
     assert processing["turn_phase"] == "closing"
 
 
-def _dispatch(gateway, earlier):
+def _dispatch(gateway, earlier, *, turn="m21-bound-dispatch"):
     agent, _, _ = gateway
     store = agent.conversation_store
     sender = _thread(gateway, conversation="sender")
     task = store.session_tasks.create(SessionTaskDraft(sender.thread_id, earlier.thread_id, "后台派活"))
-    turn = "m21-bound-dispatch"
     store.session_tasks.bind_turn(task.task_id, turn_id=turn)
     repo = agent.subagents.runtime_db
     run = repo.record_run_creation(owner_id=agent.home_paths.owner_id, conversation_task_id=task.task_id,
@@ -333,6 +333,130 @@ def test_new_notice_and_session_stop_reach_dispatch_and_owned_process(gateway, t
                 stop_process_session(ProcessSessionStore(request.store_root), hosted.record, host_process=hosted.process)
         finally:
             hosted.process.wait(timeout=5)
+
+
+class _InterruptibleRoot:
+    """在后台登记一个可中断执行体，模拟某线程上仍在跑的派发根。"""
+
+    def __init__(self, turn):
+        self.ready, self.done, self.release = threading.Event(), threading.Event(), threading.Event()
+        self.worker = threading.Thread(target=self._run, args=(turn,))
+
+    def _run(self, turn):
+        with register_interruptible(session_task_interrupt_name(turn)):
+            self.ready.set()
+            try:
+                while not self.release.is_set():
+                    wait_interruptibly(0.05)
+            except InterruptedError:
+                self.done.set()
+
+    def __enter__(self):
+        self.worker.start()
+        assert self.ready.wait(5)
+        return self
+
+    def __exit__(self, *_exc):
+        self.release.set()
+        self.worker.join(5)
+
+
+def test_deleted_predecessor_ends_lineage_without_disabling_session_stop(gateway):
+    from agent_py_agent.agent.plugin_host.thread_settings_v2 import ThreadSettingsV2Handlers
+
+    agent, paths, _ = gateway
+    store = agent.conversation_store
+    first = _thread(gateway)
+    code, created = _control(gateway, "/new", "lineage-second")
+    assert code == 200 and created["ok"], created
+    middle = _thread(gateway)
+    middle_turn = _dispatch(gateway, middle, turn="m21-middle-dispatch")
+    with _InterruptibleRoot(middle_turn) as middle_root:
+        code, created = _control(gateway, "/new", "lineage-third")
+        assert code == 200 and created["ok"], created
+        current = _thread(gateway)
+        assert len({first.thread_id, middle.thread_id, current.thread_id}) == 3
+        current_turn = _dispatch(gateway, current, turn="m21-current-dispatch")
+        with _InterruptibleRoot(current_turn) as current_root:
+            # 通过受支持的 threads.delete 入口删掉最早的空闲前任；后继仍保留指向它的 predecessor_thread_id。
+            context = SimpleNamespace(owner_home=SimpleNamespace(
+                owner_id=agent.home_paths.owner_id, home_dir=agent.home_paths.owner_home_dir))
+            deleted = ThreadSettingsV2Handlers(store, context, home_paths=agent.home_paths).delete_thread(
+                {"thread_id": first.thread_id})
+            assert deleted["deleted"] and store.threads.load(first.thread_id) is None
+            assert store.threads.require(middle.thread_id).metadata["predecessor_thread_id"] == first.thread_id
+
+            code, targeted = _post(gateway, "/client/turn-stop",
+                                   {"message_id": "current-only", "thread_id": current.thread_id})
+            assert code == 200 and targeted["ok"], targeted
+            assert targeted["target_thread_ids"] == [current.thread_id] and targeted["roots_stopped"] == 1
+            assert current_root.done.wait(5) and not middle_root.done.is_set()
+
+            code, report = _control(gateway, "/status", "lineage-status")
+            assert code == 200, report
+            roots = report["task_status"]["background_roots"]
+            assert [(row["thread_id"], row["kind"], row["lineage_complete"]) for row in roots] == [
+                (middle.thread_id, "dispatch", False),
+            ]
+
+            code, stopped = _post(gateway, "/client/turn-stop", {"message_id": "lineage-all", "scope": "session"})
+            assert code == 200 and stopped["ok"], stopped
+            assert stopped["target_thread_ids"] == sorted([middle.thread_id, current.thread_id])
+            assert stopped["roots_stopped"] == 1, stopped
+            assert middle_root.done.wait(5)
+    assert not paths.stop_request.exists()
+
+
+def _lineage_record(thread_id, *, predecessor="", successor="", owner="owner-a"):
+    binding = ["feishu", "u-1", "c-1"]
+    metadata = {}
+    if predecessor:
+        metadata.update(predecessor_thread_id=predecessor, predecessor_binding=binding)
+    if successor:
+        metadata["succession_by_binding"] = {"\x1f".join(binding): successor}
+    return SimpleNamespace(thread_id=thread_id, metadata=metadata, owner_id=owner, owner_home="/owner-home")
+
+
+def _lineage_store(current, records, *, binding_error=None):
+    threads = SimpleNamespace(
+        resolve_report=lambda **_kwargs: (current, binding_error),
+        load_report=lambda thread_id: records.get(thread_id, (None, None)),
+    )
+    return SimpleNamespace(threads=threads)
+
+
+_LINEAGE_SCOPE = SimpleNamespace(channel="feishu", user_id="u-1", conversation_id="c-1")
+
+
+def test_session_lineage_boundary_and_refusal_cases():
+    from agent_py_agent.agent.gateway_parts.control_service import (
+        TurnStopTargetUnavailable,
+        _session_stop_threads,
+    )
+
+    current = _lineage_record("t-current", predecessor="t-prior")
+    prior = _lineage_record("t-prior", successor="t-current")
+    walk = _session_stop_threads(_lineage_store(current, {"t-prior": (prior, None)}), _LINEAGE_SCOPE)
+    assert ([thread.thread_id for thread in walk[0]], walk[1]) == (["t-current", "t-prior"], True)
+    # 干净缺失：前任文件已被删除，读无错误 -> 已核验链的边界。
+    walk = _session_stop_threads(_lineage_store(current, {}), _LINEAGE_SCOPE)
+    assert ([thread.thread_id for thread in walk[0]], walk[1]) == (["t-current"], False)
+    assert _session_stop_threads(_lineage_store(None, {}), _LINEAGE_SCOPE) == ((), True)
+
+    cyclic = _lineage_record("t-prior", predecessor="t-current", successor="t-current")
+    cross_owner = _lineage_record("t-prior", successor="t-current", owner="owner-b")
+    mismatched_record = _lineage_record("t-prior", successor="t-elsewhere")
+    refusals = {
+        "unreadable": _lineage_store(current, {"t-prior": (None, {"code": "simulated_read_error"})}),
+        "cyclic": _lineage_store(current, {"t-prior": (cyclic, None)}),
+        "cross_owner": _lineage_store(current, {"t-prior": (cross_owner, None)}),
+        "mismatch": _lineage_store(current, {"t-prior": (mismatched_record, None)}),
+        "binding_unreadable": _lineage_store(current, {}, binding_error={"code": "simulated_read_error"}),
+    }
+    for case, store in refusals.items():
+        with pytest.raises(TurnStopTargetUnavailable):
+            _session_stop_threads(store, _LINEAGE_SCOPE)
+            pytest.fail(f"{case} lineage must stay a refusal")
 
 
 def test_http_route_slots_preserve_dataclass_behavior():

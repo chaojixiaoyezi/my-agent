@@ -784,6 +784,9 @@ def execute_client_turn_stop(handler_context: object, body: dict) -> Conversatio
     )
 
 
+# LLM: 前任记录干净缺失（读无错误且记录为 None，如 threads.delete/归档后）是已核验链的边界，不是损坏：返回逐环核过的
+#   线程并带 lineage_complete=False 供状态诊断；读错误、成环、跨 owner、发表指针不符仍拒绝。
+# 函数用途: 返回认证会话逐环核验的线程链及链是否完整。
 def _session_stop_threads(store, scope):
     """只沿原线程继任事务确认的通道链回读，拒绝跨 owner 或中断的链。"""
     from ..conversation.store_threads import thread_publication_matches
@@ -794,7 +797,7 @@ def _session_stop_threads(store, scope):
     if error:
         raise TurnStopTargetUnavailable("会话绑定不可读。")
     if current is None:
-        return ()
+        return (), True
     binding = [scope.channel, scope.user_id, scope.conversation_id]
     lineage = {current.thread_id: current}
     while current.metadata.get("predecessor_binding") == binding:
@@ -802,18 +805,20 @@ def _session_stop_threads(store, scope):
         if not isinstance(prior_id, str) or prior_id in lineage:
             raise TurnStopTargetUnavailable("会话继任记录存在冲突。")
         prior, error = store.threads.load_report(prior_id)
+        if error is None and prior is None:
+            return tuple(lineage.values()), False
         if (error or prior is None or (prior.owner_id, prior.owner_home) != (current.owner_id, current.owner_home)
                 or not thread_publication_matches(current.thread_id, prior, binding)):
             raise TurnStopTargetUnavailable("会话前任或归属无法确认。")
         lineage[prior.thread_id] = current = prior
-    return tuple(lineage.values())
+    return tuple(lineage.values()), True
 
 
 def resolve_turn_stop_targets(store, scope: GatewayControlScope) -> tuple[str, ...]:
     requested = scope.metadata.get("target_thread_id")
     execution = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
     if requested or scope.metadata["stop_scope"] == "session":
-        threads = _session_stop_threads(store, scope)
+        threads, _complete = _session_stop_threads(store, scope)
     else:
         current = _conversation_thread_for_scope(store, scope)
         threads = (current,) if current is not None else ()
@@ -3502,17 +3507,19 @@ def _session_background_roots(owner, scope, *, include_current=False):
 
     try:
         store = owner.conversation_store
-        threads = _session_stop_threads(store, scope)
+        threads, lineage_complete = _session_stop_threads(store, scope)
         threads = threads if include_current else threads[1:]
         if not threads:
             return []
         by_id = {thread.thread_id: thread for thread in threads}
         roots = []
 
+        # lineage_complete=False 表示更早的前任已被删除/归档，列出的是仍可核验那一段链上的后台根。
         def add(thread, kind, started_at, *run_ids):
             roots.append({"thread_id": thread.thread_id, "title": thread.title,
                           "kind": kind, "started_at": _background_started_at(started_at),
-                          "run_ids": list(dict.fromkeys(identifier for identifier in run_ids if identifier))})
+                          "run_ids": list(dict.fromkeys(identifier for identifier in run_ids if identifier)),
+                          "lineage_complete": lineage_complete})
 
         for thread in threads:
             links, errors, execution = _control_conversation_links_snapshot(store, thread.thread_id)
