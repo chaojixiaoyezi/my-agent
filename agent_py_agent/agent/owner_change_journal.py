@@ -15,6 +15,28 @@ import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+
+def _exec_bound_child(parent, command):
+    # 独立单线程解释器里设父死亡信号；不在多线程宿主使用 preexec_fn。
+    import ctypes
+    import signal
+
+    library = ctypes.CDLL(None, use_errno=True)
+    if library.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
+        raise SystemExit(126)
+    os.execv(command[0], command)
+
+
+if __name__ == '__main__':
+    if sys.platform != 'linux' or len(sys.argv) < 3:
+        raise SystemExit(2)
+    _exec_bound_child(int(sys.argv[1]), sys.argv[2:])
+
+# 直接执行脚本时只启动子进程，包内导入供正常的日志客户端使用。
+from .common import hot_json
+from .common.direct_socket_io import makefile_rb
+from .common.fast_dataclass import fast_frozen
+
 # 单次监听器响应的字节上限；超限必须回到完整核对，不能截断后签发完整变化集。
 _QUERY_BYTES = 16 * 1024 * 1024
 # 等待原生cookie屏障的毫秒预算；超时不授予增量覆盖证明。
@@ -37,7 +59,8 @@ def _configuration_matches(path):
         return False
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class OwnerChangeBatch:
     clock: str
     paths: tuple[dict, ...]
@@ -97,8 +120,8 @@ class OwnerChangeJournal:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
             channel.settimeout(10)
             channel.connect(str(self._socket))
-            channel.sendall(json.dumps(command).encode() + b'\n')
-            with channel.makefile('rb') as response:
+            channel.sendall(hot_json.dumps(command).encode() + b'\n')
+            with makefile_rb(channel) as response:
                 raw = response.readline(_QUERY_BYTES + 1)
         if len(raw) > _QUERY_BYTES or not raw.endswith(b'\n'):
             raise OSError('observer response exceeds byte budget')
@@ -203,20 +226,3 @@ class OwnerChangeJournal:
             if self._directory is not None:
                 shutil.rmtree(self._directory, ignore_errors=True)
                 self._directory = None
-
-
-def _exec_bound_child(parent, command):
-    # 独立单线程解释器里设父死亡信号；不在多线程宿主使用 preexec_fn。
-    import ctypes
-    import signal
-
-    library = ctypes.CDLL(None, use_errno=True)
-    if library.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
-        raise SystemExit(126)
-    os.execv(command[0], command)
-
-
-if __name__ == '__main__':
-    if sys.platform != 'linux' or len(sys.argv) < 3:
-        raise SystemExit(2)
-    _exec_bound_child(int(sys.argv[1]), sys.argv[2:])

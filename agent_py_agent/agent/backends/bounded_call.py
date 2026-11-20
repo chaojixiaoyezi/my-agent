@@ -49,7 +49,7 @@ class BoundedCallExitUnconfirmedError(RuntimeError):
     def __init__(self, call_id: str, reason: str) -> None:
         self.call_id = call_id
         self.reason = reason
-        super().__init__("有界调用的原线程或清理退出尚未确认")
+        RuntimeError.__init__(self, "有界调用的原线程或清理退出尚未确认")
 
 
 # LLM: 资源冲突与进程容量拒绝都发生在启动前；reason 是机器事实，不按异常文本判断是否重试。
@@ -59,7 +59,7 @@ class BoundedCallBusyError(RuntimeError):
     # 函数用途: 保存稳定的准入拒绝原因。
     def __init__(self, reason: str) -> None:
         self.reason = reason
-        super().__init__("有界调用资源仍被占用" if reason == "resource_busy" else "有界调用保留容量已满")
+        RuntimeError.__init__(self, "有界调用资源仍被占用" if reason == "resource_busy" else "有界调用保留容量已满")
 
 
 # LLM: 原_CALLS独占原Thread/InterruptHandle及出生前固定观察；同一次Context只供错误出处只读核对，不授执行权或运行旧Context。

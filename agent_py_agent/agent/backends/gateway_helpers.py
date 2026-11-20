@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from ..concurrency.daemon_executor import DeferredCall, SharedDeferredCalls
 from . import keepalive_transport
 from .errors import (
@@ -149,7 +151,8 @@ _PROVIDER_ATTEMPT_OBSERVER = threading.local()
 
 # LLM: 不可变信封独占本请求期限/重试/大小策略；None 保持原生成合同，显式零重试不可被任何传输层重试放大。
 # 类用途: 保存一次 provider HTTP 请求、可选物理并发上限及严格限制，OAuth/决策仍可禁止重定向。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayRequest:
     """Immutable request envelope for one provider HTTP call."""
 
@@ -714,7 +717,7 @@ def _provider_is_interrupted() -> bool:
 #   按子树规范化，不能在编码器里整包重排。
 # 函数用途: 把请求载荷（或其中一段）编码成与实际发送一致的 UTF-8 JSON 字节，无网络副作用。
 def gateway_request_body(payload: object) -> bytes:
-    return json.dumps(payload).encode("utf-8")
+    return hot_json.dumps(payload).encode("utf-8")
 
 
 def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
@@ -882,12 +885,12 @@ def _request_retry_wait(request: GatewayRequest, seconds: float) -> None:
 # 函数用途: 清理当前 HTTP 错误响应并决定是否重试，不因错误体缓存改变零开关行为。
 def _request_http_retry(exc: urllib.error.HTTPError, request: GatewayRequest, attempt: int, last_attempt: int) -> bool:
     if request.max_retries == 0:
-        if not isinstance(getattr(exc, _HTTP_ERROR_DETAIL_ATTR, None), str):
+        if not isinstance(getattr(exc, "_my_agent_provider_error_detail", None), str):
             setattr(exc, _HTTP_ERROR_DETAIL_ATTR, "")
         _GatewayResponseGuard(exc).abort()
         return False
     admitted_body_cached = _physical_admission_enabled(request) and isinstance(
-        getattr(exc, _HTTP_ERROR_DETAIL_ATTR, None), str)
+        getattr(exc, "_my_agent_provider_error_detail", None), str)
     if (request.deadline is not None or request.max_response_bytes is not None) and not admitted_body_cached:
         with _gateway_response_scope(exc) as (response, guard):
             with _provider_interrupt_callback(guard.abort), _request_deadline_scope(request, guard):
@@ -963,7 +966,7 @@ def _gateway_urlopen_unlimited(req: urllib.request.Request, request: GatewayRequ
     target = keepalive_target(request.connection_pool, req.full_url)
     open_guard = _GatewayOpenGuard()
     transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard, request.deadline,
-                                             getattr(req, _ATTEMPT_TIMING_ATTR, None))
+                                             getattr(req, "_my_agent_attempt_timing", None))
     handlers = [
         _provider_proxy_handler(req.full_url),
         _SplitTimeoutHTTPHandler(transport_options),
@@ -1145,7 +1148,8 @@ def _abort_http_connection(connection: Any) -> None:
 # LLM: 双超时、可选绝对期限和 attempt-local guard 向 urllib 连接原样传递，连接完成后只使用剩余时间。
 #   timing 是本尝试的分段计时器（未开启时为 None），只属于当前 attempt。
 # 类用途: 汇总一次 provider open 的连接/读取限制、精确中断句柄及可选分段计时。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _SplitTimeoutOptions:
     connect_timeout: float
     read_timeout: float
@@ -1173,7 +1177,8 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
         del timeout
         self._provider_read_timeout = transport_options.read_timeout
         self._provider_deadline = transport_options.deadline
-        super().__init__(
+        http.client.HTTPConnection.__init__(
+            self,
             host,
             port=port,
             timeout=transport_options.connect_timeout,
@@ -1190,7 +1195,7 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
     def connect(self) -> None:
         if self._provider_open_guard is not None and self._provider_open_guard.aborted:
             raise InterruptedError("模型接口请求已被用户停止")
-        super().connect()
+        http.client.HTTPConnection.connect(self)
         if self._provider_open_guard is not None and self._provider_open_guard.aborted:
             _abort_http_connection(self)
             raise InterruptedError("模型接口请求已被用户停止")
@@ -1219,7 +1224,8 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
         del timeout
         self._provider_read_timeout = transport_options.read_timeout
         self._provider_deadline = transport_options.deadline
-        super().__init__(
+        http.client.HTTPSConnection.__init__(
+            self,
             host,
             port=port,
             timeout=transport_options.connect_timeout,
@@ -1237,7 +1243,7 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
         if self._provider_open_guard is not None and self._provider_open_guard.aborted:
             raise InterruptedError("模型接口请求已被用户停止")
-        super().connect()
+        http.client.HTTPSConnection.connect(self)
         if self._provider_open_guard is not None and self._provider_open_guard.aborted:
             _abort_http_connection(self)
             raise InterruptedError("模型接口请求已被用户停止")
@@ -1255,7 +1261,7 @@ class _SplitTimeoutHTTPHandler(urllib.request.HTTPHandler):
         self,
         transport_options: _SplitTimeoutOptions,
     ):
-        super().__init__()
+        urllib.request.HTTPHandler.__init__(self)
         self.transport_options = transport_options
 
     # LLM: do_open 参数必须携带 open_guard，确保连接构造一发生就可被外层 typed interrupt 访问。
@@ -1279,7 +1285,7 @@ class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
         transport_options: _SplitTimeoutOptions,
     ):
         # 标准库 context=None 时每个 handler 都会重新加载整套 CA（约 0.7 MB、约 20 ms CPU），这里复用共享上下文。
-        super().__init__(context=keepalive_transport._tls_context())
+        urllib.request.HTTPSHandler.__init__(self, context=keepalive_transport._tls_context())
         self.transport_options = transport_options
 
     # LLM: do_open 必须把同一 guard 和 SSL context 一起传给连接，不得在 handler 内另建取消 token。
@@ -1376,7 +1382,7 @@ def _dump_provider_rejection(exc: urllib.error.HTTPError) -> None:
             "response_body": redact_sensitive_text(_http_error_detail(exc)[:_DUMP_SCAN_CHARS])[:4000],
         }
         with open(target, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(hot_json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         return
 
@@ -1545,8 +1551,11 @@ def _network_exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
             continue
         seen.add(id(current))
         result.append(current)
-        for name in ("reason", "__cause__", "__context__"):
-            nested = getattr(current, name, None)
+        for nested in (
+            getattr(current, "reason", None),
+            getattr(current, "__cause__", None),
+            getattr(current, "__context__", None),
+        ):
             if isinstance(nested, BaseException):
                 pending.append(nested)
     return tuple(result)
@@ -1565,13 +1574,13 @@ def _network_error_text(exc: BaseException) -> str:
 
 def _provider_error_indicates_context_window(detail: str) -> bool:
     payload = _provider_error_payload(detail)
-    structured_text = json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload else ""
+    structured_text = hot_json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload else ""
     text = f"{structured_text} {detail or ''}".lower()
     return any(marker in text for marker in _CONTEXT_WINDOW_ERROR_MARKERS)
 
 
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
-    cached = getattr(exc, _HTTP_ERROR_DETAIL_ATTR, None)
+    cached = getattr(exc, "_my_agent_provider_error_detail", None)
     if isinstance(cached, str):
         return cached
     try:

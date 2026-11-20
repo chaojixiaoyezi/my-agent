@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
+from ..common.fast_time import utc_now_iso as _utc_now_iso
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from .errors import (
@@ -63,7 +64,8 @@ class ModelResponse:
 
 # LLM: 后端连接、采样和物理并发上限是工作片冻结快照；与模型名/密钥一起缓存，流式请求中不可热改。
 # 类用途: 保存 HTTP 后端的连接、采样、媒体预算和默认关闭的进程内物理并发限制。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
 
@@ -106,7 +108,8 @@ class BackendOptions:
 #   reasoning_effort 只会是 low/medium/high/xhigh/max/ultra 或空串（off 已折成 thinking_disabled），由后端按控制方式及声明换算字段。
 #   is_probe 只由宿主探测入口设置，不从 prompt/工具选择理由推断，不进入供应商 payload 或污染后续业务请求。
 # 类用途: 携带一次模型请求的宿主 system 指令、思考开关、智能程度档位和首个流式事件等待预算，不混入用户正文或工具历史。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ProviderRequestOptions:
     system_instruction: str = ""
     thinking_disabled: bool = False
@@ -336,9 +339,3 @@ class EchoBackend(BaseBackend):
             "4. 输出可验证结果。"
         )
         return ModelResponse(text=text, backend=self.name)
-
-
-# LLM: 后端能力证据使用 UTC 观测时间；它不是执行状态或调度时钟，需保持工具探针格式。
-# 函数用途: 生成带时区的 ISO 时间，供能力观测记录使用。
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
