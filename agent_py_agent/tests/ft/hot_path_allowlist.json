@@ -178,15 +178,11 @@
     },
     "agent/gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer.__init__::super0": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
+      "reason": "cold-path: listener construction preserves cooperative mixin initialization order"
     },
     "agent/gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer.server_close::super0": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
-    },
-    "agent/gateway_parts/bounded_http_server.py::_busy_response_bytes::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
+      "reason": "cold-path: listener shutdown preserves cooperative mixin cleanup order"
     },
     "agent/gateway_parts/client_session_list.py::_CountPath.__getattr__::dyn_getattr": {
       "count": 1,
@@ -222,7 +218,7 @@
     },
     "agent/gateway_parts/http_body_readiness.py::PrefetchedSocket.__getattr__::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
+      "reason": "cold-path: compatible socket delegation for optional methods; normal reads, writes and shutdown use explicit methods"
     },
     "agent/gateway_parts/http_handlers.py::_http_idempotent_request_identity::json_dumps_default": {
       "count": 1,
@@ -254,31 +250,15 @@
     },
     "agent/gateway_parts/http_lanes.py::HTTPLaneRouter.__init__::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
-    "agent/gateway_parts/http_lanes.py::_CancellableWorkQueue.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
-    "agent/gateway_parts/http_lanes.py::_CancellableWorkQueue._get::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
-    "agent/gateway_parts/http_service.py::GatewayHTTPHandler._dispatch_route::dyn_getattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M22"
-    },
-    "agent/gateway_parts/http_service.py::GatewayHTTPHandler._send_json::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
+      "reason": "cold-path: start the fixed readiness shards once per listener"
     },
     "agent/gateway_parts/http_service.py::GatewayHTTPServer.start::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
+      "reason": "cold-path: create one accept thread at listener startup"
     },
     "agent/gateway_parts/http_service.py::GatewayLocalCredentialRequired.__init__::super0": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M22"
+      "reason": "cold-path: startup error construction preserves cooperative exception MRO"
     },
     "agent/gateway_parts/request_entry_admission.py::require_request_execution::dyn_getattr": {
       "count": 1,

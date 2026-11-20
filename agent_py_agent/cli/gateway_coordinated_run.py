@@ -228,7 +228,9 @@ def _prepare_coordinated_resources(context):
         if server is not None:
             server.agent = agent
             port = server.server.server_address[1]
-            state_request = GatewayThreadsRequest(context=context, requeued=requeued, failed=failed, http_port=port)
+            state_request = GatewayThreadsRequest(
+                context=context, requeued=requeued, failed=failed, http_port=port, http_server=server,
+            )
             publish_coordinated_state(context, api._build_run_state(state_request, pid, "starting"))
             workers = CoordinatorWorkers(control, context.config_path.resolve(), port)
             context.drain_runtime.retain_workers(workers)

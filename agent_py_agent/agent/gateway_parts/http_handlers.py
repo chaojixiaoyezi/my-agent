@@ -99,6 +99,7 @@ from .control_service import (
 from .daemon_control import get_running_pid, write_targeted_gateway_stop_request
 from .event_points import prompt_queued
 from .execution_target import execution_target_payload
+from .http_lanes import lane_queue_ms
 from .input_delivery_service import (
     bind_gateway_input_active_locked,
     gateway_input_guidance_binding,
@@ -2640,6 +2641,8 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "user_id": context.user_id,
         "conversation": _http_conversation_payload(context),
     }
+    if (queued_ms := lane_queue_ms.get()) is not None:
+        payload["lane_queue_ms"] = queued_ms
     if "verbose_level" in context.body:
         payload["verbose_level"] = context.body["verbose_level"]
     system_task = context.body.get("system_task")

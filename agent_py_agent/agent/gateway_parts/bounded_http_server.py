@@ -13,22 +13,25 @@ with a fixed daemon pool and a hard outstanding-request bound.
 
 from __future__ import annotations
 
-import json
 import socket
 import ssl
+import sys
+import sysconfig
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from contextlib import nullcontext
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from ..common import hot_json
 from ..common.http_listener import BoundAddressMixin
 from ..concurrency import DurableDaemonThreadPoolExecutor
 from ..settings.config import AgentConfig
 from .http_body_readiness import HTTP_READY_PREFIX_BYTES
-from .http_lanes import HTTPLaneRouter
+from .http_lanes import HTTP_STOP_LANE_ROUTES, HTTPLaneRouter, lane_queue_ms
 from .multiprocess_http_transport import (
     HTTPBirthGateBusy,
     http_request_work_scope,
@@ -39,7 +42,7 @@ from .multiprocess_http_transport import (
 
 # 503 的正文不含任何用户身份，所有满载连接复用同一份有限报文。
 def _busy_response_bytes():
-    payload = json.dumps(
+    payload = hot_json.dumps(
         {
             "ok": False,
             "error_code": "GATEWAY_HTTP_BUSY",
@@ -105,11 +108,13 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
         config: Any = None,
         control_lane_workers: int = 0,
         pending_connection_limit: int = 0,
+        readiness_enabled: bool = False,
     ) -> None:
         require_http_worker_source(drain_runtime, drain_resource, request_worker_initializer, request_worker_failure)
         config = _gateway_http_config(request_handler_class) if config is None else config
         self.request_queue_size = max(1, int(getattr(config, "gateway_http_listen_backlog", self.request_queue_size)))
-        self.max_request_workers = max(1, int(getattr(config, "gateway_http_max_request_workers", self.max_request_workers)))
+        self.configured_max_request_workers = int(getattr(config, "gateway_http_max_request_workers", self.max_request_workers))
+        self.max_request_workers = max(1, self.configured_max_request_workers)
         self.max_outstanding_requests = max(self.max_request_workers, int(getattr(
             config, "gateway_http_max_outstanding_requests", self.max_outstanding_requests)))
         # 缺字段时原样继承子类超时；配置约束由权威加载器校验，不新增兼容路径的最小时限。
@@ -142,16 +147,47 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
                 request_handler_class,
                 bind_and_activate=bind_and_activate,
             )
-        # 只有无排空运行时才建立独立执行器，原多进程设施来源和绑定保持不变。
-        if int(control_lane_workers) > 0 and drain_runtime is None:
-            self._lanes = HTTPLaneRouter(
-                self, control_workers=int(control_lane_workers),
-                pending_limit=int(pending_connection_limit) if int(pending_connection_limit) > 0 else capacity,
-                header_timeout_seconds=float(self.request_socket_timeout),
-                queue_timeout_seconds=float(self.request_queue_timeout), control_capacity=capacity,
-            )
+        # 协调器预读可分片，但处理器仍须使用原排空组登记的唯一 worker 池。
+        independent_workers = max(0, int(control_lane_workers)) if drain_runtime is None else 0
+        if readiness_enabled or independent_workers:
+            try:
+                with original_http_birth(drain_runtime):
+                    self._lanes = HTTPLaneRouter(
+                        self, control_workers=independent_workers,
+                        pending_limit=int(pending_connection_limit) if int(pending_connection_limit) > 0 else capacity,
+                        header_timeout_seconds=self.request_socket_timeout,
+                        queue_timeout_seconds=self.request_queue_timeout,
+                        control_capacity=capacity, max_workers=workers, drain_runtime=drain_runtime,
+                    )
+            except BaseException:
+                self.server_close()
+                raise
 
-    # LLM: 在途数包含运行和排队；从接收时计排队时限，socket 超时只约束传输，不中止已接收的持久任务。
+    def effective_capacity(self) -> dict:
+        lanes = self._lanes
+        control_pool = lanes._control_executor if lanes is not None else None
+        control_workers = control_pool._max_workers if control_pool is not None else 0
+        return {
+            "max_request_workers": self._request_executor._max_workers,
+            "configured_max_request_workers": self.configured_max_request_workers,
+            "max_outstanding_requests": self.max_outstanding_requests,
+            "control_lane_workers": control_workers,
+            "readiness_shards": len(lanes.shards) if lanes is not None else 0,
+            "stop_lane_routes": sorted(f"{method} {route}" for method, route in HTTP_STOP_LANE_ROUTES)
+            if control_workers else [],
+            "queue_timeout_seconds": self.request_queue_timeout,
+            "gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
+            "free_threaded_build": bool(sysconfig.get_config_var("Py_GIL_DISABLED")),
+        }
+
+    def _lane_birth(self):
+        runtime = self._request_drain_runtime
+        if runtime is not self._request_drain_runtime_origin:
+            raise ValueError("http_original_runtime_required")
+        return (original_http_birth(runtime, timeout_seconds=self.http_birth_gate_timeout_seconds)
+                if runtime is not None else nullcontext())
+
+    # LLM: 在途数包含运行和排队；从提交时计排队时限，socket 超时只约束传输，不中止已接收的持久任务。
     # LLM: 懒submit可能创建Thread，须同原runtime的controller→lease→runtime有界末门；超时未submit只回503，不保未知出生；submit异常仍保原group责任。
     # 函数用途: 接收有界连接，提交失败不丢原Thread责任或把中断误当繁忙重试。
     def process_request(
@@ -179,13 +215,13 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
                     time.monotonic(),
                 )
         except HTTPBirthGateBusy:
-            self._request_slots.release()
+            self._release_request_slot()
             self._reject_overloaded_request(request)
             return
         except (RuntimeError, OSError) as error:
             if self._request_worker_failure is not None:
                 self._request_worker_failure(error)
-            self._request_slots.release()
+            self._release_request_slot()
             self._reject_overloaded_request(request)
             return
         except BaseException as error:
@@ -193,7 +229,7 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
                 if self._request_worker_failure is not None:
                     self._request_worker_failure(error)
             finally:
-                self._request_slots.release()
+                self._release_request_slot()
                 try:
                     self.shutdown_request(request)
                 finally:
@@ -211,12 +247,21 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
         self,
         request: socket.socket,
         client_address: tuple[str, int],
-        accepted_at: float,
+        enqueued_at: float,
     ) -> None:
         # 与明文selector使用同一绝对截止，后备worker也不能放行恰到期的连接。
-        if time.monotonic() >= accepted_at + self.request_queue_timeout:
+        start = time.monotonic()
+        if start >= enqueued_at + self.request_queue_timeout:
             self._reject_overloaded_request(request)
             return
+        token = lane_queue_ms.set(int((start - enqueued_at) * 1000))
+        try:
+            self._finish_http_request(request, client_address)
+        finally:
+            lane_queue_ms.reset(token)
+            self.shutdown_request(request)
+
+    def _finish_http_request(self, request, client_address):
         try:
             if self._request_drain_runtime is None and self._request_drain_runtime_origin is None:
                 self.finish_request(request, client_address)
@@ -227,8 +272,6 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
             pass
         except Exception:
             self.handle_error(request, client_address)
-        finally:
-            self.shutdown_request(request)
 
     # LLM: A queued request cancelled during shutdown never reaches the worker,
     # so its socket must be closed here. Slot release happens exactly once for
@@ -241,7 +284,14 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
     ) -> None:
         if future.cancelled():
             self.shutdown_request(request)
-        self._request_slots.release()
+        self._release_request_slot()
+
+    def _release_request_slot(self):
+        lanes = self._lanes
+        if lanes is None:
+            self._request_slots.release()
+        else:
+            lanes.release_lane('general', self._request_slots)
 
     # LLM: Overload is transport state, not task failure. Return a typed,
     # credential-free 503 with Retry-After and never enter a product handler.

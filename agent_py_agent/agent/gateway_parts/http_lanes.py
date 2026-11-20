@@ -1,5 +1,4 @@
-# LLM: 仅为无排空运行时的明文连接分类；鉴权和业务授权仍由原处理器负责。
-# 模块用途: 用单选择器有界预读运输前缀，分别保护控制与完整普通请求容量，并主动回收排队超时。
+# 模块用途: 分片预读明文连接，保留原请求执行来源及有界工作容量。
 from __future__ import annotations
 
 import selectors
@@ -7,12 +6,18 @@ import socket
 import threading
 import time
 from collections import deque
+from contextvars import ContextVar
 from functools import partial
-from queue import Queue
+from heapq import heapify, heappop, heappush
+from itertools import count
 
 from ..concurrency import DurableDaemonThreadPoolExecutor
+from ..concurrency.lifo_work_queue import CancellableWorkQueue as _CancellableWorkQueue
 from .http_body_readiness import HTTP_READY_PREFIX_BYTES, PrefetchedSocket, complete_request_length
 from .http_routes import match_gateway_http_route
+from .multiprocess_http_transport import HTTPBirthGateBusy
+
+lane_queue_ms: ContextVar[int | None] = ContextVar('gateway_http_lane_queue_ms', default=None)
 
 # 就绪分类时最多窥视的请求首行字节数：只用于选择车道，首行更长时按普通车道处理，不影响请求本身。
 HTTP_CONTROL_PEEK_BYTES = 8192
@@ -81,10 +86,10 @@ def classify_peeked_request(data: bytes) -> str:
 class _LaneTicket:
     # LLM: 提交前创建，future由提交者设置；所有权从QUEUED开始。
     # 函数用途: 保存一次连接移交及其单调状态。
-    def __init__(self, request, client_address, accepted_at, lane):
+    def __init__(self, request, client_address, lane):
         self.request = request
         self.client_address = client_address
-        self.accepted_at = accepted_at
+        self.enqueued_at = 0.0
         self.lane = lane
         self.future = None
         self.executor = None
@@ -145,426 +150,411 @@ class _LaneTicket:
             server._reject_without_wait(self.request)
 
 
-# LLM: 3.14t 的 mimalloc 按线程保留峰值；FIFO 唤醒会把短请求轮转到池内每个空闲线程，最终每个线程都长到峰值。
-#   这里只改“哪个等待线程接手”（最近空闲者优先），条目仍按 Queue 原 FIFO 出队，容量、超时与取消语义不变。
-# 类用途: 让 put 唤醒最近进入等待的消费者，使短请求集中在少数热线程上。
-class _LifoWakeCondition(threading.Condition):
-    # 字段用途: 已唤醒但尚未取项的等待者数；只在同一 mutex 内增减，供扩容判定计入即将接手的 worker。
-    pending_wakeups = 0
+class _Pending:
+    """前缀和时限仅由其选择器线程访问。"""
 
-    # 函数用途: 与标准 notify 相同的唤醒/计数规则，只从等待表尾部（最近等待者）开始。
-    def notify(self, n: int = 1) -> None:
-        if not self._is_owned():
-            raise RuntimeError("cannot notify on un-acquired lock")
-        waiters = self._waiters
-        while waiters and n > 0:
-            waiter = waiters.pop()
+    def __init__(self, sock, addr, deadline):
+        self.sock = sock
+        self.addr = addr
+        self.deadline = deadline
+        self.prefix = bytearray()
+        self.lane = None
+        self.length = None
+        self.registered = False
+
+
+class _ReadinessShard:
+    def __init__(self, router):
+        self.router = router
+        self._lock = threading.Lock()
+        self.incoming = deque()
+        self.pending = {}
+        self.waiting = {}
+        self.queued = {}
+        self._deadlines = []
+        self._sequence = count()
+        self._selector = selectors.DefaultSelector()
+        try:
+            self.wake_read, self.wake_write = socket.socketpair()
+            self.wake_read.setblocking(False)
+            self.wake_write.setblocking(False)
+            self._selector.register(self.wake_read, selectors.EVENT_READ)
+        except BaseException:
+            self._close_selector()
+            raise
+
+    def _close_selector(self):
+        self._selector.close()
+        for sock in (getattr(self, 'wake_read', None), getattr(self, 'wake_write', None)):
+            if sock is not None:
+                sock.close()
+
+    def add(self, pending):
+        with self._lock:
+            if self.router._closing.is_set():
+                return False
+            first = not self.incoming
+            self.incoming.append(pending)
+        if first:
+            self.wake()
+        return True
+
+    def wake(self):
+        try:
+            self.wake_write.send(b'\0')
+        except OSError:
+            pass
+
+    def _register_incoming(self):
+        with self._lock:
+            incoming, self.incoming = self.incoming, deque()
+        for item in incoming:
+            key = next(self._sequence)
+            self.pending[key] = item
             try:
-                waiter.release()
-            except RuntimeError:
-                continue  # 已被前一次 notify 释放但尚未移除的等待者，不计入本次唤醒。
-            n -= 1
-            self.pending_wakeups += 1
+                item.sock.setblocking(False)
+                self._selector.register(item.sock, selectors.EVENT_READ, key)
+                item.registered = True
+                self._schedule(item.deadline, key, False)
+            except (OSError, ValueError):
+                self._drop(key, item)
+
+    def _schedule(self, deadline, key, queued):
+        heappush(self._deadlines, (deadline, key, queued))
+        # 最早项仍有效时，后面的失效项也最多占两倍原准入预算。
+        if len(self._deadlines) > 2 * (self.router.pending_limit + self.router.queue_capacity):
+            with self._lock:
+                self._deadlines = [
+                    entry for entry in self._deadlines
+                    if entry[1] in (self.queued if entry[2] else self.pending)
+                ]
+            heapify(self._deadlines)
+
+    def track_ticket(self, ticket):
+        key = next(self._sequence)
+        with self._lock:
+            self.queued[key] = ticket
+        self._schedule(ticket.enqueued_at + self.router.queue_timeout_seconds, key, True)
+        return key
+
+    def retire_ticket(self, key):
+        with self._lock:
+            self.queued.pop(key, None)
+
+    def _expire_due(self, now):
+        while self._deadlines:
+            deadline, key, queued = self._deadlines[0]
+            if queued:
+                with self._lock:
+                    item = self.queued.get(key)
+            else:
+                item = self.pending.get(key)
+            # 同一序号只代表一次移交，晚到的过期事件无需查找旧的FD。
+            if item is not None and deadline > now:
+                return max(0.0, deadline - time.monotonic())
+            heappop(self._deadlines)
+            if item is None:
+                continue
+            if queued:
+                if item.is_queued() and item.claim_expired():
+                    item.reject_once(self.router.server)
+                    item.future.cancel()
+            else:
+                self._drop(key, item)
+        return None
+
+    def _unregister(self, item):
+        if item.registered:
+            self._selector.unregister(item.sock)
+            item.registered = False
+
+    def _drop(self, key, item, *, close=True):
+        self._unregister(item)
+        del self.pending[key]
+        if self.waiting.pop(key, None) is not None and not self.waiting:
+            self.router.body_wait_ended(self)
+        self.router.release_pending()
+        if close:
+            self.router.server.shutdown_request(item.sock)
+
+    def _handoff(self, key, item, lane):
+        self._drop(key, item, close=False)
+        try:
+            replay = PrefetchedSocket(item.sock, item.prefix)
+        except BaseException:
+            self.router.server.shutdown_request(item.sock)
+            if lane == 'stream':
+                self.router.release_lane(lane, self.router.server._request_slots)
+            raise
+        self.router._submit(lane, replay, item.addr, self)
+
+    def _offer_body(self, key, item):
+        if self.router.reserve_body(self):
+            self._handoff(key, item, 'stream')
+            return True
+        self.waiting[key] = item
+        return False
+
+    def _read_ready(self, key, item):
+        if time.monotonic() >= item.deadline:
+            self._drop(key, item)
+            return
+        prefix = item.prefix
+        try:
+            data = item.sock.recv(HTTP_READY_PREFIX_BYTES - len(prefix))
+        except BlockingIOError:
+            return
+        except OSError:
+            self._drop(key, item)
+            return
+        if not data:
+            self._drop(key, item)
+            return
+        prefix.extend(data)
+        if item.lane is None:
+            if b'\n' not in data and len(prefix) < HTTP_CONTROL_PEEK_BYTES:
+                return
+            item.lane = classify_peeked_request(prefix)
+        if item.lane == 'control':
+            self._handoff(key, item, control_sublane(prefix))
+            return
+        # 单 worker 下不留完整请求专用容量，保留原先首行分类后尽早交给处理器的行为。
+        if not self.router.body_readiness:
+            self._handoff(key, item, 'general')
+            return
+        if item.length is None:
+            item.length = complete_request_length(
+                prefix, single_request=self.router.single_request,
+                search_from=max(0, len(prefix) - len(data) - 3),
+            )
+        if item.length and len(prefix) >= item.length:
+            self._handoff(key, item, 'general')
+        elif item.length is not None or len(prefix) == HTTP_READY_PREFIX_BYTES:
+            if not self._offer_body(key, item) and len(prefix) == HTTP_READY_PREFIX_BYTES:
+                # 前缀预算已满；下一次只响应容量释放或到期，避免可读FD忙转。
+                self._unregister(item)
+
+    def _drain_wake(self):
+        try:
+            while self.wake_read.recv(HTTP_CONTROL_PEEK_BYTES):
+                pass
+        except BlockingIOError:
+            pass
+
+    def run(self):
+        try:
+            while not self.router._closing.is_set():
+                self._register_incoming()
+                timeout = self._expire_due(time.monotonic())
+                for key, _mask in self._selector.select(timeout):
+                    if self.router._closing.is_set():
+                        break
+                    if key.data is None:
+                        self._drain_wake()
+                        while self.waiting:
+                            pending_key = next(iter(self.waiting))
+                            pending = self.waiting[pending_key]
+                            if time.monotonic() >= pending.deadline:
+                                self._drop(pending_key, pending)
+                            elif not self._offer_body(pending_key, pending):
+                                break
+                    elif (item := self.pending.get(key.data)) is not None:
+                        self._read_ready(key.data, item)
+        finally:
+            self.router._stop_admission()
+            with self._lock:
+                incoming, self.incoming = self.incoming, deque()
+                tickets = tuple(self.queued.values())
+            try:
+                for item in incoming:
+                    self.router.release_pending()
+                    self.router.server.shutdown_request(item.sock)
+                for key, item in tuple(self.pending.items()):
+                    self._drop(key, item)
+                for ticket in tickets:
+                    ticket.future.cancel()
+            finally:
+                self._deadlines.clear()
+                self._close_selector()
 
 
-# LLM: 原daemon执行器沿用CPython WorkItem；Future取消本身不会删除排队项，必须在归还槽位前移除。
-# 类用途: 为这两个运输池提供可按原对象身份丢弃的工作队列，避免取消占位随历史增长。
-class _CancellableWorkQueue(Queue):
-    # 函数用途: 建立原 Queue 后只把 not_empty 换成最近空闲优先的唤醒条件，共用同一把 mutex。
-    def __init__(self, maxsize: int = 0) -> None:
-        super().__init__(maxsize)
-        self.not_empty = _LifoWakeCondition(self.mutex)
-
-    # LLM: 任何取项（被唤醒者或抢先的 get_nowait）都消耗一次待接手唤醒；被抢的唤醒者会重新进入等待表，计数仍一致。
-    # 函数用途: 在原 mutex 内出队并扣减一个待接手唤醒。
-    def _get(self):
-        self.not_empty.pending_wakeups = max(0, self.not_empty.pending_wakeups - 1)
-        return super()._get()
-
-    # LLM: 只在原 mutex 内比较排队项与（挂起 + 已唤醒未取项）worker 数，不唤醒、不取项；多算只会多起一个线程。
-    # 函数用途: 告诉执行器当前排队工作是否超过真实空闲容量，即是否需要新 worker。
-    def needs_worker(self) -> bool:
-        with self.mutex:
-            return len(self.queue) > len(self.not_empty._waiters) + self.not_empty.pending_wakeups
-
-    # LLM: 仅删除尚未被worker取走的原WorkItem，不调用Future或用户代码；运行中的项由原CAS处理。
-    # 函数用途: 在取消或提交中断后移除对应的物理排队项。
-    def discard(self, owner) -> None:
-        with self.mutex:
-            for item in self.queue:
-                args = getattr(item, 'args', ())
-                # CPython新worker context将原(fn, args, kwargs)保存在task中。
-                task = getattr(item, 'task', None)
-                if not args and isinstance(task, tuple) and len(task) == 3:
-                    args = task[1]
-                if getattr(item, 'future', None) is owner or (args and args[0] is owner):
-                    self.queue.remove(item)
-                    self.not_empty.pending_wakeups = max(0, self.not_empty.pending_wakeups - 1)
-                    self.unfinished_tasks -= 1
-                    self.not_full.notify()
-                    return
-
-
-# LLM: selector仅由readiness线程注册和注销；锁仅保护有界队列与表，不跨submit或handler。
-# 类用途: 按有界前缀的完整程度，把明文连接送往原独立车道及普通保留位置。
 class HTTPLaneRouter:
-    # LLM: 容量与期限由组合根注入；唤醒使用跨平台socketpair，不增加周期轮询。
-    # 函数用途: 建立独立控制池并启动唯一就绪观察线程。
+    """分片观察明文连接，按原车道提交并独立计算排队期限。"""
+
     def __init__(self, server, *, control_workers: int, pending_limit: int,
-                 header_timeout_seconds: float, queue_timeout_seconds: float, control_capacity: int):
+                 header_timeout_seconds: float, queue_timeout_seconds: float, control_capacity: int,
+                 max_workers: int, drain_runtime=None):
         self.server = server
         self.pending_limit = pending_limit
         self.header_timeout_seconds = header_timeout_seconds
         self.queue_timeout_seconds = queue_timeout_seconds
-        self._lock = threading.Lock()
         self._closing = threading.Event()
-        self._incoming = deque()
-        self._pending = {}
-        self._prefixes = {}
-        self._frame_lengths = {}
-        self._classifications = {}
-        self._headers_ready_at = {}
-        self._mixed_admitted = 0
-        workers = server.max_request_workers
-        self._body_readiness = workers > 1
-        self._mixed_workers = workers - 1 if self._body_readiness else workers
-        self._single_request = bool(getattr(server.RequestHandlerClass, 'single_request_connection', False)
-                                    or server.RequestHandlerClass.protocol_version == 'HTTP/1.0')
-        self._ready_executor = None
-        if self._body_readiness:
-            server._request_executor._max_workers = self._mixed_workers
-            self._ready_executor = DurableDaemonThreadPoolExecutor(
-                max_workers=1, thread_name_prefix='gateway-http-ready')
-
-        self._queued = {'general': deque(), 'control': deque(), 'ready': deque(), 'status': deque(), 'stop': deque()}
-        self._selector = selectors.DefaultSelector()
-        self._wake_read, self._wake_write = socket.socketpair()
-        self._wake_read.setblocking(False)
-        self._wake_write.setblocking(False)
-        self._selector.register(self._wake_read, selectors.EVENT_READ, None)
-        self._control_executor = DurableDaemonThreadPoolExecutor(
-            max_workers=control_workers, thread_name_prefix='gateway-http-control')
-        # 状态读与停止各有独立小池及在途槽位：控制池被慢命令占满时它们既不排队也不被准入拒绝。
-        self._status_executor = DurableDaemonThreadPoolExecutor(
-            max_workers=HTTP_FAST_LANE_WORKERS_COUNT, thread_name_prefix='gateway-http-status')
-        self._stop_executor = DurableDaemonThreadPoolExecutor(
-            max_workers=HTTP_FAST_LANE_WORKERS_COUNT, thread_name_prefix='gateway-http-stop')
-        # 构造期尚无worker，队列必须在首次submit前固定，原执行器及类属性不变。
+        self._pending_slots = threading.BoundedSemaphore(pending_limit)
+        self._body_lock = threading.Lock()
+        self._body_waiters = {}
+        self._streaming = 0
+        self.body_readiness = max_workers > 1
+        self._body_limit = max(1, max_workers - 1)
+        self.single_request = bool(getattr(server.RequestHandlerClass, 'single_request_connection', False)
+                                   or server.RequestHandlerClass.protocol_version == 'HTTP/1.0')
+        self._lane_executors = {}
+        self._lane_slots = {}
+        self.queue_capacity = server.max_outstanding_requests
         server._request_executor._work_queue = _CancellableWorkQueue()
-        self._control_executor._work_queue = _CancellableWorkQueue()
-        self._status_executor._work_queue = _CancellableWorkQueue()
-        self._stop_executor._work_queue = _CancellableWorkQueue()
-        if self._ready_executor is not None:
-            self._ready_executor._work_queue = _CancellableWorkQueue()
-        self._control_slots = threading.BoundedSemaphore(control_capacity)
-        self._lane_executors = {'control': self._control_executor, 'status': self._status_executor,
-                                'stop': self._stop_executor, 'ready': self._ready_executor}
-        self._lane_slots = {'control': self._control_slots,
-                            'status': threading.BoundedSemaphore(control_capacity),
-                            'stop': threading.BoundedSemaphore(control_capacity)}
-        self._thread = threading.Thread(target=self._loop, name='gateway-http-readiness', daemon=True)
-        self._thread.start()
+        if control_workers:
+            for lane, workers in (('control', control_workers), ('status', HTTP_FAST_LANE_WORKERS_COUNT),
+                                  ('stop', HTTP_FAST_LANE_WORKERS_COUNT)):
+                executor = DurableDaemonThreadPoolExecutor(max_workers=workers, thread_name_prefix=f'gateway-http-{lane}')
+                executor._work_queue = _CancellableWorkQueue()
+                self._lane_executors[lane] = executor
+                self._lane_slots[lane] = threading.BoundedSemaphore(control_capacity)
+                self.queue_capacity += control_capacity
+        self._control_executor = self._lane_executors.get('control')
+        self._status_executor = self._lane_executors.get('status')
+        self._stop_executor = self._lane_executors.get('stop')
 
-    # LLM: 接收线程不读客户端，也不等待容量；满载时只尝试一次非阻塞写回。
-    # 函数用途: 有界登记新连接并唤醒选择器。
-    def admit(self, request, client_address) -> None:
-        with self._lock:
-            rejected = self._closing.is_set() or len(self._pending) + len(self._incoming) >= self.pending_limit
-            if not rejected:
-                self._incoming.append((request, client_address, time.monotonic()))
-        if rejected:
-            self.server._reject_without_wait(request)
-        else:
-            self._wake()
-
-    # LLM: 唤醒字节仅是提示，满缓冲意味着已有唤醒待处理；关闭后的写失败无新工作。
-    # 函数用途: 非阻塞通知选择器重读内存状态。
-    def _wake(self) -> None:
+        self.shards = []
         try:
-            self._wake_write.send(b'\0')
-        except OSError:
-            pass
-
-    # LLM: 每次从incoming移入pending保持同一锁内计数，避免临时低估容量。
-    # 函数用途: 仅在选择器线程注册已接受的套接字。
-    def _register_incoming(self) -> None:
-        while True:
-            with self._lock:
-                if not self._incoming or self._closing.is_set():
-                    return
-                sock, addr, accepted_at = self._incoming.popleft()
-                self._pending[sock] = (addr, accepted_at)
-            try:
-                sock.setblocking(False)
-                self._selector.register(sock, selectors.EVENT_READ, (addr, accepted_at))
-            except (OSError, ValueError):
-                self._drop_pending(sock)
-
-    # LLM: pending只由选择器增删；实际关闭不持路由锁。
-    # 函数用途: 注销一个等待前缀的连接、释放预读状态并可选关闭。
-    def _drop_pending(self, sock, *, close=True) -> None:
-        try:
-            self._selector.unregister(sock)
-        except (KeyError, ValueError):
-            pass
-        with self._lock:
-            self._pending.pop(sock, None)
-        self._prefixes.pop(sock, None)
-        self._frame_lengths.pop(sock, None)
-        self._classifications.pop(sock, None)
-        self._headers_ready_at.pop(sock, None)
-        if close:
-            self.server.shutdown_request(sock)
-
-    # LLM: 预读字节只由同FD包装器原样回放；超窗、持久或模糊请求仍交原普通handler。
-    # 函数用途: 每次只消费本前缀剩余预算，完整后或须走原路径时移交连接。
-    def _read_ready(self, sock, addr, accepted_at) -> None:
-        if time.monotonic() >= accepted_at + self.header_timeout_seconds:
-            self._drop_pending(sock)
-            return
-        if not self._body_readiness:
-            try:
-                data = sock.recv(HTTP_CONTROL_PEEK_BYTES, socket.MSG_PEEK)
-            except BlockingIOError:
-                return
-            except OSError:
-                self._drop_pending(sock)
-                return
-            lane = classify_peeked_request(data)
-            self._drop_pending(sock, close=lane == 'eof')
-            if lane == 'control':
-                lane = control_sublane(data)
-            if lane != 'eof':
-                self._submit(lane, sock, addr, accepted_at)
-            return
-        prefix = self._prefixes.setdefault(sock, bytearray())
-        try:
-            data = sock.recv(HTTP_READY_PREFIX_BYTES - len(prefix))
-        except BlockingIOError:
-            return
-        except OSError:
-            self._drop_pending(sock)
-            return
-        prefix.extend(data)
-        lane = self._classifications.get(sock, 'general')
-        if sock not in self._classifications and b'\n' in data:
-            lane = self._classifications[sock] = classify_peeked_request(prefix)
-        if not prefix:
-            self._drop_pending(sock)
-            return
-        if lane != 'control':
-            if sock not in self._frame_lengths:
-                length = complete_request_length(
-                    prefix, single_request=self._single_request,
-                    search_from=max(0, len(prefix) - len(data) - 3),
-                )
-                if length is not None:
-                    self._frame_lengths[sock] = length
-                    if length:
-                        self._headers_ready_at[sock] = time.monotonic()
-            length = self._frame_lengths.get(sock)
-            if length and len(prefix) >= length:
-                lane = 'ready'
-            elif length and self._can_admit_body(accepted_at, self._headers_ready_at[sock]):
-                lane = 'general'
-            elif data and len(prefix) < HTTP_READY_PREFIX_BYTES and length != 0:
-                return
-            else:
-                lane = 'general'
-        self._handoff_pending(sock, addr, accepted_at, lane)
-
-    def _can_admit_body(self, accepted_at, headers_ready_at):
-        # 这里只是瞬时容量观察；真正准入仍由_submit领取原槽位、worker再核原deadline。
-        deadline = accepted_at + self.queue_timeout_seconds
-        if headers_ready_at >= deadline or time.monotonic() >= deadline:
-            return False
-        with self._lock:
-            return (self._mixed_admitted < self._mixed_workers
-                    and self.server._request_slots._value > 0)
-
-    def _handoff_pending(self, sock, addr, accepted_at, lane):
-        prefix = self._prefixes.get(sock, bytearray())
-        if lane == 'control':
-            lane = control_sublane(prefix)
-        self._drop_pending(sock, close=False)
-        try:
-            replay = PrefetchedSocket(sock, prefix)
-        except (OSError, ValueError):
-            self.server.shutdown_request(sock)
-            return
+            # 冻结合约按每 32 个普通 worker 建一个选择器，最多八片。
+            for index in range(min(8, max(1, max_workers // 32))):
+                shard = _ReadinessShard(self)
+                self.shards.append(shard)
+                shard.thread = threading.Thread(target=shard.run, name=f'gateway-http-readiness-{index}', daemon=True)
+                group = (drain_runtime.retain_thread('control', f'http/readiness/{index}', shard.thread)
+                         if drain_runtime is not None else None)
+                try:
+                    shard.thread.start()
+                except BaseException as error:
+                    if group is not None:
+                        group.retain_fault(error)
+                    raise
         except BaseException:
-            self.server.shutdown_request(sock)
+            self.close()
             raise
-        self._submit(lane, replay, addr, accepted_at)
 
-    # LLM: 期限取已接受时间；队列只保留QUEUED，避免长worker挡住队首后积累完成历史。
-    # 函数用途: 回收过期连接和票据，并计算最近的真实截止时间。
-    def _sweep(self) -> float | None:
-        now = time.monotonic()
-        with self._lock:
-            pending = tuple(self._pending.items())
-        deadlines = []
-        for sock, (addr, accepted_at) in pending:
-            deadline = accepted_at + self.header_timeout_seconds
-            if deadline <= now:
-                self._drop_pending(sock)
-                continue
-            if sock in self._headers_ready_at:
-                queue_deadline = accepted_at + self.queue_timeout_seconds
-                if queue_deadline <= now:
-                    self._drop_pending(sock, close=False)
-                    self.server._reject_without_wait(sock)
-                    continue
-                if self._can_admit_body(accepted_at, self._headers_ready_at[sock]):
-                    self._handoff_pending(sock, addr, accepted_at, 'general')
-                    continue
-                deadline = min(deadline, queue_deadline)
-            deadlines.append(deadline)
-        # 上面可能准入一条有原混合空席的慢正文；之后才捕获队列，不能覆盖刚加入的票据。
-        with self._lock:
-            queued = {lane: tuple(tickets) for lane, tickets in self._queued.items()}
-        for lane, tickets in queued.items():
-            keep = deque()
-            for ticket in tickets:
-                deadline = ticket.accepted_at + self.queue_timeout_seconds
-                if deadline <= now and ticket.claim_expired():
-                    ticket.reject_once(self.server)
-                    ticket.close_once(self.server)
-                    ticket.future.cancel()
-                if ticket.is_queued():
-                    keep.append(ticket)
-                    deadlines.append(deadline)
-            with self._lock:
-                self._queued[lane] = keep
-        return max(0.0, min(deadlines) - time.monotonic()) if deadlines else None
+    def admit(self, request, client_address):
+        if not self._closing.is_set() and self._pending_slots.acquire(blocking=False):
+            shard = self.shards[request.fileno() % len(self.shards)]
+            if shard.add(_Pending(request, client_address, time.monotonic() + self.header_timeout_seconds)):
+                return
+            self.release_pending()
+        self.server._reject_without_wait(request)
 
-    # LLM: worker状态变化也唤醒，空闲时select(None)，不新增tick常量。
-    # 函数用途: 串行处理注册、就绪通知与期限，到关闭时回收选择器自有资源。
-    def _loop(self) -> None:
-        try:
-            while not self._closing.is_set():
-                self._register_incoming()
-                timeout = self._sweep()
-                for key, _mask in self._selector.select(timeout):
-                    if key.data is None:
-                        try:
-                            while self._wake_read.recv(HTTP_CONTROL_PEEK_BYTES):
-                                pass
-                        except BlockingIOError:
-                            pass
-                    elif not self._closing.is_set():
-                        self._read_ready(key.fileobj, *key.data)
-        finally:
-            with self._lock:
-                self._closing.set()
-                incoming, self._incoming = self._incoming, deque()
-                pending = tuple(self._pending)
-                tickets = [ticket for queue in self._queued.values() for ticket in queue]
-                self._queued = {lane: deque() for lane in self._queued}
-            for sock, _addr, _accepted_at in incoming:
-                self.server.shutdown_request(sock)
-            for sock in pending:
-                self._drop_pending(sock)
-            for ticket in tickets:
-                ticket.future.cancel()
-            self._selector.close()
-            self._wake_read.close()
-            self._wake_write.close()
+    def release_pending(self):
+        self._pending_slots.release()
 
-    # LLM: 两车道分别非阻塞领取自己的容量；submit与错误上报均在路由锁外。
-    # 函数用途: 在原普通总worker数内保留完整请求机会，并登记一次性释放回调。
-    def _submit(self, lane, sock, addr, accepted_at) -> None:
-        with self._lock:
-            if lane == 'ready' and self._mixed_admitted < self._mixed_workers:
-                lane = 'general'
-            if lane == 'general':
-                self._mixed_admitted += 1
-        executor = self._lane_executors.get(lane) or self.server._request_executor
+    def reserve_body(self, shard):
+        # 未收完整帧的工作最多占用 N-1 个普通席位，完整帧仍能使用原池中的全部 N 个线程。
+        with self._body_lock:
+            # 先登记等待者再试容量，避免归还线程看到空表后漏掉此次唤醒。
+            self._body_waiters.setdefault(shard, None)
+            if (self._streaming < self._body_limit
+                    and self.server._request_slots.acquire(blocking=False)):
+                self._streaming += 1
+                if not shard.waiting:
+                    self._body_waiters.pop(shard, None)
+                return True
+            return False
+
+    def release_lane(self, lane, slots):
+        slots.release()
+        if slots is self.server._request_slots and (lane == 'stream' or self._body_waiters):
+            self._wake_body_waiter(released_stream=lane == 'stream')
+
+    def body_wait_ended(self, shard):
+        with self._body_lock:
+            self._body_waiters.pop(shard, None)
+        # 若被唤醒的最后一条连接已收齐正文或退出，把可用席位的通知交给下一片。
+        self._wake_body_waiter()
+
+    def _wake_body_waiter(self, *, released_stream=False):
+        with self._body_lock:
+            if released_stream:
+                self._streaming -= 1
+            if self._streaming >= self._body_limit or not self.server._request_slots._value:
+                return
+            shard = next(iter(self._body_waiters), None)
+            if shard is not None:
+                del self._body_waiters[shard]
+        if shard is not None:
+            shard.wake()
+
+    def _submit(self, lane, sock, addr, shard):
+        executor = self._lane_executors.get(lane, self.server._request_executor)
         slots = self._lane_slots.get(lane, self.server._request_slots)
-        if self._closing.is_set() or not slots.acquire(blocking=False):
-            if lane == 'general':
-                with self._lock:
-                    self._mixed_admitted -= 1
+        if lane != 'stream' and not slots.acquire(blocking=False):
             self.server._reject_without_wait(sock)
             return
-        ticket = _LaneTicket(sock, addr, accepted_at, lane)
+        if self._closing.is_set():
+            self.release_lane(lane, slots)
+            self.server.shutdown_request(sock)
+            return
+        ticket = _LaneTicket(sock, addr, lane)
         ticket.executor = executor
         try:
             sock.settimeout(self.server.request_socket_timeout)
-            ticket.future = executor.submit(self._run_ticket, ticket)
+            with self.server._lane_birth():
+                ticket.enqueued_at = time.monotonic()
+                ticket.future = executor.submit(self._run_ticket, ticket)
         except BaseException as error:
-            # submit可能先入队再在线程出生时报错；未确认的worker只能空退，不能触碰连接。
+            # 线程出生可在入队之后失败；先撤销票据，再放行已经取到它的 worker。
             ticket.claim_expired()
             try:
                 executor._work_queue.discard(ticket)
             finally:
                 ticket._ready.set()
-                slots.release()
-                if lane == 'general':
-                    with self._lock:
-                        self._mixed_admitted -= 1
-                if isinstance(error, (RuntimeError, OSError)):
+                self.release_lane(lane, slots)
+                if isinstance(error, (RuntimeError, OSError, HTTPBirthGateBusy)):
                     ticket.reject_once(self.server)
                 else:
                     ticket.close_once(self.server)
-            ticket.mark_done()
-            if self.server._request_worker_failure is not None:
+            if self.server._request_worker_failure is not None and not isinstance(error, HTTPBirthGateBusy):
                 self.server._request_worker_failure(error)
-            if not isinstance(error, (RuntimeError, OSError)):
+            if not isinstance(error, (RuntimeError, OSError, HTTPBirthGateBusy)):
                 raise
             return
-        ticket.future.add_done_callback(partial(self._ticket_finished, ticket, slots))
-        with self._lock:
-            self._queued[lane].append(ticket)
+        key = shard.track_ticket(ticket)
+        ticket.future.add_done_callback(partial(self._ticket_finished, ticket, slots, shard, key))
         ticket._ready.set()
 
-    # LLM: CAS失败的worker不接触socket；只有成功领取者进入原handler和原异常策略。
-    # 函数用途: 执行一次已分类的普通请求或控制请求。
-    def _run_ticket(self, ticket) -> None:
+    def _run_ticket(self, ticket):
         ticket._ready.wait()
-        # 与selector共用绝对截止；浮点相减可能把恰到截止误作未过期，不依赖sweep先执行。
-        if time.monotonic() >= ticket.accepted_at + self.queue_timeout_seconds:
+        start = time.monotonic()
+        if start >= ticket.enqueued_at + self.queue_timeout_seconds:
             if ticket.claim_expired():
                 ticket.reject_once(self.server)
-                ticket.mark_done()
             return
         if not ticket.claim_running():
             return
-        self._wake()
+        token = lane_queue_ms.set(int((start - ticket.enqueued_at) * 1000))
         try:
-            self.server.finish_request(ticket.request, ticket.client_address)
-        except (TimeoutError, ConnectionError):
-            pass
-        except Exception:
-            self.server.handle_error(ticket.request, ticket.client_address)
+            self.server._finish_http_request(ticket.request, ticket.client_address)
         finally:
+            lane_queue_ms.reset(token)
             ticket.close_once(self.server)
-            ticket.mark_done()
 
-    # LLM: Future回调是成功提交后的唯一释放者，取消时也不进入处理器。
-    # 函数用途: 回收一次连接及容量并通知选择器移除完成票据。
-    def _ticket_finished(self, ticket, slots, future) -> None:
+    def _ticket_finished(self, ticket, slots, shard, key, future):
         try:
             if future.cancelled():
                 ticket.executor._work_queue.discard(future)
                 ticket.close_once(self.server)
             ticket.mark_done()
         finally:
-            slots.release()
-            if ticket.lane == 'general':
-                with self._lock:
-                    self._mixed_admitted -= 1
-            self._wake()
+            shard.retire_ticket(key)
+            self.release_lane(ticket.lane, slots)
 
-    # LLM: 先关准入并唤醒，再等待有界选择器退出；运行中的handler沿原服务器生命周期收口。
-    # 函数用途: 关闭等待中的连接并停止独立控制执行器。
-    def close(self) -> None:
-        with self._lock:
-            self._closing.set()
-        self._wake()
-        self._thread.join(timeout=self.header_timeout_seconds)
-        self._control_executor.shutdown(wait=False, cancel_futures=True)
-        self._status_executor.shutdown(wait=False, cancel_futures=True)
-        self._stop_executor.shutdown(wait=False, cancel_futures=True)
-        if self._ready_executor is not None:
-            self._ready_executor.shutdown(wait=False, cancel_futures=True)
+    def _stop_admission(self):
+        self._closing.set()
+        for shard in self.shards:
+            shard.wake()
+
+    def close(self):
+        self._stop_admission()
+        for shard in self.shards:
+            thread = getattr(shard, 'thread', None)
+            if thread is None or thread.ident is None:
+                shard._close_selector()
+            else:
+                thread.join()
+        for executor in self._lane_executors.values():
+            executor.shutdown(wait=False, cancel_futures=True)

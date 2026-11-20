@@ -3,14 +3,80 @@ from __future__ import annotations
 
 import http.client
 import io
+import re
 import socket
 
 # 这是预读预算而非payload上限；超出窗口的请求回原普通处理路径。
 HTTP_READY_PREFIX_BYTES = 8192
+_HEADER_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
+def scan_request_length(
+    prefix: bytes | bytearray, *, single_request: bool, search_from: int = 0,
+) -> int | None:
+    """仅从无歧义 HTTP/1.x 字节确认帧长，其余交给原解析器。"""
+    boundary = prefix.find(b'\r\n\r\n', search_from)
+    if boundary < 0:
+        return 0 if prefix.find(b'\n\n', search_from) >= 0 else None
+    head_end = boundary + 4
+    if head_end > HTTP_READY_PREFIX_BYTES:
+        return 0
+    line_end = prefix.find(b'\r\n', 0, boundary + 2)
+    if line_end < 0:
+        return 0
+    line = prefix[:line_end]
+    parts = line.split(b' ')
+    if (b'\n' in line or b'\r' in line or len(parts) != 3 or not all(parts)
+            or parts[2] not in (b'HTTP/1.0', b'HTTP/1.1')):
+        return 0
+    pos = line_end + 2
+    content_length = None
+    connection = None
+    header_count = 1  # 原 http.client 上限包含最后的空行。
+    while pos <= boundary:
+        end = prefix.find(b'\r\n', pos, boundary + 2)
+        colon = prefix.find(b':', pos, end)
+        header_count += 1
+        if (end < 0 or colon < 0 or header_count > http.client._MAXHEADERS
+                or _HEADER_NAME.fullmatch(prefix, pos, colon) is None):
+            return 0
+        value = prefix[colon + 1:end]
+        if b'\r' in value or b'\n' in value:
+            return 0
+        name = prefix[pos:colon].lower()
+        if name in (b'expect', b'transfer-encoding'):
+            return 0
+        if name == b'content-length':
+            if content_length is not None:
+                return 0
+            digits = value.lstrip(b' \t')
+            if not digits.isdigit():
+                return 0
+            significant = digits.lstrip(b'0')
+            if len(significant) > len(str(HTTP_READY_PREFIX_BYTES)):
+                return 0
+            content_length = int(significant or b'0')
+        elif name == b'connection':
+            if connection is not None:
+                return 0
+            connection = value.lstrip(b' \t').lower()
+        pos = end + 2
+    if not (single_request or connection == b'close'
+            or (parts[2] == b'HTTP/1.0' and connection != b'keep-alive')):
+        return 0
+    length = head_end + (content_length or 0)
+    return length if length <= HTTP_READY_PREFIX_BYTES else 0
 
 
 def complete_request_length(prefix: bytearray, *, single_request: bool, search_from: int = 0) -> int | None:
     """正数为完整帧所需字节，0为原慢路径，None表示头尚未完整。"""
+    result = scan_request_length(prefix, single_request=single_request, search_from=search_from)
+    if result != 0:
+        return result
+    return _parse_request_length(prefix, single_request=single_request, search_from=search_from)
+
+
+def _parse_request_length(prefix: bytearray, *, single_request: bool, search_from: int) -> int | None:
     boundary = prefix.find(b'\r\n\r\n', search_from)
     ending = 4
     if boundary < 0:
@@ -59,6 +125,15 @@ class PrefetchedSocket:
 
     def __getattr__(self, name):
         return getattr(object.__getattribute__(self, '_socket'), name)
+
+    def fileno(self):
+        return self._socket.fileno()
+
+    def sendall(self, data, flags=0):
+        return self._socket.sendall(data, flags)
+
+    def shutdown(self, how):
+        return self._socket.shutdown(how)
 
     def settimeout(self, timeout):
         return self._socket.settimeout(timeout)

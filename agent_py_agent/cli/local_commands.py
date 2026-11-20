@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 from ..agent.agent_core.cli_run_conversation import (
     CliRunConversationPersistenceError,
@@ -103,6 +104,7 @@ def cmd_status(args) -> int:
         heartbeat_load_error,
         unidentified_stale_attempts=state_counts["unidentified_stale_attempts"],
         surviving_background_sessions=state_counts["surviving_background_sessions"],
+        http_capacity=state_counts.get("http_capacity"),
     )
     payload = build_status_payload(payload_ctx)
     payload['gateway']['build_identity'] = _read_gateway_build_identity(agent, pid, alive)
@@ -164,7 +166,7 @@ def _read_gateway_build_identity(agent, pid, alive):
 #   unidentified_stale_attempts（Gateway 启动写入，无 runner 身份、不自动结清的悬挂运行轮）和
 #   surviving_background_sessions（Gateway 停机写入，停机后仍在运行的后台进程会话）。只投影，不查 runtime.db、不结清、不停进程。
 # 函数用途: 读取 Gateway 状态文件，给 status 提供状态、心跳年龄、两份读取错误和两个提醒计数。
-def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, dict | None, dict | None, dict[str, int]]:
+def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, dict | None, dict | None, dict[str, Any]]:
     gateway_state_report = read_json_file_report(paths.state, context="cli.status.gateway_state.read")
     heartbeat_report = read_json_file_report(paths.heartbeat, context="cli.status.gateway_heartbeat.read")
     gateway_status, heartbeat_age = resolve_gateway_status(
@@ -180,6 +182,9 @@ def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, d
         key: _state_count(gateway_state_report.payload, key)
         for key in ("unidentified_stale_attempts", "surviving_background_sessions")
     }
+    capacity = gateway_state_report.payload.get("http_capacity")
+    if isinstance(capacity, dict):
+        counts["http_capacity"] = capacity
     return gateway_status, heartbeat_age, gateway_state_report.load_error, heartbeat_report.load_error, counts
 
 

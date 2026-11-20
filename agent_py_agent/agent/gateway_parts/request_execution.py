@@ -1535,6 +1535,9 @@ def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> 
             audit_request_processing(agent, context)
         return context
     request = request_report.payload
+    queued_ms = request.get("lane_queue_ms")
+    if type(queued_ms) is int and queued_ms >= 0:
+        stages["lane_queue_ms"] = queued_ms
     request_id = str(request.get("id") or request_path.stem)
     kind = str(request.get("kind") or "").strip() or ("ask" if request_id else "")
     response_path = gateway_response_path(gateway_paths(agent), request_id)
