@@ -464,25 +464,13 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M08"
     },
-    "agent/backends/base.py::_utc_now_iso::aware_now": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/bounded_call.py::BoundedCallBusyError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/bounded_call.py::BoundedCallExitUnconfirmedError.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
     "agent/backends/bounded_call.py::_Call.__setattr__::object_setattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
+      "reason": "cold-path: auxiliary call bookkeeping protects the original execution references"
     },
     "agent/backends/bounded_call.py::call_with_deadline::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
+      "reason": "cold-path: auxiliary deadline calls retain a dedicated thread for physical exit observation"
     },
     "agent/backends/cache_diagnostics.py::_digest::json_dumps_default": {
       "count": 1,
@@ -532,77 +520,13 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M07"
     },
-    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPConnection.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPConnection.connect::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPHandler.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPSConnection.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPSConnection.connect::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPSHandler.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_dump_provider_rejection::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
     "agent/backends/gateway_helpers.py::_dump_provider_rejection::text_open": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_gateway_urlopen_unlimited::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_http_error_detail::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_network_exception_chain::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_provider_error_indicates_context_window::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::_request_http_retry::dyn_getattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/gateway_helpers.py::gateway_request_body::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
+      "reason": "cold-path: opt-in diagnostic file append on provider rejection"
     },
     "agent/backends/gateway_request_limits.py::validate_request_limits::dyn_getattr": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/http.py::_route_header_fingerprint::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/keepalive_transport.py::has_pooled_lease::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/keepalive_transport.py::release_pooled_response::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
     },
     "agent/backends/oauth.py::OAuthResponsesBackend.request_stream_iter::super0": {
       "count": 1,
@@ -715,14 +639,6 @@
     "agent/backends/tool_protocol_adapter.py::_protocol_evidence::json_dumps_default": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M07"
-    },
-    "agent/backends/transport_timing.py::TimedHTTPResponse._read_status::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
-    },
-    "agent/backends/transport_timing.py::instrument_connection::type3": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M06"
     },
     "agent/contracts/model_call_ledger.py::ModelCallAdmissionClosedError.__init__::super0": {
       "count": 1,

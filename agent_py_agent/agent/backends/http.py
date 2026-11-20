@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from ..common import hot_json
 from ..concurrency.interrupt import wait_interruptibly
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from . import gateway_helpers
@@ -190,7 +191,7 @@ def _route_header_fingerprint(backend: object) -> str:
     headers = getattr(backend, "custom_headers", None)
     if not isinstance(headers, Mapping) or not headers:
         return ""
-    material = json.dumps(sorted((str(name).lower(), str(value)) for name, value in headers.items()), ensure_ascii=True)
+    material = hot_json.dumps(sorted((str(name).lower(), str(value)) for name, value in headers.items()))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 

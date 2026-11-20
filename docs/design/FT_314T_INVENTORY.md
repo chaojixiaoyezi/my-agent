@@ -780,3 +780,12 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
   - (d) 3.14t 影响面 231 passed、6 failed。6 个都是 3.14t venv 缺 `markdown_it`，父提交上逐项相同。父提交整轮另有 2 个 `test_readiness_uses_real_status_and_original_outcome` 参数在主机负载 200–320 时读不到就绪状态，单独重跑时换成另 1 个参数失败；提交树两轮都通过。
 - G2 白名单由 355 键、509 次触发降为 340 键、492 次触发：删除 15 键（17 次），6 键改为 `cold-path` 原因，不新增键。
 - 常数目录不变（1561 项）。
+
+### 2026-11-19 M06 模型 HTTP 传输
+
+- 计时连接共用静态 `TimedHTTPResponse` 类。`getresponse()` 通过 `ContextVar` 传递本次尝试的计时器，退出时恢复调用前的值。响应继续持有自己的计时器，供正文收尾使用。
+- 池内和池外连接的标准套接字通过 `DirectSocketIO` 读取，复用探测继续用同一个缓冲区的 `peek(1)`。计时响应仍可通过适配器自带的 `makefile` 读取。变更日志客户端也使用默认缓冲的 `makefile_rb`。
+- 八个通过槽位兼容检查的冻结类已转换。`StreamCall` 与 `StreamCallOptions` 的检查结果为 `slots-incompatible: module uses weakref: convert with weakref_slot=True to keep weak references working`，保留原结构。
+- G2 删除 21 个键（共 22 次触发）。独立扫描变更日志客户端还减少 1 次默认 JSON 编码触发。现有辅助调用的物理线程退出证明和显式启用的诊断文件追加沿用原接口。
+- 隔离验证覆盖 100 次回环 HTTP 请求的响应类身份、原计时阶段、连接归还和陈旧连接探测。Python 3.12 与关闭 GIL 的 3.14t 各通过 17 项定向测试和 317 项影响测试，与父提交的影响用例结果一致。
+- 3.14t 独占复跑 G1/G2 共 19 项通过，包含 8 项新增吞吐用例。首轮全部 M06 用例通过，M00 的 `fast_frozen_dto` 比值为 0.741，复跑达到 0.80 门槛。

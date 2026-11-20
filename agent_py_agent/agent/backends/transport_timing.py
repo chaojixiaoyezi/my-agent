@@ -10,8 +10,12 @@
 from __future__ import annotations
 
 import http.client
+import socket
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
+
+from ..common.direct_socket_io import DirectReadHTTPResponse
 
 # 按发生顺序：建连（直连含 DNS；走代理时是连到代理）、代理 CONNECT 隧道、TLS 握手、请求写完、收到状态行、读完正文。
 # 代理隧道只在 HTTPS 走代理时出现，TLS 只在 HTTPS 时出现。
@@ -68,24 +72,31 @@ class AttemptTiming:
         return snapshot
 
 
-# LLM: 只覆盖读状态行这一步来记首字节；构造器不改（标准库按原签名构造），计时器是每次尝试专属子类的类属性。
-#   标准库的 _tunnel 也用 response_class 读代理 CONNECT 回复，此时阶段还是 proxy_connect，advance 按当前阶段忽略；
-#   100-continue 之后的状态行同理不再推进。urllib 的 HTTPError 也原样包裹本对象。
-# 类用途: 带阶段计时的标准库响应，读到状态行后把尝试推进到"读正文"阶段。
-class TimedHTTPResponse(http.client.HTTPResponse):
-    attempt_timing: AttemptTiming | None = None
+# 仅在 getresponse 期间传递本次计时器，代理 CONNECT 不占用首字节阶段。
+_ATTEMPT_TIMING: ContextVar[AttemptTiming | None] = ContextVar("_ATTEMPT_TIMING", default=None)
+
+
+class TimedHTTPResponse(DirectReadHTTPResponse):
+    """读取状态行后推进首字节计时，正文仍沿用标准库响应解析。"""
+
+    def __init__(self, sock, debuglevel: int = 0, method: str | None = None, url: str | None = None) -> None:
+        if getattr(type(sock), "makefile", None) is socket.socket.makefile:
+            DirectReadHTTPResponse.__init__(self, sock, debuglevel, method, url)
+        else:
+            # 自带 makefile 协议的适配器可能没有标准套接字的引用计数及 recv_into。
+            http.client.HTTPResponse.__init__(self, sock, debuglevel, method, url)
+        self.attempt_timing = _ATTEMPT_TIMING.get()
 
     # LLM: 先完整执行标准库读状态行，异常原样上抛，成功后才推进。
     # 函数用途: 读取状态行后记下首字节阶段结束。
     def _read_status(self):
-        status = super()._read_status()
+        status = http.client.HTTPResponse._read_status(self)
         if self.attempt_timing is not None:
             self.attempt_timing.advance("first_byte", "body_read")
         return status
 
 
-# LLM: timing 为 None 时不装计时（普通调用零改动；装过计时的复用连接恢复原方法）；否则在实例上包裹建连、隧道、
-#   connect 与 getresponse，并把响应类换成本次尝试专属的计时子类（计时器是类属性，构造签名与标准库一致）。
+# LLM: 连接统一安装直接读取的响应类；开启计时时切换到静态计时响应，通过 ContextVar 捕获本次尝试的计时器。
 #   原方法在第一次装计时前存进实例（_UNTIMED_ATTR），之后每次都包原方法，复用连接不会层层叠包裹。
 #   每个包裹先原样调用原步骤，成功后才推进，异常原样上抛；是否走隧道读标准库在建连前已设置的 _tunnel_host。
 # 函数用途: 给一条连接装上本次尝试的阶段计时（HTTPS 另记 TLS 握手）。
@@ -94,6 +105,8 @@ def instrument_connection(connection: http.client.HTTPConnection, timing: Attemp
     if timing is None:
         if untimed is not None:
             _restore_untimed(connection, untimed)
+        elif getattr(connection, "response_class", None) is http.client.HTTPResponse:
+            connection.response_class = DirectReadHTTPResponse
         return
     if untimed is None:
         untimed = (connection._create_connection, connection._tunnel, connection.connect, connection.getresponse,
@@ -128,20 +141,25 @@ def instrument_connection(connection: http.client.HTTPConnection, timing: Attemp
     # 函数用途: urllib 调 getresponse 时请求已写完，结束发送阶段后再等响应。
     def timed_getresponse():
         timing.advance("request_send", "first_byte")
-        return getresponse()
+        token = _ATTEMPT_TIMING.set(timing)
+        try:
+            return getresponse()
+        finally:
+            _ATTEMPT_TIMING.reset(token)
 
     connection._create_connection, connection._tunnel = timed_create, timed_tunnel
     connection.connect, connection.getresponse = timed_connect, timed_getresponse
-    connection.response_class = type("TimedHTTPResponse", (TimedHTTPResponse,), {"attempt_timing": timing})
+    connection.response_class = TimedHTTPResponse
 
 
-# LLM: 只恢复 instrument_connection 第一次保存的原方法与原响应类，不碰连接状态与 socket。
-# 函数用途: 让一条装过计时的复用连接在不计时的尝试里回到标准库原样行为。
+# 复用连接关闭计时时恢复原方法，标准响应使用直接读取，显式指定的响应类保持其协议。
 def _restore_untimed(connection: http.client.HTTPConnection, untimed: tuple) -> None:
     create, tunnel, connect, getresponse, response_class = untimed
     connection._create_connection, connection._tunnel = create, tunnel
     connection.connect, connection.getresponse = connect, getresponse
-    connection.response_class = response_class
+    connection.response_class = (
+        DirectReadHTTPResponse if response_class is http.client.HTTPResponse else response_class
+    )
 
 
 # LLM: 只由非流式 post_json 在完整读完正文后调用；读失败不调用（阶段停在 body_read 即表示卡在读正文）。

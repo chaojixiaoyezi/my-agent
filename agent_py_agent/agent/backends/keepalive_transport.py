@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
 from .gateway_request_limits import remaining_deadline_seconds, stdlib_response_socket
 from .transport_timing import instrument_connection
 
@@ -37,7 +38,8 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # LLM: 冻结值对象；proxy_host 为空表示直连。凭据不在这里。
 # 类用途: 一条长连接的身份：协议、目标主机与端口、经过的代理。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class KeepAliveRoute:
     scheme: str
     host: str
@@ -133,7 +135,8 @@ def main_connection_pool(max_idle_per_route: int) -> KeepAlivePool | None:
 
 # LLM: 冻结值对象，由 keepalive_target 算出；pool 只要求有 checkout/checkin（GatewayRequest 校验过）。
 # 类用途: 一次严格请求要借用的连接池与连接身份。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class KeepAliveTarget:
     pool: Any
     route: KeepAliveRoute
@@ -141,7 +144,8 @@ class KeepAliveTarget:
 
 # LLM: 冻结值对象，只由 pooled_urlopen 挂到成功响应上；收尾按类型识别，其它对象（如测试替身自动生成的属性）一律不当租约。
 # 类用途: 记一条长连接从哪个池、哪个身份借出，供请求结束时归还或关闭。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _Lease:
     target: KeepAliveTarget
     connection: Any
@@ -254,7 +258,7 @@ def pooled_urlopen(target: KeepAliveTarget, req: urllib.request.Request, options
 #   aborted 来自响应守卫；显式 body_complete 必须是关闭前的 EOF 证明，None 保留已有直接调用方的判据。
 # 函数用途: 请求结束后把干净用完的长连接还给池，其余情况关闭它。
 def release_pooled_response(response: Any, *, aborted: bool, body_complete: bool | None = None) -> None:
-    lease = getattr(response, _LEASE_ATTR, None)
+    lease = getattr(response, "_my_agent_keepalive_lease", None)
     if not isinstance(lease, _Lease):
         return
     setattr(response, _LEASE_ATTR, None)
@@ -268,7 +272,7 @@ def release_pooled_response(response: Any, *, aborted: bool, body_complete: bool
 # LLM: 只认本模块签发的租约，不将测试替身或其它响应属性当作连接归属。
 # 函数用途: 判断响应是否持有需要归还或关闭的池连接。
 def has_pooled_lease(response: Any) -> bool:
-    return isinstance(getattr(response, _LEASE_ATTR, None), _Lease)
+    return isinstance(getattr(response, "_my_agent_keepalive_lease", None), _Lease)
 
 
 # LLM: 关闭响应前以零等待单次读取证明 EOF；任何不完整或不可读取结果都拒绝归还，退出恢复原 socket 超时。
@@ -297,7 +301,7 @@ def drain_completed_response(response: Any) -> bool:
 
 
 # LLM: 与 urllib 同一连接类和 TLS 默认上下文；经代理时用标准库 set_tunnel 走 CONNECT 隧道。
-# 函数用途: 为一条长连接身份新建一个尚未连接的连接对象（真正连接发生在第一次发送时）。
+# 双超时连接在构造中安装直接读取响应，需要计时时使用同一个静态计时响应类。
 def _new_connection(route: KeepAliveRoute, options: Any):
     from .gateway_helpers import _SplitTimeoutHTTPConnection, _SplitTimeoutHTTPSConnection
 
