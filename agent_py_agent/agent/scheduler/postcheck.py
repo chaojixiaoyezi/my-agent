@@ -321,6 +321,43 @@ def _validate_finite_number(value: object, field_path: str) -> int | float:
     return value
 
 
+def snapshot_execution_root(cwd: object) -> dict[str, object] | None:
+    """读取可用绝对目录的规范路径和文件系统身份。"""
+    if not isinstance(cwd, (str, Path)) or not cwd:
+        return None
+    try:
+        path = Path(cwd).expanduser()
+        if not path.is_absolute():
+            return None
+        path = path.resolve(strict=True)
+        info = path.lstat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    return {"path": str(path), "st_dev": info.st_dev, "st_ino": info.st_ino}
+
+
+def verify_execution_root(ref: object) -> tuple[Path | None, str]:
+    """比较冻结根的规范路径、文件系统身份与当前目录。"""
+    if ref is None:
+        return None, "root_reference_missing"
+    if (not isinstance(ref, dict) or not isinstance(ref.get("path"), str)
+            or type(ref.get("st_dev")) is not int or type(ref.get("st_ino")) is not int):
+        return None, "root_reference_invalid"
+    path = Path(ref["path"])
+    if not path.is_absolute():
+        return None, "root_reference_invalid"
+    try:
+        resolved = path.resolve(strict=True)
+        info = path.lstat()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, type(exc).__name__
+    if resolved != path or not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (ref["st_dev"], ref["st_ino"]):
+        return None, "root_identity_changed"
+    return path, ""
+
+
 def evaluate_postcheck(
     spec: dict[str, object],
     *,

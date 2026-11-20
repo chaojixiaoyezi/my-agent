@@ -826,7 +826,10 @@ class _SchedulerRunOperations:
 
     # LLM: 开始沿原claim CAS，事件代次必须仍有效；实际模型/运输仍需原副作用开始CAS，不能只靠这一快照。
     # 函数用途: 登记当前领取者开始工作，并拒绝已经暂停或更新的事件运行。
-    def mark_run_running(self, run_id: str, claim_id: str, *, now: float | None = None) -> None:
+    def mark_run_running(
+        self, run_id: str, claim_id: str, *, now: float | None = None,
+        execution_root_ref: dict[str, object] | None = None,
+    ) -> None:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             run = self._require_claim(store, run_id, claim_id)
@@ -835,6 +838,8 @@ class _SchedulerRunOperations:
                 raise SchedulerConflictError('事件订阅已停止或更新')
             from .monitor_state import record_run_start
             record_run_start(self, store, run, current)
+            if run.get("postcheck") and not run.get("started_at") and "execution_root_ref" not in run:
+                run = {**run, "execution_root_ref": deepcopy(execution_root_ref)}
             store["runs"][run_id] = {
                 **run,
                 "status": "running",
@@ -1805,7 +1810,7 @@ class _SchedulerRecordParsing:
             claim_epoch = raw.get("claim_epoch", 0)
             if isinstance(claim_epoch, bool) or not isinstance(claim_epoch, int) or claim_epoch < 0:
                 raise ValueError("claim epoch")
-            normalize_execution(raw.get("execution"))
+            normalize_execution(raw.get("execution"), allow_legacy_cwd=True)
             from .execution_policy import normalize_business_context
 
             normalize_business_context(raw.get('business_context'), self.owner['id'])
@@ -3121,6 +3126,7 @@ def _is_effect_unknown(terminal: dict[str, object]) -> bool:
         "SCHEDULER_RUN_OUTCOME_UNKNOWN",
         "SCHEDULER_RUNNER_DIED",
         "SCHEDULER_POSTCHECK_UNAVAILABLE",
+        "POSTCHECK_ROOT_UNAVAILABLE",
     }:
         return True
     target_outcome = terminal.get("target_outcome")
@@ -3234,6 +3240,7 @@ def _apply_failure_streak_and_followups(
                     "precheck": None,
                     "postcheck": None,
                     "prompt": inv_prompt,
+                    "effect_policy": "read_only",
                     "failure_context": _bounded_failure_context(terminal, int(streak["count"])),
                 }
             )

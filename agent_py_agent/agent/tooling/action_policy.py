@@ -142,7 +142,16 @@ class ActionPolicy:
         if business_decision is not None:
             return business_decision
 
-        effect, command = _resolved_effect(call, runtime)
+        boundary = request.write_boundary or {}
+        investigation = boundary.get("effect_policy") == "read_only"
+        try:
+            effect, command = _resolved_effect(call, runtime)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            if not investigation:
+                raise
+            return _investigation_denial("unknown", classification_error=type(exc).__name__)
+        if investigation and effect not in {"read_only", "mutating", "dangerous"}:
+            return _investigation_denial("unknown")
         required_decision = _required_action_decision(request, runtime, effect)
         if required_decision is not None:
             return required_decision
@@ -177,7 +186,9 @@ class ActionPolicy:
         if idempotency_decision is not None:
             return idempotency_decision
 
-        approval_decision, approval_applied = _approval_decision(request, runtime, effect)
+        approval_decision, approval_applied = _approval_decision(
+            request, runtime, effect, investigation=investigation and effect != "read_only",
+        )
         if approval_decision is not None:
             return approval_decision
 
@@ -598,6 +609,17 @@ def _prohibited_action_error(
     return ""
 
 
+def _investigation_denial(effect: str, *, classification_error: str = "") -> ActionDecision:
+    return _deny(
+        "INVESTIGATION_READ_ONLY_REJECTED", effect="dangerous" if effect == "unknown" else effect,
+        evidence={
+            "classified_effect": effect,
+            "next_action": "本次调查限于只读。请在独立的用户授权回合提交修复操作。",
+            **({"classification_error": classification_error} if classification_error else {}),
+        },
+    )
+
+
 # LLM: auto 只免去当前权限内的可选确认；宿主当次已核管理员 Full Access 仅免普通 MCP 的逐工具 always，插件及其他 always 仍本人确认。身份、路径、网络和插件 deny 不在此免除。
 # 第二个返回值只在精确批准 binding 匹配时为 True（用户确实批准过这次调用），沙箱内自动执行、策略不要求、auto 模式都为 False；执行器据此决定批准后是否再复核。
 # 函数用途: 结合用户审批选择、工具策略和精确批准记录决定是否需要弹窗，不把自主模式变成 Full Access。
@@ -605,9 +627,11 @@ def _approval_decision(
     request: ActionPolicyRequest,
     runtime: ToolRuntime,
     effect: str,
+    *,
+    investigation: bool = False,
 ) -> tuple[ActionDecision | None, bool]:
     mode = runtime.runtime_policy.approval_policy.mode
-    human_required = runtime.runtime_policy.approval_policy.require_human
+    human_required = investigation or runtime.runtime_policy.approval_policy.require_human
     always_effects = runtime.runtime_policy.approval_policy.always_effects
     sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
     effect_contained = sandbox_effect_is_contained(
@@ -634,7 +658,7 @@ def _approval_decision(
     boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
     approved = boundary.get("approved_actions")
     approved_actions = tuple(approved) if isinstance(approved, (list, tuple)) else ()
-    if human_required:
+    if human_required and not investigation:
         import time
 
         from ..contracts.gates.tool_approval_binding import has_current_human_approval
@@ -654,6 +678,15 @@ def _approval_decision(
             approved_actions=approved_actions,
         )
     )
+    if investigation:
+        if decision.allowed or "APPROVAL_BINDING_MISMATCH" in decision.finding_codes:
+            return _investigation_denial(effect), False
+        return _ask(
+            request.call, "INVESTIGATION_READ_ONLY_REJECTED", effect=effect,
+            evidence={"gate": decision.to_dict(), "human_confirmation_required": True,
+                      "next_action": "调查回合只读。请将此修复提案放入独立的用户授权回合执行。"},
+            approval_kind="tool_action",
+        ), False
     if decision.allowed:
         return None, True
     if "APPROVAL_BINDING_MISMATCH" in decision.finding_codes:

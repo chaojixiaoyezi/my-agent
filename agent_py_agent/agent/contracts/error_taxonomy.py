@@ -11662,6 +11662,16 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="定时任务执行结束但产物 postcheck 断言未通过（缺失、字节或行数不足、或 JSON 断言不匹配）；用 schedule action=history 查看 postcheck_status 与 postcheck_checks 并修复产物生成，不可在未核实前盲目重放。",
     ),
+    "INVESTIGATION_READ_ONLY_REJECTED": ErrorContract(
+        code="INVESTIGATION_READ_ONLY_REJECTED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="调查只允许已确认的只读操作，工具未执行。请在独立的用户授权回合处理修复提案。",
+    ),
+    "POSTCHECK_ROOT_UNAVAILABLE": ErrorContract(
+        code="POSTCHECK_ROOT_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原执行目录身份无法确认，产物核验结果为 unknown。请检查运行记录及原目录，再决定是否重跑。",
+    ),
     "SCHEDULER_POSTCHECK_UNAVAILABLE": ErrorContract(
         code="SCHEDULER_POSTCHECK_UNAVAILABLE", category="storage", retryable=True,
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,

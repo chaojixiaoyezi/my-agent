@@ -902,6 +902,8 @@ def _rejected_approval_execution(
     cancelled = decision_kind == "cancelled"
     reason_code = str(getattr(decision, "reason_code", "") or "")
     code = reason_code or ("CANCELLED" if cancelled else "APPROVAL_REJECTED")
+    if not cancelled and "INVESTIGATION_READ_ONLY_REJECTED" in execution.decision.reason_codes:
+        code = "INVESTIGATION_READ_ONLY_REJECTED"
     status = "cancelled" if cancelled else "failed"
     if repeated:
         message = (

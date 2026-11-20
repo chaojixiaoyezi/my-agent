@@ -245,8 +245,11 @@ class ExecutionTargetError(ScheduleValidationError):
 
 # LLM: 缺省保持原会话继承行为；固定引用必须是明确档案，不能用可变 default 别名代替固定语义。
 # 函数用途: 校验一项计划的执行位置和模型来源，返回可冻结的规范对象。
-def normalize_execution(value: object) -> dict:
+def normalize_execution(value: object, *, allow_legacy_cwd: bool = False) -> dict:
     value = {} if value is None else value
+    if allow_legacy_cwd and isinstance(value, dict) and "cwd" in value:
+        # 旧运行记录的 cwd 仅交后验评估，用于识别原工作目录。
+        value = {key: item for key, item in value.items() if key != "cwd"}
     if not isinstance(value, dict) or set(value) - EXECUTION_DEFAULTS.keys():
         raise ScheduleValidationError("execution 含不支持的字段")
     result = {**EXECUTION_DEFAULTS, **value}

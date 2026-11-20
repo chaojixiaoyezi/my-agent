@@ -17,6 +17,7 @@ from agent_py_agent.agent.scheduler import execution as sched_exec
 from agent_py_agent.agent.scheduler import service as service_module
 from agent_py_agent.agent.scheduler.execution import execute_scheduled_target, with_scheduled_work
 from agent_py_agent.agent.scheduler.policy import apply_run_policy, normalize_policy
+from agent_py_agent.agent.scheduler.postcheck import snapshot_execution_root
 from agent_py_agent.agent.scheduler.repository import (
     SchedulerJobCreateRequest,
     SchedulerRepository,
@@ -118,9 +119,12 @@ def _setup_service(
     return workspace, store, repository, service, agent
 
 
-def _claim(repository: SchedulerRepository, run_id: str, *, now: float) -> SchedulerRunClaim:
+def _claim(repository: SchedulerRepository, run_id: str, *, now: float, execution_root=None) -> SchedulerRunClaim:
     row = repository.claim_run(run_id, lease_seconds=300, now=now)
     assert row is not None
+    if execution_root is not None:
+        repository.mark_run_running(run_id, str(row["claim_id"]), now=now,
+                                    execution_root_ref=snapshot_execution_root(execution_root))
     return SchedulerRunClaim(run_id=str(row["run_id"]), claim_id=str(row["claim_id"]), run=row)
 
 
@@ -196,7 +200,7 @@ def test_service_finish_postcheck_outcomes_and_unlocked_evaluation(tmp_path, mon
     monkeypatch.setattr(service_module, "evaluate_postcheck", _traced_eval)
 
     run1 = repository.reserve_manual_run(job["job_id"], now=1010.0)
-    claim1 = _claim(repository, run1["run_id"], now=1011.0)
+    claim1 = _claim(repository, run1["run_id"], now=1011.0, execution_root=workspace)
     term1 = service.finish(claim1, status="done", response="ok", now=artifact.stat().st_mtime + 1.0)
     assert term1 is not None
     assert term1["status"] == "done"
@@ -208,7 +212,7 @@ def test_service_finish_postcheck_outcomes_and_unlocked_evaluation(tmp_path, mon
     # 2. Missing file -> SCHEDULER_POSTCHECK_FAILED / business.
     artifact.unlink()
     run2 = repository.reserve_manual_run(job["job_id"], now=1020.0)
-    claim2 = _claim(repository, run2["run_id"], now=1021.0)
+    claim2 = _claim(repository, run2["run_id"], now=1021.0, execution_root=workspace)
     term2 = service.finish(claim2, status="done", response="ok", now=1025.0)
     assert term2 is not None
     assert term2["status"] == "failed"
@@ -219,7 +223,7 @@ def test_service_finish_postcheck_outcomes_and_unlocked_evaluation(tmp_path, mon
     # 3. Stale output -> SCHEDULER_OUTPUT_STALLED / stalled.
     artifact.write_text("stale payload", encoding="utf-8")
     run3 = repository.reserve_manual_run(job["job_id"], now=1100.0)
-    claim3 = _claim(repository, run3["run_id"], now=1101.0)
+    claim3 = _claim(repository, run3["run_id"], now=1101.0, execution_root=workspace)
     far_future = artifact.stat().st_mtime + 100.0
     term3 = service.finish(claim3, status="done", response="ok", now=far_future)
     assert term3 is not None
@@ -240,7 +244,7 @@ def test_service_finish_postcheck_outcomes_and_unlocked_evaluation(tmp_path, mon
         },
     )
     run4 = repository.reserve_manual_run(job["job_id"], now=1200.0)
-    claim4 = _claim(repository, run4["run_id"], now=1201.0)
+    claim4 = _claim(repository, run4["run_id"], now=1201.0, execution_root=workspace)
     term4 = service.finish(claim4, status="done", response="ok", now=1205.0)
     assert term4 is not None
     assert term4["status"] == "unknown"
@@ -795,7 +799,8 @@ def test_schedule_tool_on_failure_postcheck_schema_and_projections(tmp_path) -> 
     job_id = job_proj["job_id"]
     run = repository.reserve_manual_run(job_id, now=2006.0)
     claim = _claim(repository, run["run_id"], now=2006.0)
-    repository.mark_run_running(claim.run_id, claim.claim_id, now=2006.0)
+    repository.mark_run_running(claim.run_id, claim.claim_id, now=2006.0,
+                                execution_root_ref=snapshot_execution_root(_workspace))
     repository.record_rule_result(
         claim.run_id,
         claim.claim_id,

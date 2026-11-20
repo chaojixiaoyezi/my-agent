@@ -2521,6 +2521,16 @@ def _run_params(
     )
     if resolved_goal_context.goal is not None and isinstance(task_attributes, dict):
         task_attributes["thread_goal_id"] = resolved_goal_context.goal.goal_id
+    effect_policy = ""
+    scheduled = None
+    if agent is not None and str(request.task_id or "").startswith("srun_"):
+        from ..scheduler.execution import execution_run
+
+        scheduled = execution_run(agent, request)
+        if scheduled is not None and (
+            scheduled.get("effect_policy") == "read_only" or scheduled.get("trigger") == "failure_investigation"
+        ):
+            effect_policy = "read_only"
     carried_tool_calls = _active_turn_carry_records(
         task_attributes, _background_active_turn_tool_calls(request, resolved_goal_context),
     )
@@ -2562,7 +2572,9 @@ def _run_params(
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
             ),
+            effect_policy=effect_policy,
         ),
+        write_boundary={"effect_policy": effect_policy} if effect_policy else None,
         root_user_prompt=(
             resolved_goal_context.task_objective
             if _is_active_turn_lifecycle_continuation(
@@ -2575,20 +2587,22 @@ def _run_params(
         # 与前台同源的会话历史：后台切片不再只带一份有界摘要指针。
         conversation_history_seed=history_seed,
         business_context=_business_context_from_wake(
-            agent, thread_id, request, session_origin=resolved_goal_context.session_task_origin, origin_resolved=True),
+            agent, thread_id, request, session_origin=resolved_goal_context.session_task_origin, origin_resolved=True,
+            scheduled=scheduled, scheduled_resolved=True),
     )
 
 
 def _business_context_from_wake(agent, thread_id: str, request: BackgroundRunRequest, *,
-                                session_origin=None, origin_resolved=False):
+                                session_origin=None, origin_resolved=False,
+                                scheduled=None, scheduled_resolved=False):
     from ..scheduler.execution import execution_run
     from ..scheduler.execution_policy import scheduled_business_context
     from .business_contracts import BusinessExecutionContext
 
-    if agent is not None and str(getattr(request, 'task_id', '') or '').startswith('srun_'):
+    if not scheduled_resolved and agent is not None and str(getattr(request, 'task_id', '') or '').startswith('srun_'):
         scheduled = execution_run(agent, request)
-        if scheduled is not None:
-            return scheduled_business_context(agent, scheduled)
+    if scheduled is not None:
+        return scheduled_business_context(agent, scheduled)
     session_task_id = _session_task_id_from_wake(request)
     if agent is None:
         return None
@@ -2908,10 +2922,17 @@ def _background_run_allowed_tools(
     agent: object | None,
     config: object | None,
     request: BackgroundToolPolicyRequest,
+    *,
+    effect_policy: str = "",
 ) -> list[str] | None:
     decision = background_tool_policy_decision(config, request=request)
     if decision.profile == "plugin_goal_zero_tools":
         return []
+    if effect_policy == "read_only":
+        # 冻结当前有声明的工具。混合工具按参数裁决，写操作只能提出审批请求。
+        registry = getattr(agent, "tools", None)
+        snapshot = getattr(registry, "runtime_snapshot", None)
+        return [runtime.model_spec.name for runtime in snapshot().runtimes] if callable(snapshot) else []
     # A durable user schedule is a fresh turn of the same owner agent, not the
     # internal wait/progress lane.  通道运行时 follows the same full-agent-turn
     # model; registry owner policy still removes disabled tools fail-closed.

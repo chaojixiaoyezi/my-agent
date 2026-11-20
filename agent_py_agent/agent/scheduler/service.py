@@ -11,15 +11,15 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from ..conversation.learning_source import LEARNING_SOURCE_KEY, schedule_projection
+from ..runtime_errors import DataCorruptionError
 from ..settings.defaults import default_config_int
 from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
-from .postcheck import evaluate_postcheck
+from .postcheck import evaluate_postcheck, snapshot_execution_root, verify_execution_root
 from .recovery import fail_unstarted, prepare_repository
 from .repository import (
     SchedulerConflictError,
@@ -311,29 +311,19 @@ class SchedulerService:
             lease_seconds=lease_seconds,
         )
 
-    def _postcheck_root(self, run: dict[str, object]) -> Path:
-        """定位运行时的工作区根目录（依次读取 execution.cwd、线程 cwd、owner_root、store 父目录）。"""
-        exec_cfg = run.get("execution")
-        if isinstance(exec_cfg, dict):
-            cwd_text = str(exec_cfg.get("cwd") or "").strip()
-            if cwd_text:
-                return Path(cwd_text)
-        if self.conversation_store is not None:
-            for key in ("thread_id", "origin_thread_id"):
-                thread_id = str(run.get(key) or "").strip()
-                if not thread_id:
-                    continue
-                try:
-                    thread = self.conversation_store.threads.load(thread_id)
-                except (OSError, ValueError):
-                    thread = None
-                cwd_text = str(getattr(thread, "cwd", "") or "").strip() if thread is not None else ""
-                if cwd_text:
-                    return Path(cwd_text)
-        owner_root = getattr(getattr(self.repository, "quota_enforcer", None), "owner_root", None)
-        if owner_root:
-            return Path(owner_root)
-        return self.repository.store_path.parent
+    def _postcheck_root(self, claim: SchedulerRunClaim) -> object:
+        """从当前领取的冻结事实或旧运行的显式 cwd 取得后验根引用。"""
+        run = claim.run
+        if "execution_root_ref" not in run:
+            # 领取副本早于 started 事务，完成前回读同一领取，避免使用旧副本猜目录。
+            current = self.repository.get_active_run(claim.run_id)
+            if current is None or current.get("claim_id") != claim.claim_id:
+                return None
+            run = current
+        if "execution_root_ref" in run:
+            return run["execution_root_ref"]
+        execution = run.get("execution")
+        return snapshot_execution_root(execution.get("cwd")) if isinstance(execution, dict) else None
 
     def _postcheck_read_bytes(self) -> int:
         """读取单次 postcheck 内容检查字节预算，优先读取组合根 provider，回退现有配置与默认权威。"""
@@ -383,14 +373,26 @@ class SchedulerService:
         # 严格在获取 _mutation_scope 锁之前执行后验文件/输出检查，避免文件 I/O 阻塞调度主锁。
         if final_status == "done" and isinstance(postcheck_spec, dict):
             eval_now = _current_timestamp(now)
-            root = self._postcheck_root(claim.run)
-            read_bytes = self._postcheck_read_bytes()
-            eval_result = evaluate_postcheck(
-                postcheck_spec,
-                root=root,
-                now=eval_now,
-                read_bytes=read_bytes,
-            )
+            try:
+                ref = self._postcheck_root(claim)
+            except (OSError, ValueError, DataCorruptionError) as exc:
+                root, root_error = None, type(exc).__name__
+            else:
+                root, root_error = verify_execution_root(ref)
+            if root is not None:
+                eval_result = evaluate_postcheck(
+                    postcheck_spec, root=root, now=eval_now, read_bytes=self._postcheck_read_bytes(),
+                )
+                _, root_error = verify_execution_root(ref)
+            if root_error:
+                eval_result = {
+                    "status": "unknown",
+                    "code": "POSTCHECK_ROOT_UNAVAILABLE",
+                    "failure_kind": "postcheck_unavailable",
+                    "root_error": root_error,
+                    "checks": [],
+                    "evaluated_at": eval_now,
+                }
             final_postcheck_observation = _bound_postcheck_observation(eval_result)
             eval_status = str(eval_result.get("status") or "")
             if eval_status == "failed":
@@ -405,7 +407,7 @@ class SchedulerService:
                 final_error_message = final_error_message or _format_postcheck_message(eval_result)
             elif eval_status != "passed":
                 final_status = "unknown"
-                final_error_code = final_error_code or "SCHEDULER_POSTCHECK_UNAVAILABLE"
+                final_error_code = str(eval_result.get("code") or final_error_code or "SCHEDULER_POSTCHECK_UNAVAILABLE")
                 final_failure_kind = str(eval_result.get("failure_kind") or "postcheck_unavailable")
                 final_error_message = final_error_message or _format_postcheck_message(eval_result)
         writer = (
@@ -595,6 +597,8 @@ def _format_postcheck_message(eval_result: dict[str, object]) -> str:
         for item in list(eval_result.get("checks") or [])[:4]
         if isinstance(item, dict)
     ]
+    if root_error := eval_result.get("root_error"):
+        return f"后验根目录不可核验（{root_error}）。执行结果待核实，请检查原执行目录后再决定是否重跑。"
     detail = f" ({', '.join(checks)})" if checks else ""
     return f"postcheck 未通过: status={status}, failure_kind={failure_kind or 'unknown'}{detail}"
 

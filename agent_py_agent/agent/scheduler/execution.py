@@ -42,7 +42,11 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
 
         if required_notice(agent, _run_request(kwargs)) is not None:
             return dependencies.run_once(kwargs)
-        service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
+        if claim.run.get("postcheck") and not claim.run.get("started_at") and "execution_root_ref" not in claim.run:
+            ref = _capture_execution_root(agent, service, claim.run, _run_request(kwargs))
+            service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now, execution_root_ref=ref)
+        else:
+            service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
         if claim.run.get('execution_target') is not None:
             try:
                 return execute_scheduled_target(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
@@ -72,6 +76,34 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         return dependencies.terminal_task(kwargs)
 
     return replace(dependencies, run_once=run_once, terminal_task=terminal_task)
+
+
+def _capture_execution_root(agent, service, run, request):
+    """沿实际工具工作目录裁决，在 started 事务外读取根目录身份。"""
+    from ..agent_core.runtime.loop_models import RunParams
+    from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from ..conversation.runtime import _background_task_attributes
+    from ..runtime_errors import DataCorruptionError
+    from .execution_policy import scheduled_business_context
+    from .postcheck import snapshot_execution_root
+
+    execution = run.get("execution")
+    if isinstance(execution, dict) and "cwd" in execution:
+        return snapshot_execution_root(execution["cwd"])
+    try:
+        thread = service.conversation_store.threads.require(run["thread_id"])
+        params = RunParams(
+            task_id=run["run_id"], run_id=run["run_id"],
+            source="scheduler_tool" if run.get("execution_target") or not run.get("use_llm", True) else "background_main_agent",
+            task_attributes=_background_task_attributes(thread.thread_id, request, agent, thread=thread),
+            business_context=scheduled_business_context(agent, run),
+        )
+        boundary = write_boundary_with_runtime_ledger(agent, params) or {}
+        cwd = boundary.get("execution_cwd") or getattr(getattr(agent, "tools", None), "workspace_root", None)
+        return snapshot_execution_root(cwd)
+    except (OSError, ValueError, KeyError, DataCorruptionError):
+        # 先记录未能取得身份，结案时仍按同一事实报告 unknown。
+        return None
 
 
 def _inject_failure_investigation_context(kwargs: dict, run: dict) -> dict:
@@ -569,7 +601,7 @@ def _commit_target_result(agent, service, claim, kwargs, output):
 def prepare_execution(service, run: dict, *, now: float) -> dict:
     if not service.repository.event_run_is_current(run):
         raise ValueError('事件订阅已停止或更新')
-    execution = normalize_execution(run.get("execution"))
+    execution = normalize_execution(run.get("execution"), allow_legacy_cwd=True)
     from ..conversation.models import ConversationThread
     from ..conversation.unbound_thread_store import ensure_unbound_thread
     from .thread_fallback import resolve_scheduler_execution_thread
@@ -724,7 +756,7 @@ def scheduled_model_scope(agent, thread, request):
         with selected_model_scope(agent, thread_id=thread.thread_id):
             yield
         return
-    policy = normalize_execution(run.get("execution"))
+    policy = normalize_execution(run.get("execution"), allow_legacy_cwd=True)
     origin_id = str(run.get("origin_thread_id") or run["thread_id"])
     origin = agent.conversation_store.threads.load(origin_id)
     if origin is None:
