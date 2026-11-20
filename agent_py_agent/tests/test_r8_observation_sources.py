@@ -286,13 +286,19 @@ def test_usage_cross_process_pending_publication_is_not_an_empty_complete_scope(
     child = context.Process(target=_append_in_child, args=(str(case.store.storage.root), case.task.target_thread_id, arrived, release))
     child.start()
     try:
-        assert arrived.wait(10)
+        # 共享门禁的 spawn 需要重新载入解释器和模块。断言仍在子进程暂停提交时执行。
+        assert arrived.wait(30), 'usage writer did not reach the projection pause'
         with pytest.raises(ValueError, match='incomplete'):
             usage.window_source_plan(since=1999, until=2001)
     finally:
         release.set()
         child.join(15)
-    assert child.exitcode == 0
+        exited = child.exitcode
+        if child.is_alive():
+            child.kill()
+            child.join()
+        child.close()
+    assert exited == 0
     _finish_prepare(usage)
     rows, errors = usage.events_window_report(case.task.target_thread_id, since=1999, until=2001)
     assert not errors and [row.event_id for row in rows] == ['child-event']
@@ -336,8 +342,8 @@ def test_usage_source_busy_does_not_block_canonical_append_or_claim_complete(tmp
                                    'model_calls': _decision_calls(finished=1, timed_out=0, input_tokens=1), 'now': 2000})
         assert saved.event_id == 'while-busy' and time.monotonic() - started < 1
         assert usage.prepare_window_sources(limit=1)['cursor']['busy']
-    with pytest.raises(ValueError, match='incomplete'):
-        usage.window_source_plan(since=1999, until=2001)
+        with pytest.raises(ValueError, match='incomplete'):
+            usage.window_source_plan(since=1999, until=2001)
     _finish_prepare(usage)
     assert list(usage.window_source_plan(since=1999, until=2001).rows())
 
