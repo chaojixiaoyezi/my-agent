@@ -7972,6 +7972,14 @@
       "description": "已终态并完成交付的子代理线程默认保留三天；普通用户会话仍保留365天。"
     },
     {
+      "name": "_CANDIDATE_NODE_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/memory_store/retention_scan.py",
+      "value": 86400,
+      "unit": "秒",
+      "category": "其它",
+      "description": "候选 JSON 节点确认不可达后至少保留 24 小时，给重新引用和事务恢复留出时间。"
+    },
+    {
       "name": "_CONTEXT_BUNDLE_SNAPSHOT_DAYS",
       "file": "agent_py_agent/agent/memory_store/retention_scan.py",
       "value": 30,

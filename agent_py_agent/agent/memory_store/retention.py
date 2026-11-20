@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePath, PureWindowsPath
 
 from ..common.json_io import locked_json_path
+from .candidate_ledger import candidate_records_directory
 from .candidates import CandidateService
 from .jsonl import JsonlMemory, MemoryRecord
 from .retention_apply import execute_retention_plan, record_retention_report
@@ -22,7 +23,11 @@ from .retention_models import (
     MemoryRetentionPolicy,
     MemoryRetentionReport,
 )
-from .retention_scan import build_retention_plan
+from .retention_scan import (
+    advance_candidate_node_maintenance,
+    build_retention_plan,
+    file_fingerprint,
+)
 from .retention_scan_budget import RetentionScanBudget
 
 # LLM: 这几类错误表示"读不懂策略/仓库本身"，此时不能动任何数据；其余错误都能定位到某棵子树并单独保护。
@@ -132,6 +137,7 @@ class MemoryRetentionService:
         current = _normalize_now(now)
         from . import retention_scan_budget as budgets
 
+        lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         if commit_transition is not None:
             from .retention_transition import RetentionPolicyChangedError, apply_with_transition
 
@@ -139,9 +145,20 @@ class MemoryRetentionService:
                              scan_cursor=budgets.load_scan_cursor(self.home))
             if expected_policy_fingerprint is not None and plan.policy_fingerprint != expected_policy_fingerprint:
                 raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
-            return apply_with_transition(self, plan, current, commit_transition,
-                                         scan_cursor=plan.scan_cursor)
-        lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
+            report = apply_with_transition(self, plan, current, commit_transition, scan_cursor=plan.scan_cursor)
+            directory = candidate_records_directory(Path(self.home.owner_memory_candidates_jsonl))
+            if not report.applied or not directory.exists():
+                return report
+
+            def advance():
+                with locked_json_path(lock_anchor):
+                    if file_fingerprint(Path(self.home.owner_retention_json)) != report.policy_fingerprint:
+                        raise RetentionPolicyChangedError("original_retention_policy_changed")
+                    updated = self._advance_candidate_nodes(report, current)
+                    budgets.save_scan_cursor(self.home, updated.scan_cursor)
+                    return updated
+
+            return commit_transition(advance)
         with locked_json_path(lock_anchor):
             plan = self.plan(now=current, scan_budget=_call_retention_callback(budgets.RetentionScanBudget.default, config=self.config),
                              scan_cursor=budgets.load_scan_cursor(self.home))
@@ -166,11 +183,19 @@ class MemoryRetentionService:
                 config=self.config,
             )
             applied = replace(applied, scan_partial=plan.scan_partial or applied.scan_partial)
+            applied = self._advance_candidate_nodes(applied, current)
             budgets.save_scan_cursor(self.home, applied.scan_cursor)
             # 执行期错误 + 被隔离保护的扫描错误一起回执：执行过什么、还护着什么，都要看得见。
             if plan.errors and applied.errors != plan.errors:
                 return replace(applied, errors=(*applied.errors, *plan.errors))
             return applied
+
+    def _advance_candidate_nodes(self, report, now):
+        cursor, partial, errors = advance_candidate_node_maintenance(
+            self.home, now=now, config=self.config, scan_cursor=report.scan_cursor,
+        )
+        return replace(report, scan_cursor=cursor, scan_partial=report.scan_partial or partial,
+                       errors=(*report.errors, *errors))
 
     # LLM: 正式长期记忆删除只按稳定 entry_id/version 调 JsonlMemory 权威链；不得重写 ConversationStore。
     # 函数用途: 硬删除一条正式长期记忆并触发正文、索引、候选 redaction、tombstone 和 ops 清理。

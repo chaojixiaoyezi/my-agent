@@ -1667,7 +1667,8 @@ def test_bad_anchor_node_is_not_empty_result(tmp_path):
     header = candidate_ledger.read_manifest(service.path)
     rows = candidate_ledger.CandidateRows(service.path, header)
     reference = rows.index.get(rows.index.get(rows.root, 'anchor/groups'), group_key({'scope_type': 'personal', 'scope_key': 'personal'}, 'lesson'))
-    (service.path.parent / (service.path.name + '.records') / reference['ref']['ref']).write_bytes(b'broken')
+    directory = candidate_ledger.candidate_records_directory(service.path)
+    candidate_ledger.candidate_record_path(directory, reference['ref']['ref']).write_bytes(b'broken')
     with pytest.raises((ValueError, OSError)):
         service.anchor_rows({('personal', 'personal')})
 

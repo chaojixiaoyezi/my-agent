@@ -318,6 +318,11 @@ class ImmutableIndexNodeMissing(FileNotFoundError):
     pass
 
 
+def immutable_node_path(directory: Path, ref_name: str) -> Path:
+    """将已验证的不可变引用名映射到哈希前缀目录，引用本身保持原样。"""
+    return directory / ref_name[:2] / ref_name
+
+
 # LLM: 内容寻址索引只存储调用领域给出的不可变投影，根引用必须由原CAS封印；不创建业务提交权威。
 # 类用途: 为有界热清单提供共享历史节点的固定深度键索引。
 class ImmutableJsonIndex:
@@ -377,19 +382,26 @@ class ImmutableJsonIndex:
             if size > read_budget.max_bytes - read_budget.size:
                 raise MessageReadDeferred('message index read budget exhausted')
             read_budget.charge(size=size)
+        name = ref['ref']
         nodes = ImmutableNodeStore(self.root, self.parts)
-        raw = nodes.read(ref['ref']) if read_budget is None else nodes.read(ref['ref'], max_bytes=size)
+        raw = nodes.read(name) if read_budget is None else nodes.read(name, max_bytes=size)
         if raw is None:
             if read_budget is not None:
                 if read_budget.exhausted():
                     raise MessageReadDeferred('message index sentinel exceeds read budget')
                 read_budget.charge(size=1)
-            raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
+            shard = immutable_node_path(Path(*self.parts), name).parts
+            raw = read_bytes_beneath(self.root, shard, max_bytes=size)
+            if raw is None:
+                raw = read_bytes_beneath(self.root, (*self.parts, name), max_bytes=size)
+                if raw is None:
+                    # 旧叶可以在两次探测之间改名，此时只复查目标分片一次。
+                    raw = read_bytes_beneath(self.root, shard, max_bytes=size)
         if raw is None:
             # 保留准确缺失节点，调用方才能定位坏引用；不得把缺源降级为空索引。
             raise ImmutableIndexNodeMissing(
                 errno.ENOENT, 'immutable index node is missing',
-                str(self.root.joinpath(*self.parts, ref['ref'])),
+                str(self.root.joinpath(*self.parts, name)),
             )
         if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
             raise OSError('immutable index node digest or length mismatches')
