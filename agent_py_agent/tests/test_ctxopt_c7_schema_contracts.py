@@ -42,8 +42,9 @@ _SCHEMA_HASHES = {
     'create_subagents': 'ef1b9cf22c2f295fd45e0028a813a477a322410abdc9df9c4478a93918e5f5da',
     'create_subagents_media': 'ce6289c046eeb5401fdcc3e4e2a6e65ca5663f9e0d7b34468c5e8f633c26800b',
     'task_progress': 'c86032c3c99ec9d562d658b4b0e9503ee96974f4b6d98eaf309a2218c719b0d1',
-    'remember': '51e17f7ffb2f7e514de412df8f74824af4b45a2c8f85ad2c9b139107f6a51438',
-    'audit_records': '00f2b3516506b48d863687c57fb92d0e6eb65ad819a7c429ce0542f2ea78fd60',
+    'remember': '124dda386030e5fe6c08600ad180abcc386c4ad62db770a3fd692569380f4aed',
+    # M49 已发布的游标说明包含固定首查历史窗口及换代后的重查指引。
+    'audit_records': 'aa673ba9ffe1500fbc8760f062cda9820d94da62fe34dd6440613e49b8b179ef',
     'request_credentials': '6ff4f8186220cb33fbd9bcfe882ad6e5a6e919cadf3d4fc7fbf0a725b3aa03e2',
     'update_goal': '390f15d94028bcccbf55e1a7532acc3ad803090bcdd2081f3ba5f259150ed680',
     'package_build': '0272c8997985e250c437530980369f6621b3c412b25e99ed688d46e40c7a209a',
@@ -55,6 +56,7 @@ _SCHEMA_HASHES = {
 # M01 review: request_credentials routes collected refs to run_command/browser-lite fill or configure+web_fetch (FC1).
 _DESCRIPTION_HASHES = {
     **_DESCRIPTION_HASHES,
+    'remember': '3c1caae9d04bf663488f7f086d4db61158a8f320650cd3a48cc839888b0776c8',
     'create_subagents': 'b653088995df2929e2d41b1e40a9ab6bfd014b46fedd8f86987810da58b29fa9',
     'request_credentials': 'ecbaa068dcfb2ba12878ebec1161379d7f3765bee51fa80ecf78c47943f082b2',
     'audit_records': '7840cb38479495190236671b35db4a09bf8e45b1cf7f50521baef2136b58a0c9',

@@ -14,6 +14,7 @@ from agent_py_agent.agent.gateway_parts.request_space import (
     GatewayMemoryScopeError,
     gateway_memory_recall_scope,
 )
+from agent_py_agent.agent.memory_store.jsonl import MemoryRecord
 from agent_py_agent.agent.memory_store.recall import MemoryRecallScope, runtime_long_term_scope
 from agent_py_agent.agent.settings.config import AgentConfig
 
@@ -41,7 +42,7 @@ def spaces(tmp_path, monkeypatch):
 
 
 def record(scope, key):
-    return SimpleNamespace(attributes={'scope_type': scope, 'scope_key': key}, kind='fact')
+    return MemoryRecord('user', 'scope fixture', kind='fact', attributes={'scope_type': scope, 'scope_key': key})
 
 
 @pytest.mark.parametrize('index', [0, 1, 2])

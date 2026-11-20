@@ -11,6 +11,8 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
@@ -60,10 +62,13 @@ from ..user_space.owner_quota import (
 )
 from . import project_bindings
 from .candidate_models import (
+    _MAX_CONTENT_CHARS,
+    CandidateObservation,
     MemoryCandidate,
     MemoryScope,
     host_promotion_mode,
     normalize_reference_list,
+    stable_candidate_id,
 )
 from .candidates import (
     PROMOTION_BATCH_MAX_COUNT,
@@ -448,6 +453,92 @@ def _proof_matches(ref: dict, proof: dict) -> bool:
     return (str(ref.get("content_hash") or "") == proof["content_hash"]
             and str(ref.get("role") or proof["role"]) == proof["role"]
             and str(ref.get("quote") or "").strip() == proof["quote"])
+
+
+def register_memory_feedback(runtime_db, *, entry_id: str, version: int, verdict: str,
+                             task_identity: str, note: str) -> tuple[dict[str, object], bool, str]:
+    """插入一次并在原事务中读取胜出的权威回执及其原始说明。"""
+    receipt_id = hashlib.sha256(f"{entry_id}\0{version}\0{task_identity}".encode()).hexdigest()
+    note_key = f"memory_feedback_note:{receipt_id}"
+    with runtime_db.transaction() as conn:
+        inserted = conn.execute(
+            "INSERT INTO memory_feedback_receipts (receipt_id, entry_id, version, verdict, task_identity, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(entry_id, version, task_identity) DO NOTHING",
+            (receipt_id, entry_id, version, verdict, task_identity, time.time()),
+        ).rowcount == 1
+        receipt = conn.execute(
+            "SELECT receipt_id, entry_id, version, verdict, task_identity, created_at "
+            "FROM memory_feedback_receipts WHERE entry_id=? AND version=? AND task_identity=?",
+            (entry_id, version, task_identity),
+        ).fetchone()
+        if inserted and note:
+            # 可选说明与原回执一起提交，保持 C10.5 的六列合同与首写语义。
+            conn.execute("INSERT INTO metadata (key, value) VALUES (?, ?)", (note_key, note))
+        saved_note = conn.execute("SELECT value FROM metadata WHERE key=?", (note_key,)).fetchone()
+    return dict(receipt), inserted, saved_note[0] if saved_note is not None else ""
+
+
+def project_memory_feedback_hints(runtime_db, entries: list[dict[str, object]]) -> dict[str, object] | None:
+    """为可见条目的确切版本附加只读提示，按冷热检索页大小批量点查。"""
+    if runtime_db is None or not entries:
+        return None
+    from ..io.readonly_sqlite import readonly_sqlite_connection
+
+    keys = [(str(entry["entry_id"]), int(entry["version"])) for entry in entries]
+    pairs = ", ".join("(?, ?)" for _ in keys)
+    try:
+        with readonly_sqlite_connection(runtime_db.db_path, require_private_directory=False) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"WITH requested(entry_id, version) AS (VALUES {pairs}) "
+                "SELECT f.receipt_id, f.entry_id, f.version, f.verdict, f.created_at "
+                "FROM requested AS r JOIN memory_feedback_receipts AS f ON f.receipt_id = ("
+                "SELECT receipt_id FROM memory_feedback_receipts WHERE entry_id=r.entry_id AND version=r.version "
+                "ORDER BY created_at DESC, receipt_id DESC LIMIT 1)",
+                tuple(value for key in keys for value in key),
+            ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        return {"status": "unavailable", "error_code": "TOOL_EXECUTION_FAILED", "error_type": type(exc).__name__,
+                "hint": "可继续核对正式条目，稍后重试以读取纠正线索。"}
+    hints = {(row["entry_id"], row["version"]): dict(row) for row in rows}
+    for entry, key in zip(entries, keys, strict=True):
+        if key in hints:
+            entry["feedback"] = hints[key]
+    return None
+
+
+def queue_memory_feedback_review(candidates, *, record: MemoryRecord, receipt: dict[str, object],
+                                 note: str) -> tuple[str, str]:
+    """将回执作为待审线索送入 Curator 共用候选账，候选没有正式落点。"""
+    receipt_id = str(receipt["receipt_id"])
+    attrs = record.attributes if isinstance(record.attributes, dict) else {}
+    try:
+        scope = MemoryScope.from_value({"scope_type": attrs.get("scope_type"), "scope_key": attrs.get("scope_key")})
+    except ValueError:
+        # 旧条目没有类型化范围时，待审条目仍只保存在当前 owner 的候选账。
+        scope = MemoryScope.from_value({"scope_type": "personal", "scope_key": "personal"})
+    content = f"核对记忆条目 {record.entry_id} 的第 {receipt['version']} 版，反馈为 {receipt['verdict']}。"
+    if note:
+        content += f" 说明：{note}"
+    observed_at = datetime.fromtimestamp(float(receipt["created_at"]), timezone.utc).isoformat()
+    observation = CandidateObservation(
+        candidate_type="discard", origin="model_inferred", content=content[:_MAX_CONTENT_CHARS], scope=scope,
+        subject_key=f"memory-feedback.{receipt_id}", proposed_action="none", promotion_target="none",
+        target_entry_id=record.entry_id, target_entry_version=record.version,
+        observation_id=receipt_id, observed_at=observed_at,
+        evidence_refs=({"kind": "memory_feedback", "ref_id": receipt_id, "entry_id": record.entry_id,
+                        "version": record.version, "verdict": receipt["verdict"]},),
+        source_task_ids=(str(receipt["task_identity"]),),
+    )
+    candidate_id = stable_candidate_id(
+        candidate_type=observation.candidate_type, content=observation.content, subject_key=observation.subject_key,
+        scope=scope, proposed_action=observation.proposed_action, target_entry_id=observation.target_entry_id,
+    )
+    try:
+        candidate = candidates.get(candidate_id)
+    except KeyError:
+        candidate = candidates.observe(observation)
+    return candidate.candidate_id, candidate.status
 
 
 # LLM: result 只说明机器决策和正式 ref，不包含候选或历史记忆正文。

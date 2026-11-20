@@ -458,6 +458,20 @@ _BASE_RUNTIME_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_llm_records_owner_task ON llm_call_records(owner_id, task_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_llm_records_owner_model ON llm_call_records(owner_id, model, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_outbox_scope_owner ON outbox_entries(scope, owner_id, created_at, outbox_id)",
+    # 纠正回执是权威事实，schema 升级和派生记忆索引重建均保留原行。
+    """
+    CREATE TABLE IF NOT EXISTS memory_feedback_receipts (
+        receipt_id TEXT PRIMARY KEY,
+        entry_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        verdict TEXT NOT NULL,
+        task_identity TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        UNIQUE(entry_id, version, task_identity)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memory_feedback_latest "
+    "ON memory_feedback_receipts(entry_id, version, created_at DESC, receipt_id DESC)",
 )
 
 
