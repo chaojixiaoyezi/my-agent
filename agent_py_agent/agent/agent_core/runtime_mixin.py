@@ -952,6 +952,13 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
     # ConversationStore before remember or Curator can claim message evidence.
     current_params = bind_cli_run_conversation(agent, current_params, user_prompt)
     current_params = _bind_main_agent_turn_params(agent, user_prompt, current_params)
+    from ..tooling.host_output_redaction import hold_turn_output
+
+    with hold_turn_output(agent, current_params):
+        return _run_bound_turn(agent, user_prompt, current_params)
+
+
+def _run_bound_turn(agent, user_prompt: str, current_params: RunParams):
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(

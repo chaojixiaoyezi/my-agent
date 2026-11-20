@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from ..common.agent_time import now as display_now
@@ -22,6 +23,7 @@ from ..conversation.channels import (
 from ..conversation.compact_progress import normalize_conversation_compact_progress
 from ..conversation.context_usage import public_context_usage_identity
 from ..conversation.tool_input_progress import public_tool_input_progress
+from ..tooling.host_output_redaction import TurnHoldingHandle
 from .approval_session import ToolApprovalSessionCache
 from .progress_text_delta import TextDeltaBuffer
 from .stream_approval import StreamApproval, StreamApprovalRequestOptions
@@ -164,6 +166,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _conversation_identity: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _turn_credential_redaction: object | None = field(default=None, init=False, repr=False)
     _turn_credential_lease_release: Callable[[], None] | None = field(default=None, init=False, repr=False)
+    _credential_output_closed: bool = field(default=False, init=False, repr=False)
     _model_credential_filters: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _thinking_credential_filter: object | None = field(default=None, init=False, repr=False)
 
@@ -175,25 +178,38 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._text_delta = TextDeltaBuffer(holdback_chars=self.text_delta_holdback_chars,
                                           project=self._project_stream_text)
 
-    def bind_credential_redaction(self, turn_redaction: object) -> None:
-        """显式绑定当前回合的凭据跨块净化对象，并在流未关闭期间持有托管回合生命周期租约。"""
-        attach_if_managed = getattr(turn_redaction, "_attach_holder_if_managed", None)
-        new_release = attach_if_managed(self) if callable(attach_if_managed) else None
-        old_release = None
-        discard_new = None
+    def bind_turn_holding_handle(self, handle: TurnHoldingHandle) -> None:
+        self.bind_credential_redaction(handle.redaction, holding_handle=handle)
+
+    def bind_credential_redaction(self, turn_redaction: object, *,
+                                  holding_handle: TurnHoldingHandle | None = None) -> None:
+        """持有跨模型片的脱敏状态，同一回合的重复绑定不产生额外租约。"""
         with self._commit_lock:
-            if getattr(self, "_liveness_closed", False):
-                discard_new = new_release
-                new_release = None
-            if self._turn_credential_redaction is not turn_redaction or new_release is not None:
-                if self._turn_credential_lease_release is not new_release:
-                    old_release = self._turn_credential_lease_release
-                self._turn_credential_lease_release = new_release
+            if getattr(self, "_liveness_closed", False) or self._turn_credential_redaction is turn_redaction:
+                return
+            if holding_handle is not None:
+                lease = holding_handle.acquire(self)
+                new_release = partial(holding_handle.release, lease) if lease is not None else None
+            else:
+                attach = getattr(turn_redaction, "_attach_holder_if_managed", None)
+                new_release = attach(self) if callable(attach) else None
+            old_release = self._turn_credential_lease_release
+            self._turn_credential_lease_release = new_release
+            self._discard_credential_filters_unlocked()
+            if self._thinking_credential_filter is not None:
+                self._thinking_credential_filter.discard()
+                self._thinking_credential_filter = None
             self._turn_credential_redaction = turn_redaction
-        if callable(discard_new):
-            discard_new()
-        if callable(old_release):
+        if old_release is not None:
             old_release()
+
+    def _release_credential_turn(self) -> None:
+        with self._commit_lock:
+            release = self._turn_credential_lease_release
+            self._turn_credential_lease_release = None
+            self._credential_output_closed = self._turn_credential_redaction is not None
+        if release is not None:
+            release()
 
     def _credential_filter_for_call(self, model_call_id: str):
         turn_red = self._turn_credential_redaction
@@ -756,12 +772,6 @@ class BufferedChunkStreamWriter(StreamLiveness):
                     self._thinking_credential_filter.discard()
             if not claim_deferred_closeout(self, close_sinks=True):
                 close_writer_sinks_now(self)
-                release = None
-                with self._commit_lock:
-                    release = self._turn_credential_lease_release
-                    self._turn_credential_lease_release = None
-                if callable(release):
-                    release()
 
     # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程活跃发布或延后收口仍在途则延后prepare_final并在锁外返回complete=False。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替，不在在途发布未完时宣称快照complete。
@@ -794,7 +804,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
 def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
     from ..common.log_redaction import redact_sensitive_value
 
-    if still_current is not None and not still_current():
+    if writer._credential_output_closed or (still_current is not None and not still_current()):
         return
     if writer._final_only and not writer.rich_transcript and event.get("kind") in {
         "runtime_progress", "tool_progress", "assistant_commentary", "model_liveness", "tool_liveness",

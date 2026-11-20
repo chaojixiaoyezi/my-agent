@@ -226,11 +226,11 @@ def test_128_sequential_unhashable_run_params_reclaim_on_gc_preserving_concurren
     active_in_thread = active_turn_redactions_for_scope(owner_key=owner_dir, thread_id="thr-shared")
     assert active_in_thread == (long_turn,)
     assert f"{owner_dir}::req-long-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-    assert long_secret in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    assert long_secret in log_red_mod._ACTIVE_TURN_LOG_COUNTS
     for idx in range(128):
         assert f"{owner_dir}::req-seq-{idx:03d}" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
     for sec in seq_secrets:
-        assert sec not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+        assert sec not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
 
     long_writer.write(f"长回合尾段：{long_secret}\n")
     long_writer.close()
@@ -243,7 +243,7 @@ def test_128_sequential_unhashable_run_params_reclaim_on_gc_preserving_concurren
     assert long_turn.active is False
     assert active_turn_redactions_for_scope(owner_key=owner_dir, thread_id="thr-shared") == ()
     assert f"{owner_dir}::req-long-0" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-    assert long_secret not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    assert long_secret not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
 
 
 def test_65_simultaneous_turns_across_threads_preserve_leased_turn_zero_and_log_after_lru_eviction(
@@ -301,7 +301,7 @@ def test_65_simultaneous_turns_across_threads_preserve_leased_turn_zero_and_log_
 
         # turn-0 虽从 owner 通配桶溢出，但仍驻留在 (owner, 'thr-0') 分桶中，非真正孤儿，日志保护必须保留。
         assert f"{owner_dir}::turn-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-        assert secret_0 in log_red_mod._ACTIVE_TURN_LOG_FLAT
+        assert secret_0 in log_red_mod._ACTIVE_TURN_LOG_COUNTS
         rec = logging.getLogger("test.r2.turn0").makeRecord(
             "test.r2.turn0", logging.INFO, __file__, 1, "diag=%s", (secret_0,), None
         )
@@ -326,7 +326,7 @@ def test_65_simultaneous_turns_across_threads_preserve_leased_turn_zero_and_log_
             with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
                 assert not any(turn_0 in bucket.values() for bucket in hor_mod._ACTIVE_TURN_SCOPES.values())
             assert f"{owner_dir}::turn-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-            assert secret_0 in log_red_mod._ACTIVE_TURN_LOG_FLAT
+            assert secret_0 in log_red_mod._ACTIVE_TURN_LOG_COUNTS
             assert turn_0.active is True
             assert turn_0.public_text(f"live_handle={secret_0}") == "live_handle=[REDACTED]"
             assert active_turn_redactions_for_scope(
@@ -418,7 +418,7 @@ def test_outer_turn_lifetime_owner_survives_inner_run_params_replace_copy_gc_and
         turn_keys=(outer_request.conversation_turn_id, outer_request.task_id),
     )
     assert matched == (turn_red,)
-    assert bg_secret in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    assert bg_secret in log_red_mod._ACTIVE_TURN_LOG_COUNTS
 
     # 外层 BackgroundRunRequest 投递完毕释放后，自动关闭并清理全部索引与日志密钥。
     del outer_request
@@ -432,7 +432,7 @@ def test_outer_turn_lifetime_owner_survives_inner_run_params_replace_copy_gc_and
         )
         == ()
     )
-    assert bg_secret not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    assert bg_secret not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
 
 
 def test_atomic_register_values_and_try_register_exact_and_plus_one_count_and_byte_boundaries() -> None:
@@ -585,7 +585,7 @@ def test_scope_count_1024_eviction_and_zero_holder_direct_writer_close_invariant
         assert scope_turns[0].active is True
         assert scope_turns[0].public_text(f"echo={first_scope_sec}") == "echo=[REDACTED]"
         assert "scope-owner-0::sc-turn-0" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-        assert first_scope_sec not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+        assert first_scope_sec not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
     finally:
         for tr in scope_turns:
             tr.close()
@@ -677,7 +677,7 @@ def test_257_concurrent_leased_owners_keep_owner_zero_message_store_and_worker_l
         assert all_scope_keys.isdisjoint(hor_mod._ACTIVE_TURN_SCOPES)
     owner_keys = {turn.owner_key for turn in turns}
     assert not any(key.split("::", 1)[0] in owner_keys for key in log_red_mod._ACTIVE_TURN_LOG_SECRETS)
-    assert secret_0 not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    assert secret_0 not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
 
 
 def test_exact_only_lookup_returns_empty_for_mismatched_turn_keys_despite_active_neighbors(
@@ -764,7 +764,7 @@ def test_reverse_order_concurrent_try_register_publishes_latest_union_to_process
         published = log_red_mod._ACTIVE_TURN_LOG_SECRETS[log_key]
         assert older_secret in published
         assert newer_secret in published
-        assert {older_secret, newer_secret} <= set(log_red_mod._ACTIVE_TURN_LOG_FLAT)
+        assert {older_secret, newer_secret} <= set(log_red_mod._ACTIVE_TURN_LOG_COUNTS)
     finally:
         newer_published.set()
         turn.close()
@@ -803,7 +803,7 @@ def test_delayed_publisher_after_close_cannot_resurrect_log_or_scope_registratio
     # close() 之后才轮到的发布者读到 closed 快照，既不复活日志变体，也不复活作用域索引。
     assert turn.active is False
     assert log_key not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-    assert late_secret not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    assert late_secret not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
     with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
         for index in (hor_mod._ACTIVE_TURN_SCOPES, hor_mod._LEASED_ACTIVE_TURNS):
             assert not any(turn in bucket.values() for bucket in index.values())
@@ -827,7 +827,7 @@ def test_first_lease_on_active_direct_turn_promotes_into_leased_index_and_republ
         assert promoted._attach_lifetime_holder(holder) is not None
         # 首个租约挂到已活动回合：晋升进租约索引并按最新快照重新发布日志变体。
         assert f"{owner}::turn-promote-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-        assert promoted_secret in log_red_mod._ACTIVE_TURN_LOG_FLAT
+        assert promoted_secret in log_red_mod._ACTIVE_TURN_LOG_COUNTS
         with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
             for key in promoted._scope_keys():
                 assert hor_mod._LEASED_ACTIVE_TURNS[key]["turn-promote-0"] is promoted

@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import threading
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -28,7 +29,9 @@ _CONFIGURED_CREDENTIAL_VALUES: ContextVar[tuple[str, ...]] = ContextVar('configu
 _CONFIGURED_REDACTION_DEPTH: ContextVar[int] = ContextVar('configured_redaction_depth', default=0)
 _ACTIVE_TURN_LOG_LOCK = threading.Lock()
 _ACTIVE_TURN_LOG_SECRETS: dict[str, tuple[str, ...]] = {}
-_ACTIVE_TURN_LOG_FLAT: tuple[str, ...] = ()
+_ACTIVE_TURN_LOG_COUNTS: Counter[str] = Counter()
+_ACTIVE_TURN_LOG_PREFIXES: dict[int, dict[str, dict[str, None]]] = {}
+_MATCH_ACTIVE_TURN_LOG_VALUES: ContextVar[bool] = ContextVar('match_active_turn_log_values', default=False)
 _PROTOCOL_CONTROL_KEYS = frozenset({
     "action", "attempt_id", "call_id", "channel", "cleanup_confirmed", "code",
     "command_succeeded", "complete", "content_status", "coverage", "credential_applied",
@@ -76,27 +79,73 @@ def bind_active_credential_log_values(values: tuple[str, ...]) -> None:
     _CONFIGURED_SECRET_VALUES.set(tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *extra))))
 
 
+def _update_active_turn_log_value(value: str, change: int) -> None:
+    previous = _ACTIVE_TURN_LOG_COUNTS[value]
+    current = previous + change
+    if current:
+        _ACTIVE_TURN_LOG_COUNTS[value] = current
+    else:
+        del _ACTIVE_TURN_LOG_COUNTS[value]
+    # 短前缀只选候选，完整匹配仍核对原值；不为长凭据的每个字符分配节点。
+    if not previous or not current:
+        prefix = value[:4]
+        width = len(prefix)
+        if current:
+            bucket = _ACTIVE_TURN_LOG_PREFIXES.setdefault(width, {}).setdefault(prefix, {})
+            bucket[value] = None
+        else:
+            prefixes = _ACTIVE_TURN_LOG_PREFIXES[width]
+            bucket = prefixes[prefix]
+            del bucket[value]
+            if not bucket:
+                del prefixes[prefix]
+            if not prefixes:
+                del _ACTIVE_TURN_LOG_PREFIXES[width]
+
+
 def register_active_turn_log_values(scope_id: str, values: tuple[str, ...]) -> None:
-    """向进程级网关日志边界登记活动携卡回合的凭据变体（仅作用于 LogRecord，不跨 owner 影响业务正文）。"""
-    global _ACTIVE_TURN_LOG_FLAT
+    """更新本回合的引用差值，其他回合的日志匹配索引无需重建。"""
     if not scope_id:
         return
-    cleaned = tuple(v for v in values if v)
-    if not cleaned:
-        return
     with _ACTIVE_TURN_LOG_LOCK:
-        _ACTIVE_TURN_LOG_SECRETS[scope_id] = cleaned
-        _ACTIVE_TURN_LOG_FLAT = tuple(dict.fromkeys(v for seq in _ACTIVE_TURN_LOG_SECRETS.values() for v in seq))
+        previous = _ACTIVE_TURN_LOG_SECRETS.get(scope_id, ())
+        if previous is values:
+            return
+        old = set(previous)
+        current = {value for value in values if value}
+        for value in old - current:
+            _update_active_turn_log_value(value, -1)
+        for value in dict.fromkeys(values):
+            if value and value not in old:
+                _update_active_turn_log_value(value, 1)
+        if current:
+            _ACTIVE_TURN_LOG_SECRETS[scope_id] = values
+        else:
+            _ACTIVE_TURN_LOG_SECRETS.pop(scope_id, None)
 
 
 def unregister_active_turn_log_values(scope_id: str) -> None:
-    """在携卡回合结束时立即移除日志边界凭据变体，保证字典零滞留。"""
-    global _ACTIVE_TURN_LOG_FLAT
-    if not scope_id:
-        return
+    """最后一个回合引用释放时删除匹配路径。"""
+    register_active_turn_log_values(scope_id, ())
+
+
+def _credential_values_for_text(text: str) -> tuple[str, ...]:
+    configured = _CONFIGURED_CREDENTIAL_VALUES.get()
+    if not _MATCH_ACTIVE_TURN_LOG_VALUES.get() or not text:
+        return configured
+    candidates = {}
     with _ACTIVE_TURN_LOG_LOCK:
-        if _ACTIVE_TURN_LOG_SECRETS.pop(scope_id, None) is not None:
-            _ACTIVE_TURN_LOG_FLAT = tuple(dict.fromkeys(v for seq in _ACTIVE_TURN_LOG_SECRETS.values() for v in seq))
+        for width, prefixes in _ACTIVE_TURN_LOG_PREFIXES.items():
+            seen = set()
+            for start in range(len(text) - width + 1):
+                prefix = text[start:start + width]
+                if prefix not in seen and (matches := prefixes.get(prefix)):
+                    seen.add(prefix)
+                    candidates.update(matches)
+    matched = (value for value in candidates if value in text)
+    return tuple(dict.fromkeys((*configured, *matched))) if candidates else configured
+
+
 
 # 结构化输出与内嵌JSON共用同一条有界遍历；只遮蔽过深/循环的子树，不损伤正常同级字段。
 _REDACTION_FRAME = ContextVar('redaction_frame', default=(0, frozenset()))
@@ -425,7 +474,7 @@ def _mask_authorization_value(value: str, marker: str) -> str:
     return scheme.group(1) + scheme.group(2) + _mask_secret_value(scheme.group(3), marker)
 
 
-def _redact_cli_arguments(text: str, marker: str, labels_only: bool, *, events=None) -> str:
+def _redact_cli_arguments(text: str, marker: str, labels_only: bool, *, events=None, spans=None) -> str:
     """遮蔽敏感长参数的整个Shell词；引号、转义和截断只扫一遍，不执行或解析命令。"""
     parts, position = [], 0
     context_position, host_quote = 0, ''
@@ -491,6 +540,8 @@ def _redact_cli_arguments(text: str, marker: str, labels_only: bool, *, events=N
             elif char.isspace() or char in ';|&' or char in '<>' and not marker_word:
                 break
             end += 1
+        if spans is not None:
+            spans.append((match.start(), end))
         if end == start:
             parts.append(text[position:start])
             position = start
@@ -530,7 +581,7 @@ def redact_sensitive_text(
     """
 
     text = str(value)
-    cred_secrets = _CONFIGURED_CREDENTIAL_VALUES.get()
+    cred_secrets = _credential_values_for_text(text)
     cred_set = frozenset(cred_secrets) if cred_secrets else frozenset()
     for secret in sorted(cred_secrets, key=len, reverse=True):
         text = text.replace(secret, _CREDENTIAL_REDACTED)
@@ -631,8 +682,7 @@ def redact_sensitive_value(
     """Recursively redact strings and values under credential-named fields."""
 
     if _field_is_sensitive(field_name):
-        cred_secrets = _CONFIGURED_CREDENTIAL_VALUES.get()
-        if cred_secrets and isinstance(value, str) and any(secret in value for secret in cred_secrets):
+        if isinstance(value, str) and any(secret in value for secret in _credential_values_for_text(value)):
             return _CREDENTIAL_REDACTED
         return redacted_marker
     if isinstance(value, str):
@@ -642,14 +692,13 @@ def redact_sensitive_value(
         return redact_sensitive_text(value, code_file=code_file, redacted_marker=redacted_marker,
             redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
     if isinstance(value, Mapping):
-        cred_secrets = _CONFIGURED_CREDENTIAL_VALUES.get()
         host_secrets = _CONFIGURED_SECRET_VALUES.get()
-        has_configured = bool(cred_secrets or host_secrets)
-        cred_set = frozenset(cred_secrets) if cred_secrets else frozenset()
         out = {}
         for key, item in value.items():
             safe_key = key
-            if has_configured and isinstance(key, str) and key not in _PROTOCOL_CONTROL_KEYS:
+            if isinstance(key, str) and key not in _PROTOCOL_CONTROL_KEYS:
+                cred_secrets = _credential_values_for_text(key)
+                cred_set = frozenset(cred_secrets)
                 for secret in sorted(cred_secrets, key=len, reverse=True):
                     safe_key = safe_key.replace(secret, _CREDENTIAL_REDACTED)
                 for secret in sorted(host_secrets, key=len, reverse=True):
@@ -710,16 +759,9 @@ def _field_is_sensitive(name: str) -> bool:
 
 
 def _apply_log_record_redaction(record: logging.LogRecord) -> None:
-    active_turn_creds = _ACTIVE_TURN_LOG_FLAT
-    cred_token = None
-    sec_token = None
-    if active_turn_creds:
-        cred_token = _CONFIGURED_CREDENTIAL_VALUES.set(
-            tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *active_turn_creds)))
-        )
-        sec_token = _CONFIGURED_SECRET_VALUES.set(
-            tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *active_turn_creds)))
-        )
+    with _ACTIVE_TURN_LOG_LOCK:
+        has_active_turns = bool(_ACTIVE_TURN_LOG_COUNTS)
+    token = _MATCH_ACTIVE_TURN_LOG_VALUES.set(has_active_turns)
     try:
         safe_args = redact_sensitive_value(record.args)
         if safe_args and isinstance(record.msg, str):
@@ -734,7 +776,7 @@ def _apply_log_record_redaction(record: logging.LogRecord) -> None:
         else:
             record.msg = redact_sensitive_value(record.msg)
             record.args = safe_args
-        if _CONFIGURED_SECRET_VALUES.get():
+        if has_active_turns or _CONFIGURED_SECRET_VALUES.get():
             # 队列处理器可能在调用上下文退出后才格式化；异常正文先脱敏再保留。
             if record.exc_info:
                 record.exc_text = redact_sensitive_text(logging.Formatter().formatException(record.exc_info))
@@ -742,10 +784,7 @@ def _apply_log_record_redaction(record: logging.LogRecord) -> None:
             if record.stack_info:
                 record.stack_info = redact_sensitive_text(record.stack_info)
     finally:
-        if cred_token is not None:
-            _CONFIGURED_CREDENTIAL_VALUES.reset(cred_token)
-        if sec_token is not None:
-            _CONFIGURED_SECRET_VALUES.reset(sec_token)
+        _MATCH_ACTIVE_TURN_LOG_VALUES.reset(token)
 
 
 def install_log_redaction() -> None:
@@ -778,23 +817,13 @@ class RedactingFormatter(logging.Formatter):
     """Defense-in-depth formatter for handlers created by my-agent."""
 
     def format(self, record: logging.LogRecord) -> str:
-        active_turn_creds = _ACTIVE_TURN_LOG_FLAT
-        cred_token = None
-        sec_token = None
-        if active_turn_creds:
-            cred_token = _CONFIGURED_CREDENTIAL_VALUES.set(
-                tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *active_turn_creds)))
-            )
-            sec_token = _CONFIGURED_SECRET_VALUES.set(
-                tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *active_turn_creds)))
-            )
+        with _ACTIVE_TURN_LOG_LOCK:
+            has_active_turns = bool(_ACTIVE_TURN_LOG_COUNTS)
+        token = _MATCH_ACTIVE_TURN_LOG_VALUES.set(has_active_turns)
         try:
             return redact_sensitive_text(super().format(record))
         finally:
-            if cred_token is not None:
-                _CONFIGURED_CREDENTIAL_VALUES.reset(cred_token)
-            if sec_token is not None:
-                _CONFIGURED_SECRET_VALUES.reset(sec_token)
+            _MATCH_ACTIVE_TURN_LOG_VALUES.reset(token)
 
 
 __all__ = [

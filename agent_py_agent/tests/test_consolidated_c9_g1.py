@@ -1879,9 +1879,9 @@ def test_review_character_callbacks_batch_projection_work(monkeypatch):
     projected, scanned = [], []
     safe_cut = progress_text_delta._safe_cut
 
-    def counted_cut(raw, limit, identifiers):
+    def counted_cut(raw, limit, identifiers, *, literal_prefixes=None):
         scanned.append(len(raw))
-        return safe_cut(raw, limit, identifiers)
+        return safe_cut(raw, limit, identifiers, literal_prefixes=literal_prefixes)
 
     def counted_project(text):
         projected.append(len(text))

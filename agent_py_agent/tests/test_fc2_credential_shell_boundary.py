@@ -1126,7 +1126,7 @@ def test_session_scope_cli_non_task_graceful_and_turn_eviction_clears_log_secret
         turns.append(tr)
     try:
         assert "evict-owner::turn-0" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-        assert evicted_secret not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+        assert evicted_secret not in log_red_mod._ACTIVE_TURN_LOG_COUNTS
     finally:
         for tr in turns:
             tr.close()
