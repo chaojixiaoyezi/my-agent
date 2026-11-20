@@ -158,7 +158,7 @@ def test_gateway_tick_passes_base_config_to_both_calls(tmp_path, monkeypatch, ma
 def test_multiprocess_maintenance_producer_passes_config(monkeypatch, cfg):
     from agent_py_agent.agent.gateway_parts import multiprocess_background_execution as bridge
 
-    agent = SimpleNamespace(home_paths=object(), config=cfg)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_id="local/main"), config=cfg)
     calls, commits = [], []
 
     # LLM: Retain every supplied producer keyword for exact boundary assertions.

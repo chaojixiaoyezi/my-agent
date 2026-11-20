@@ -8,6 +8,10 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .retention_scan import ExtractionSwitchRead
 
 RETENTION_SCHEMA_VERSION = "my-agent.memory-retention.v2"
 RETENTION_PLAN_SCHEMA_VERSION = "my-agent.memory-retention-plan.v2"
@@ -151,6 +155,7 @@ class MemoryRetentionAction:
     # 会话回收专用：规划时生效的后台提取开关（读不出按开启记）；执行时由关变开或读不出就放弃。
     #   None 表示这项判断不适用（宿主标记不学习的会话、无扫描上下文的旧构造），执行端不复核；不进报告 JSON。
     curator_enabled: bool | None = None
+    curator_switch: ExtractionSwitchRead | None = field(default=None, kw_only=True)
 
     # LLM: 报告不得包含候选/对话正文；related_paths 只暴露管理员本地路径。
     # 函数用途: 将一条计划或结果转成 JSON 友好对象。
@@ -173,6 +178,8 @@ class MemoryRetentionAction:
             payload["record_id"] = self.record_id
         if self.related_paths:
             payload["related_paths"] = [str(path) for path in self.related_paths]
+        if self.curator_switch is not None:
+            payload["curator_switch"] = asdict(self.curator_switch)
         return payload
 
 
@@ -194,6 +201,7 @@ class MemoryRetentionReport:
     # 本轮超过保留期、但后台整理游标之后仍有可学习消息（或读不完、读不出）的会话数：
     #   后台提取开启时这些会话被保护不回收；关闭时照常回收，这里只计数。0 时不进报告 JSON。
     uncurated_threads: int = 0
+    curator_switch: ExtractionSwitchRead | None = field(default=None, kw_only=True)
 
     # LLM: 任一策略/状态/动作错误都使报告不成功；legal hold 是安全停止而非错误。
     # 函数用途: 告诉 CLI 是否可把本轮视为完整成功。
@@ -223,6 +231,7 @@ class MemoryRetentionReport:
             "scan_partial": self.scan_partial,
             "scan_cursor": self.scan_cursor,
             **({"uncurated_threads": self.uncurated_threads} if self.uncurated_threads else {}),
+            **({"curator_switch": asdict(self.curator_switch)} if self.curator_switch is not None else {}),
         }
 
 

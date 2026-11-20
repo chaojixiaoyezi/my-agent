@@ -893,6 +893,10 @@ def run_user_profile_dream_if_due(
                         f"{persona_entry_id('user', entry.clean_text)}"
                     ),
                     "relocated_from": f"USER.md#{entry.entry_id}",
+                    "relocated_entry_id": entry.entry_id,
+                    "relocated_body_sha256": _sha256_text(entry.raw_body),
+                    "scope_type": "personal",
+                    "scope_key": "personal",
                     "dream_run_id": dream_run_id,
                 },
             }

@@ -18,12 +18,12 @@ from agent_py_agent.cli import memory_admin_commands as admin
 @pytest.fixture
 def doctor_agent(tmp_path, monkeypatch):
     home = SimpleNamespace(owner_id="local/main")
-    agent = SimpleNamespace(root=tmp_path, home_paths=home,
+    agent = SimpleNamespace(root=tmp_path, home_paths=home, config=SimpleNamespace(),
                             memory_candidates=SimpleNamespace(stats=lambda: {"count": 0}),
                             memory_curator=SimpleNamespace(status=lambda: {"status": "idle"}))
     common = {"config": {}, "warnings": [], "routing": {"load_error": "missing"}, "archive": {}}
     monkeypatch.setattr(doctor.DoctorService, "_common", lambda self, args, runtime: dict(common))
-    monkeypatch.setattr(doctor, "build_home_doctor_report", lambda home: {"home": {"root": "fixture"}})
+    monkeypatch.setattr(doctor, "build_home_doctor_report", lambda home, *, config: {"home": {"root": "fixture"}})
     report = SimpleNamespace(ok=False, to_dict=lambda: {"ok": False})
     service = SimpleNamespace(plan=lambda: report)
     monkeypatch.setattr(admin, "_migration_service", lambda agent: service)

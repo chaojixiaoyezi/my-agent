@@ -60,6 +60,7 @@ from .retention_scan import (
     _runtime_unlocked,
     _subagent_run_settled,
     _trash_transaction_pending,
+    conversation_extraction_proof_current,
     current_retention_pins,
     current_tool_manifest_references,
     file_fingerprint,
@@ -165,6 +166,7 @@ def execute_retention_plan(
         scan_partial=scan_partial,
         scan_cursor=scan_cursor,
         uncurated_threads=plan.uncurated_threads,
+        curator_switch=plan.curator_switch,
     )
     _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
     return report
@@ -787,20 +789,6 @@ def _trash_conversation(
             or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
         ):
             return replace(action, status="state_changed")
-        if action.curator_enabled is not None:
-            # 规划时的后台提取开关是移动依据之一：由关变开、或现在读不出，都放弃本轮，下一轮按新开关重新规划。
-            from .retention_scan import curator_extraction_enabled
-
-            enabled_now = curator_extraction_enabled(home, config)
-            if enabled_now is None or (enabled_now and not action.curator_enabled):
-                return replace(action, status="state_changed")
-        if action.curator_cursor is not None:
-            # 规划时证明“后台整理已读完”所依据的整理游标必须原样未变；变了或读不出就放弃，下一轮重新规划。
-            from .retention_scan import curator_thread_cursors
-
-            cursors = curator_thread_cursors(home)
-            if cursors is None or cursors.get(thread.thread_id, "") != action.curator_cursor:
-                return replace(action, status="state_changed")
         if thread.metadata.get("thread_kind") == "scheduled":
             from ..conversation.thread_read_index import scheduled_thread_terminal_proof
 
@@ -846,6 +834,9 @@ def _trash_conversation(
         latest = _read_index(latest_path)
         if thread.thread_id in bindings.values() or thread.thread_id in latest.values():
             return replace(action, status="state_changed")
+        if (action.curator_switch is not None or action.curator_enabled is not None or action.curator_cursor is not None):
+            if not conversation_extraction_proof_current(home, config, action, root, thread, budget=scan_budget):
+                return replace(action, status="state_changed")
         removed_bindings, removed_latest = {}, {}
         index_update_pending = False
         destination = _validated_destination(home, action)

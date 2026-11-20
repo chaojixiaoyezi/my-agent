@@ -152,9 +152,8 @@ def _register(config) -> _ConfigBinding | None:
     path = Path(raw_path).expanduser().resolve()
     source = _FILES.get(path)
     if source is None:
-        stat = path.stat()
-        fresh = load_config(path)
-        source = _FileConfigs(path, fresh, cache_stat_signature(stat) if cache_entry_trustworthy(stat.st_mtime_ns) else None)
+        fresh, signature = _load_file_generation(path, cache_stat_signature(path.stat()))
+        source = _FileConfigs(path, fresh, signature if cache_entry_trustworthy(signature[3]) else None)
         _FILES[path] = source
     policy = config.runtime_guard_policy
     provenance = config.config_sources
@@ -195,6 +194,60 @@ def note_auth_pipeline_present() -> None:
         _AUTH_PIPELINE_PRESENT.set()
 
 
+def _load_file_generation(path: Path, signature: tuple) -> tuple[AgentConfig, tuple]:
+    fresh = load_config(path)
+    if cache_stat_signature(path.stat()) != signature:
+        raise OSError("config generation changed during read")
+    return fresh, signature
+
+
+def _refresh_file_generation(source: _FileConfigs, *, force: bool = False) -> tuple:
+    stat = source.path.stat()
+    signature = cache_stat_signature(stat)
+    trustworthy = cache_entry_trustworthy(stat.st_mtime_ns)
+    if force or not trustworthy or signature != source.signature:
+        source.fresh, _signature = _load_file_generation(source.path, signature)
+        source.revision += 1
+        source.signature = signature if trustworthy else None
+    return signature
+
+
+def read_live_curator_config(config: object | None) -> tuple[bool, str, tuple]:
+    """读取此配置绑定的提取值和文件代次。保留宿主覆盖，无须遍历其它配置副本。"""
+    from .user_config_capability import user_config_path
+
+    raw_path = getattr(config, "config_path", None)
+    bound_path = Path(raw_path).expanduser().resolve() if raw_path else None
+    path = user_config_path(config) or bound_path
+    if path is None:
+        enabled = getattr(config, "memory_curator_enabled", True)
+        profile = getattr(config, "memory_curator_model_profile", "")
+        signature = ()
+    else:
+        path = path.resolve()
+        with _LOCK:
+            binding = _register(config) if path == bound_path else None
+            source = binding.source if binding is not None else _FILES.get(path)
+            if source is None:
+                fresh, signature = _load_file_generation(path, cache_stat_signature(path.stat()))
+            else:
+                signature = _refresh_file_generation(source)
+                fresh = source.fresh
+            if any(item.severity == "error" for item in fresh.config_parse_diagnostics):
+                raise ValueError("curator configuration has parse errors")
+            enabled = fresh.memory_curator_enabled
+            profile = fresh.memory_curator_model_profile
+            if binding is not None:
+                key = "memory_curator_enabled"
+                current = getattr(config, key)
+                if (config.config_sources.get(key, {}) not in ({}, *fresh.config_layers)
+                        or not _same_live_value(current, binding.applied.get(key, _MISSING))):
+                    enabled = current
+    if type(enabled) is not bool or not isinstance(profile, str):
+        raise ValueError("invalid curator extraction settings")
+    return enabled, profile.strip(), signature
+
+
 # LLM: 同一锁内按文件代次解析并整值赋值；未变 YAML 一次 stat、零解析，近期 mtime 不缓存；只更新热刷新字段与守卫快照。
 # 函数用途: 把最新文件开关与闭环策略应用到所有已注册副本，并返回实际变化的键。
 def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[str]:
@@ -206,14 +259,7 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
             source = _FILES.get(Path(path).expanduser().resolve())
         if source is None:
             return frozenset()
-        stat = source.path.stat()
-        signature = cache_stat_signature(stat)
-        trustworthy = cache_entry_trustworthy(stat.st_mtime_ns)
-        if force or not trustworthy or signature != source.signature:
-            fresh = load_config(source.path)
-            source.fresh = fresh
-            source.revision += 1
-            source.signature = signature if trustworthy else None
+        _refresh_file_generation(source, force=force)
         changed = set()
         checked_policies = {}
         for registered in tuple(source.configs):

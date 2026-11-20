@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,10 +63,26 @@ class MemoryRecallScope:
         return bool(pair[0] and pair[1] and pair in self.keys)
 
 
-# LLM: 长期事实必须携带 promotion 写入的 typed scope；legacy 无范围记录等待迁移，不能默认全局召回。
-# 函数用途: 过滤 active long-term 记录。
-def long_term_record_matches_scope(record: MemoryRecord, scope: MemoryRecallScope) -> bool:
+def dream_relocation_attributes(record: MemoryRecord) -> dict:
+    """旧 Dream 记录沿原 USER.md 迁移出处恢复 personal 范围。"""
     attributes = record.attributes if isinstance(record.attributes, dict) else {}
+    source = attributes.get("relocated_from")
+    if (record.source == "user-profile-dream" and record.action != "remove"
+            and isinstance(source, str) and source.startswith("USER.md#") and source.removeprefix("USER.md#")
+            and attributes.get("scope_type") in (None, "") and attributes.get("scope_key") in (None, "")):
+        return {**attributes, "scope_type": "personal", "scope_key": "personal"}
+    return attributes
+
+
+def normalize_dream_relocation(record: MemoryRecord) -> MemoryRecord:
+    attributes = dream_relocation_attributes(record)
+    if attributes is not record.attributes and attributes:
+        return replace(record, attributes=attributes)
+    return record
+
+
+def long_term_record_matches_scope(record: MemoryRecord, scope: MemoryRecallScope) -> bool:
+    attributes = dream_relocation_attributes(record)
     return scope.allows(attributes.get("scope_type"), attributes.get("scope_key"))
 
 

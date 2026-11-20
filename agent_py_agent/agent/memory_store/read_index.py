@@ -79,7 +79,7 @@ class MemoryReadIndex:
     # 函数用途: 有界追平本代索引，重启按分片号/行号续作，不重扫所有旧行。
     def rebuild_step(self, *, batch_size=1000, admission=None):
         from ..user_space.owner_quota import OwnerQuotaChange
-        from .jsonl import _memory_record_from_obj, memory_content_hash
+        from .jsonl import memory_content_hash
 
         if type(batch_size) is not int or not 1 <= batch_size <= 1000:
             raise ValueError("MEMORY_INDEX_BATCH_INVALID")
@@ -97,7 +97,7 @@ class MemoryReadIndex:
             segment = root["segments"][segment_no]
             rows = self.store.segment_rows(segment)
             while row_no < len(rows) and len(prepared) < batch_size:
-                record = _memory_record_from_obj(rows[row_no])
+                record = _read_index_record(rows[row_no])
                 if record is None:
                     raise ValueError("MEMORY_AUTHORITY_UNREADABLE")
                 prepared.append((record.entry_id, record.version, memory_content_hash(record.content),
@@ -216,7 +216,7 @@ class MemoryReadIndex:
     # LLM: 坐标只解释于绑定根；换代显式冲突而非完整空命中，读取后再次核根及当前墓碑。
     # 函数用途: 将候选恢复为当前真正可见的正式事实。
     def resolve(self, candidates, *, operation_id=None):
-        from .jsonl import _memory_record_from_obj, memory_content_hash
+        from .jsonl import memory_content_hash
 
         root = self.store.manifest()
         bound = {item.get("operation_id") for item in candidates}
@@ -234,7 +234,7 @@ class MemoryReadIndex:
             rows = loaded[index]
             if not 0 <= offset < len(rows):
                 continue
-            record = _memory_record_from_obj(rows[offset])
+            record = _read_index_record(rows[offset])
             if (record is not None and record.entry_id == item["id"]
                     and (not record.expires_at or record.expires_at > time.time())
                     and record.version == item["version"] and memory_content_hash(record.content) == item["content_hash"]):
@@ -274,6 +274,14 @@ class MemoryReadIndex:
 
 # LLM: 原词法分词与index_text为唯一语义；额外hex token只用于FTS候选，不作为正式正文。
 # 函数用途: 将完整可检索属性及中文短词投影进现有trigram索引。
+def _read_index_record(payload):
+    from .jsonl import _memory_record_from_obj
+    from .recall import normalize_dream_relocation
+
+    record = _memory_record_from_obj(payload)
+    return normalize_dream_relocation(record) if record is not None else None
+
+
 def _lexical_projection(record):
     from ..retrieval.lexical import tokenize
     from ..retrieval.text_vector_cache import index_text
