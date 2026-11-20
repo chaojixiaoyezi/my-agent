@@ -356,7 +356,9 @@ def test_external_mailbox_adapter_security_and_sync(
     with open(layout.coordinator_outbox_path, encoding="utf-8") as f:
         lines = f.readlines()
         assert len(lines) == 1
-        assert json.loads(lines[0]) == packet
+        sent = json.loads(lines[0])
+        assert sent.pop("message_id")
+        assert sent == packet
 
     # 2. 软链接安全拒绝测试
     fake_target = tmp_path / "secret.txt"
@@ -371,14 +373,16 @@ def test_external_mailbox_adapter_security_and_sync(
     assert "SYMLINK_FORBIDDEN" in str(quarantined[0].get("error_code"))
     symlink_inbox.unlink()
 
-    # 3. 超大文件 (> 256 KiB) 隔离测试
+    # 超过一页的收件箱保留原文件，并返回当前页的完整记录。
     large_inbox = layout.actor_inbox_path
-    large_inbox.write_text("x" * (262144 + 100), encoding="utf-8")
-    _msgs, quarantined = adapter.read_actor_messages(layout)
-    assert len(quarantined) >= 1
-    assert "EXCEEDS_MAX_BYTES" in quarantined[0]["reason"]
-    # 原文件已被移动至 .quarantine
-    assert not large_inbox.exists()
+    raw = b'{"action": "ping"}\n' * 20000
+    assert len(raw) > adapter.max_file_bytes
+    large_inbox.write_bytes(raw)
+    messages, quarantined = adapter.read_actor_messages(layout)
+    assert messages
+    assert quarantined == []
+    assert len(messages) == adapter.max_file_bytes // len(b'{"action": "ping"}\n')
+    assert large_inbox.read_bytes() == raw
 
     # 4. 损坏行跳过测试（不抛死循环）
     corrupt_inbox = layout.actor_inbox_path
