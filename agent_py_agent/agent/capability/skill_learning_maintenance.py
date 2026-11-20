@@ -613,6 +613,61 @@ def _select_cap_victim_locked(
     return eligible[0][1]
 
 
+def _restore_with_admission_locked(
+    store, registry, name, *, now, max_skills, evict_seconds, protected, protection_complete,
+):
+    current = registry.skills.get(name)
+    if current is None or name in registry.blocked_names or owner_layout_exempt(current):
+        raise SkillLearningGateError(CODE_NOT_LEARNED, {"skill_name": name})
+    archived_at = float(current.maintenance.get("archived_at") or 0.0)
+    if evict_seconds > 0 and archived_at > 0 and now - archived_at >= evict_seconds:
+        raise SkillLearningGateError(
+            CODE_ARCHIVE_EXPIRED,
+            {"skill_name": name, "archived_at": archived_at, "evict_seconds": evict_seconds},
+        )
+    # 容量检查之前也要核对目标，保证拒绝时只有目标自身可能交还用户。
+    store._checked_restore_target_locked(registry, name)
+    if not _registered_capacity_available(registry, max_skills):
+        managed = store.managed_records(registry, include_archived=False)
+        live = registry.live_count(managed_names=managed.keys())
+        if live >= max_skills:
+            if not protection_complete:
+                raise SkillLearningGateError(
+                    CODE_EVIDENCE_INCOMPLETE,
+                    {"reason": "protection_incomplete", "limit": max_skills, "live": live},
+                )
+            victim = _select_cap_victim_locked(store, registry, managed, protected=protected, exclude_names={name})
+            if victim is None or live > max_skills:
+                raise SkillLearningGateError(CODE_LIMIT_REACHED, {"limit": max_skills, "live": live, "all_protected": victim is None})
+            store._transition_displace_restore_locked(registry, target=name, victim=victim, now=now)
+            return store.load_registry().skills[name]
+    _, record = store._transition_restore_locked(registry, name, now=now)
+    return record
+
+
+def admit_restore_locked(
+    store, registry, name, *, now, source, max_skills=None, evict_seconds=None,
+    protected_ids=(), protection_complete=False,
+) -> tuple[bool, str]:
+    """使用回执与显式恢复共享准入，拒绝原因随原回执保存。"""
+    from ..settings.config import AgentConfig
+
+    defaults = AgentConfig.__dataclass_fields__
+    try:
+        _restore_with_admission_locked(
+            store, registry, name, now=now,
+            max_skills=defaults["self_learning_max_skills"].default if max_skills is None else max_skills,
+            evict_seconds=defaults["self_learning_evict_seconds"].default if evict_seconds is None else evict_seconds,
+            protected=set(protected_ids), protection_complete=protection_complete,
+        )
+    except SkillLearningStoreError as exc:
+        return False, exc.code
+    except (OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("学习技能恢复未完成，来源 %s，原因 %s", source, type(exc).__name__)
+        return False, CODE_EVIDENCE_INCOMPLETE
+    return True, "OK"
+
+
 # LLM: 显式控制动作即使自动学习关闭也仍可由人类执行；恢复归档必须一次核验hash、额外文件、宽限期与容量上限。
 # 函数用途: 执行用户显式pin/unpin/disable/enable/restore维护动作并持久化版本或安全迁移目录。
 def control_learning(
@@ -642,53 +697,10 @@ def control_learning(
         if operation == 'restore':
             if current.maintenance.get('state') != 'archived':
                 raise ValueError('条目未归档')
-            archived_at = float(current.maintenance.get('archived_at') or 0.0)
-            if eff_evict > 0 and archived_at > 0.0 and (ts - archived_at) >= float(eff_evict):
-                raise SkillLearningGateError(
-                    CODE_ARCHIVE_EXPIRED,
-                    {"skill_name": name, "archived_at": archived_at, "evict_seconds": eff_evict},
-                )
-            dir_ok, has_extra = _has_extra_dir_entries(store.directory, ("archived", name))
-            if dir_ok and has_extra:
-                handoff = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
-                store.save_registry(replace(registry, skills={**registry.skills, name: handoff}))
-                raise SkillLearningGateError(
-                    CODE_USER_MODIFIED,
-                    {"skill_name": name, "state": "user_modified", "reason": "extra_files_in_archive"},
-                )
-
-            if not _registered_capacity_available(registry, eff_max):
-                try:
-                    managed = store.managed_records(registry, include_archived=False)
-                except SkillLearningStoreError as exc:
-                    raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, exc.detail) from exc
-                live = registry.live_count(managed_names=managed.keys())
-                if live >= eff_max:
-                    if not protection_complete:
-                        raise SkillLearningGateError(
-                            CODE_EVIDENCE_INCOMPLETE,
-                            {"reason": "protection_incomplete", "limit": eff_max, "live": live},
-                        )
-                    victim = _select_cap_victim_locked(
-                        store,
-                        registry,
-                        managed,
-                        protected=protected,
-                        exclude_names={name},
-                    )
-                    if victim is None:
-                        raise SkillLearningGateError(
-                            CODE_LIMIT_REACHED,
-                            {"limit": eff_max, "live": live, "all_protected": True},
-                        )
-                    registry, _ = store._transition_archive_locked(
-                        registry,
-                        victim,
-                        now=ts,
-                        reason_code="cap_displace_for_restore",
-                    )
-
-            registry, next_record = store._transition_restore_locked(registry, name, now=ts)
+            next_record = _restore_with_admission_locked(
+                store, registry, name, now=ts, max_skills=eff_max, evict_seconds=eff_evict,
+                protected=protected, protection_complete=protection_complete,
+            )
             if store.read_version(name, next_record.revision) is None:
                 path = store.skill_path(name, record=next_record)
                 text = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)

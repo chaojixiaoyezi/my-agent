@@ -332,7 +332,7 @@ class V13Store:
     # LLM: 幂等键按主体和动作隔离，参数摘要与 CAS 都参与指纹；第一次响应和回执分别复制。
     # 函数用途: 同笔提交记录、可选集合元数据及回执；元数据不另建提交点或永久回执副本。
     def transaction(self, collection, mutate, *, idempotency_key, params_digest,
-                    expected_revision=None, receipt_view=None, metadata_update=None):
+                    expected_revision=None, receipt_view=None, metadata_update=None, record_receipt=True):
         if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
             raise BusinessError('INVALID_SCHEMA')
         if not callable(mutate) or metadata_update is not None and not callable(metadata_update):
@@ -348,12 +348,12 @@ class V13Store:
 
         return self.transaction_many((collection,), single, idempotency_key=idempotency_key,
             params_digest=params_digest, expected_revision=expected_revision, receipt_view=receipt_view,
-            metadata_update=update_metadata if metadata_update is not None else None)
+            metadata_update=update_metadata if metadata_update is not None else None, record_receipt=record_receipt)
 
     # LLM: 同一日志提交修订、逐键回执、目标 delta 及本笔审计；重放先点查回执，不加载历史运行。
     # 函数用途: 原锁内共同更新记录和元数据；同键重放不重跑回调，原journal仍是唯一提交点。
     def transaction_many(self, collections, mutate, *, idempotency_key, params_digest,
-                         expected_revision=None, receipt_view=None, metadata_update=None):
+                         expected_revision=None, receipt_view=None, metadata_update=None, record_receipt=True):
         if self._readonly:
             raise BusinessError('CAPABILITY_DENIED')
         if (type(collections) not in (tuple, list) or not collections
@@ -374,7 +374,8 @@ class V13Store:
                 or type(params_digest) is not str or not params_digest or not callable(mutate)
                 or any(value is not None and (type(value) is not int or value < 0) for value in revisions.values())
                 or (receipt_view is not None and not callable(receipt_view))
-                or (metadata_update is not None and not callable(metadata_update))):
+                or (metadata_update is not None and not callable(metadata_update))
+                or type(record_receipt) is not bool or (not record_receipt and metadata_update is None)):
             raise BusinessError('INVALID_SCHEMA')
         key = hashlib.sha256(_encode([self.subject_id, self.action, idempotency_key])).hexdigest()
         # 保持原单集合回执指纹稳定；多集合名称按排序后的集合绑定。
@@ -447,7 +448,8 @@ class V13Store:
                         changed = sorted(k for k in before[name].keys() | state['records'].keys()
                                          if before[name].get(k) != state['records'].get(k))
                     state['revision'] += 1
-                    state['receipts'][key] = {'fingerprint': fingerprint, 'result': _copy(receipt_result)}
+                    if record_receipt:
+                        state['receipts'][key] = {'fingerprint': fingerprint, 'result': _copy(receipt_result)}
                     try:
                         self._validate_state(state, name)
                     except (ValueError, TypeError, KeyError) as error:

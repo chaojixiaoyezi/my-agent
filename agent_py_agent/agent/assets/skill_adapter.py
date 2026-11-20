@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -346,11 +347,47 @@ class SkillAdapter:
     def __init__(self, owner_home):
         self.owner_home = Path(owner_home).absolute()
 
-    # LLM: 配额先于原资产根/侧文件锁；侧文件布尔值为唯一运行开关覆盖，旧快照读取仍复核此文件。
-    # 函数用途: 切换本人的一个既有技能，保留正文、来源和未知侧元数据。
-    def set_enabled(self, skill_id, enabled, *, admission=None):
-        from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
+    @contextmanager
+    def _enabled_state(self, skill_id, *, writing):
         from .workspace_assets import _strict_skill_paths
+
+        safe_asset_id(skill_id)
+        with ExitStack() as locks:
+            if writing:
+                locks.enter_context(asset_root_lock(self.owner_home))
+            matches = [path.parent for path in _strict_skill_paths(self.owner_home)
+                       if extract_skill_descriptor(path)['id'] == skill_id]
+            if len(matches) != 1:
+                raise ValueError('Owner技能不存在或身份不唯一')
+            directory = matches[0]
+            if writing:
+                locks.enter_context(locked_json_path(directory / 'skill_meta.json'))
+            meta = _sidecar(directory)
+            body = _text(directory, 'SKILL.md')
+            if body is None:
+                raise FileNotFoundError('Skill正文不存在')
+            parts = (*directory.relative_to(self.owner_home).parts, 'skill_meta.json')
+            yield directory, parts, body, meta
+
+    def plan_enabled(self, skill_id, enabled):
+        """读取一次原生启停前像并预测本次写入的版本摘要。"""
+        # 预读不创建锁文件，写入前在原配额与资产锁内核对摘要。
+        with self._enabled_state(skill_id, writing=False) as (directory, parts, body, meta):
+            descriptor = _descriptor(directory, _merged_metadata(_frontmatter(body), meta), meta.get('owner_id', ''))
+            original_sha = _enabled_state_sha(parts, body, meta)
+            revision = next_asset_revision(meta)
+            planned = {**meta, 'enabled': enabled, 'revision': revision}
+            return {
+                'original_revision': revision - 1,
+                'original_sha': original_sha,
+                'planned_sha': (_enabled_state_sha(parts, body, planned)
+                                if bool(descriptor.get('enabled', True)) != enabled else original_sha),
+                'staged_ref': list(parts),
+            }
+
+    # 配额先于资产和侧文件锁，条件写入在原子替换前核对完整前像。
+    def set_enabled(self, skill_id, enabled, *, admission=None, expected_sha=None):
+        from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 
         safe_asset_id(skill_id)
         if type(enabled) is not bool:
@@ -358,21 +395,20 @@ class SkillAdapter:
         home = self.owner_home
         if admission is None:
             with owner_quota_enforcer_from_policy(home).admission() as quota:
-                return self.set_enabled(skill_id, enabled, admission=quota)
-        with asset_root_lock(home):
-            matches = [path.parent for path in _strict_skill_paths(home)
-                if extract_skill_descriptor(path)['id'] == skill_id]
-            if len(matches) != 1:
-                raise ValueError('Owner技能不存在或身份不唯一')
-            directory = matches[0]
-            with locked_json_path(directory / 'skill_meta.json'):
-                meta = _sidecar(directory)
-                text = _text(directory, 'SKILL.md')
-                if text is None:
-                    raise FileNotFoundError('Skill正文不存在')
-                meta.update(enabled=enabled, revision=next_asset_revision(meta))
-                descriptor = _descriptor(directory, _merged_metadata(_frontmatter(text), meta), meta.get('owner_id', ''))
-                raw = json.dumps(clean_json(meta), ensure_ascii=False, allow_nan=False) + '\n'
-                admission.check((OwnerQuotaChange(directory / 'skill_meta.json', len(raw.encode())),))
-                write_text_atomic_beneath(home, (*directory.relative_to(home).parts, 'skill_meta.json'), raw)
+                return self.set_enabled(skill_id, enabled, admission=quota, expected_sha=expected_sha)
+        with self._enabled_state(skill_id, writing=True) as (directory, parts, body, meta):
+            if expected_sha is not None and _enabled_state_sha(parts, body, meta) != expected_sha:
+                raise SkillSnapshotError('REVISION_CONFLICT', '启停前像已变化')
+            meta.update(enabled=enabled, revision=next_asset_revision(meta))
+            descriptor = _descriptor(directory, _merged_metadata(_frontmatter(body), meta), meta.get('owner_id', ''))
+            raw = json.dumps(clean_json(meta), ensure_ascii=False, allow_nan=False) + '\n'
+            admission.check((OwnerQuotaChange(home.joinpath(*parts), len(raw.encode())),))
+            write_text_atomic_beneath(home, parts, raw)
         return descriptor
+
+
+def _enabled_state_sha(parts, body, meta):
+    # 侧文件的格式变化不改启停版本，正文、规范目录和侧文件修订共同绑定前像。
+    encoded = json.dumps([list(parts), body, clean_json(meta)], ensure_ascii=False,
+                         sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return sha256(encoded.encode()).hexdigest()
