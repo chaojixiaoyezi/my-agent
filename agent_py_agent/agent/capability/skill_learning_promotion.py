@@ -6,13 +6,17 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 
 from ..common.json_io import locked_json_path
-from .skill_learning_validation import default_machine_promotion_verifier, verify_machine_candidate
+from .skill_learning_validation import (
+    default_machine_promotion_verifier,
+    verification_outcome,
+    verify_machine_candidate,
+)
 from .skill_snapshot import skill_content_sha256
 
 
 # LLM: 仅None取默认；复制输入并在Verify后复核hash，默认静态报告不签业务执行；最终publisher重核所有写门。
 # 函数用途: 验证owner私有learned方法并发布trial，保留真实核验级别，不碰手写、内置或共享方法。
-def promote_verified_skill(store, publish, verifier=None, *, commit=None):
+def promote_verified_skill(store, publish, verifier=None, *, commit=None, outcome_sink=None):
     from . import skill_learning_host_feedback as feedback
     from .asset_promotion import business_validated
     from .skill_learning_publish import (
@@ -25,9 +29,14 @@ def promote_verified_skill(store, publish, verifier=None, *, commit=None):
         render_learned_skill,
     )
 
+    def rejected(outcome, reason):
+        if outcome_sink is not None:
+            outcome_sink({'outcome': outcome, 'reason': reason})
+        return None
+
     safe, redacted = _redacted_publish(deepcopy(publish))
     if redacted:
-        return None
+        return rejected('permanent_reject', 'SKILL_LEARNING_REDACTED')
     policy_enable, _, _, effective_guard = _resolve_live_policy(safe)
     if policy_enable is False:
         raise SkillLearningGateError(CODE_LEARNING_DISABLED, {"enable_self_learning": False})
@@ -35,7 +44,7 @@ def promote_verified_skill(store, publish, verifier=None, *, commit=None):
     if structural.get('error_code') in {'MANUAL_ONLY_TARGET', 'MACHINE_DRAFT_NAME_INVALID'}:
         raise SkillLearningGateError(structural['error_code'])
     if structural['status'] != 'passed':
-        return None
+        return rejected(structural['outcome'], structural['reason'])
     with store.state_lock():
         _stage_and_check(store, replace(safe, guard_config=effective_guard), render_learned_skill(safe.decision))
     sha = skill_content_sha256(render_learned_skill(safe.decision))
@@ -44,15 +53,26 @@ def promote_verified_skill(store, publish, verifier=None, *, commit=None):
     builtin = any(original is function for function in (feedback.builtin_machine_verifier, default_machine_promotion_verifier, verify_machine_candidate))
     if not builtin:
         _commit(commit, lambda: feedback.remember_verified_candidate(store, safe, None, sha256=sha))
-    receipt = verifier(safe, sha)
+    try:
+        receipt = verifier(safe, sha)
+    except OSError as error:
+        if outcome_sink is None:
+            raise
+        return rejected('resumable', type(error).__name__)
     if skill_content_sha256(render_learned_skill(safe.decision)) != sha:
         raise SkillLearningGateError('MACHINE_VERIFICATION_HASH_MISMATCH')
+    outcome = verification_outcome(receipt)
+    if outcome['outcome'] != 'pass':
+        _commit(commit, lambda: feedback.remember_verified_candidate(store, safe, None, sha256=sha))
+        return rejected(outcome['outcome'], outcome['reason'])
+    if isinstance(receipt, dict) and 'status' not in receipt:
+        receipt = {**receipt, 'status': 'passed'}
     _commit(commit, lambda: feedback.remember_verified_candidate(store, safe, receipt, sha256=sha))
     if not isinstance(receipt, dict) or receipt.get('sha256') != sha or not receipt.get('receipt_id'):
-        return None
+        return rejected('resumable', 'SKILL_LEARNING_VERIFICATION_INCOMPLETE')
     static = builtin and receipt == structural
     if not static and not business_validated(receipt):
-        return None
+        return rejected('permanent_reject', 'SKILL_LEARNING_VERIFICATION_INCOMPLETE')
     proof = {'sha256': sha, 'receipt_id': receipt['receipt_id'], 'verification_kind': 'deterministic_static' if static else 'runtime_execution',
              'checks_executed': True, 'executed': not static, 'carrier': 'skill'}
     publication = replace(safe, promotion_authority='autonomous_verified', verification_receipt=proof)
@@ -87,9 +107,12 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         CODE_LEARNING_DISABLED,
         CODE_LIMIT_REACHED,
         SkillLearningGateError,
+        _event,
         _family_record_locked,
+        _owned_record,
         _registered_capacity_available,
         _resolve_live_policy,
+        render_learned_skill,
     )
     from .skill_learning_store import (
         CODE_EVIDENCE_INCOMPLETE,
@@ -99,6 +122,7 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
     )
 
     req = publish.request if isinstance(publish.request, dict) else {}
+    autonomous_verified = autonomous_verified and req.get('requested_by') != 'user'
     extra = {k: req[k] for k in ('kind', 'code', 'entry_source', 'steps', 'io_contract', 'sample_inputs',
                                'entry_document', 'files', 'application_scope', 'analysis_handler') if k in req}
     if isinstance(req.get('candidate_asset'), dict):
@@ -111,6 +135,11 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         promoted = promote_verified_asset(store.skills_root.parent, cand, commit=commit) if autonomous_verified else None
         if promoted is not None:
             return SkillLearningEvent('published', 'SKILL_LEARNING_AUTONOMOUS_PROMOTED', skill_name=promoted['asset_id'], carrier=carrier)
+        if autonomous_verified and req.get('requested_by') == 'auto':
+            outcome = verification_outcome(default_machine_promotion_verifier(cand))
+            status = 'rejected' if outcome['outcome'] == 'permanent_reject' else 'retry'
+            return SkillLearningEvent(status, CODE_EVIDENCE_INCOMPLETE, skill_name=cand['name'],
+                                      reason=outcome['reason'] or 'SKILL_LEARNING_VERIFICATION_INCOMPLETE', carrier=carrier)
         event = _commit(commit, lambda: propose_learning(store, publish))
         _commit(commit, lambda: register_asset(store, kind=carrier, asset_id=cand['name'], asset=cand,
             source={'origin': 'S3', 'proposal_id': event.reason}, state='candidate'))
@@ -121,6 +150,12 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
     identity = asset_identity('skill', asdict(publish.decision), store.skills_root.parent)
     with store.state_lock():
         registry = store._prepare_clean_registry_locked(store.load_registry())
+        recorded = registry.skills.get(publish.decision.name)
+        if (recorded is not None and req.get('operation_id') and recorded.last_operation_id == req['operation_id']
+                and recorded.sha256 == skill_content_sha256(render_learned_skill(publish.decision))):
+            _owned_record(store, registry, recorded.name)
+            kind = 'updated' if publish.decision.decision == 'update' else 'published'
+            return _event(kind, recorded, publish, '')
         live = 0
         if not _registered_capacity_available(registry, effective_max):
             try:
@@ -144,7 +179,15 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         reusable = _family_record_locked(store, registry, publish) if publish.decision.decision == 'create' else None
     if reusable is not None:
         return SkillLearningEvent('skipped', 'SKILL_LEARNING_FAMILY_REUSED', skill_name=reusable.name)
-    event = promote_verified_skill(store, publish, verifier, commit=commit) if autonomous_verified else None
+    outcome = {}
+    if autonomous_verified and req.get('requested_by') == 'auto':
+        event = promote_verified_skill(store, publish, verifier, commit=commit, outcome_sink=outcome.update)
+        if event is None:
+            status = 'rejected' if outcome.get('outcome') == 'permanent_reject' else 'retry'
+            return SkillLearningEvent(status, CODE_EVIDENCE_INCOMPLETE,
+                                      skill_name=publish.decision.name, reason=outcome.get('reason', ''))
+    else:
+        event = promote_verified_skill(store, publish, verifier, commit=commit) if autonomous_verified else None
     if event is not None:
         return event
     # 已验证独立发布优先；手动/未通过核验的提案查重继续保持严格读取。

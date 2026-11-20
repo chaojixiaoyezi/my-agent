@@ -861,10 +861,8 @@ def test_retry_merge_first_timeout_and_busy_follow_retry_contract(tmp_path: Path
                 if calls["n"] == 1:
                     return SimpleNamespace(text=json.dumps(first_dup, ensure_ascii=False))
                 if calls["n"] == 2:
-                    raise TimeoutError("merge retry timed out")
-                if calls["n"] == 3:
-                    return SimpleNamespace(text=json.dumps(first_dup, ensure_ascii=False))
-                raise CuratorModelStillRunningError("in_flight")
+                    raise CuratorModelStillRunningError("in_flight")
+                raise TimeoutError("merge retry timed out")
 
         service = SkillLearningService(
             store,
@@ -890,7 +888,11 @@ def test_retry_merge_first_timeout_and_busy_follow_retry_contract(tmp_path: Path
         )
         assert service.enqueue_from_finalize(_finalize_ctx("r-timeout")) == "queued"
 
-        # 合并重试第 2 次调用超时 -> 必须递增 attempts 并进入冷却，不得 attempts=0 卡死 FIFO；
+        # 原调用尚未退出时保留已准备的合并，回到队列后无需重新生成首稿。
+        assert service.run_pending().status == STATUS_BUSY
+        assert len(store.pending_requests()) == 1
+
+        # 已派发的合并超时会记尝试并进入冷却，原准入继续保留。
         timeout_res = service.run_pending()
         assert timeout_res.status == STATUS_RETRY
         assert timeout_res.code == CODE_MODEL_TIMEOUT
@@ -899,11 +901,12 @@ def test_retry_merge_first_timeout_and_busy_follow_retry_contract(tmp_path: Path
         assert persisted is not None and persisted.get("attempts") == 1
         assert auxiliary_profile_cooldown_remaining(profile) > 0
 
-        # 清零冷却后，第 2 次调用返回 CuratorModelStillRunningError -> 返回 STATUS_BUSY 且不丢请求；
+        # 清零冷却后仍只有原合并尝试，不能在未知结果上重新派发。
         clear_auxiliary_profile_cooldown(profile)
-        busy_res = service.run_pending()
-        assert busy_res.status == STATUS_BUSY
-        assert len(store.pending_requests()) == 1
+        resumed = service.run_pending()
+        assert resumed.code == CODE_MERGE_DEFERRED and resumed.effect_outcome == "unknown"
+        assert calls["n"] == 3 and store.load_registry().daily_calls == 1
+        assert not store.pending_requests()
     finally:
         clear_auxiliary_profile_cooldown(profile)
 
@@ -930,10 +933,12 @@ def test_retry_merge_first_respects_daily_limit_budget(tmp_path: Path) -> None:
             guard_config=None,
         ),
     )
-    backend = _FakeBackend(_output(name="csv-merge-copy"), _output(name="should-not-call"))
+    backend = _FakeBackend(_output(name="csv-merge-copy"), _output(
+        decision="update", update_target="csv-merge-by-date", body=BODY + "\n\n## 补查\n\n检查表头。"))
     service = SkillLearningService(
         store,
-        SkillLearningSettings(min_tool_rounds=3, max_skills=50, daily_limit=1, merge_similarity_percent=70),
+        SkillLearningSettings(min_tool_rounds=3, max_skills=50, daily_limit=1, global_daily_limit=1,
+                              merge_similarity_percent=70),
         SkillLearningRuntime(
             owner_id="local:main",
             deployment_root=tmp_path / "dep",
@@ -955,7 +960,7 @@ def test_retry_merge_first_respects_daily_limit_budget(tmp_path: Path) -> None:
     assert service.enqueue_from_finalize(_finalize_ctx("r-budget")) == "queued"
     result = service.run_pending()
 
-    assert result.status == "rejected"
-    assert result.code == CODE_MERGE_DEFERRED
-    assert len(backend.prompts) == 1
+    assert result.status == "proposed"
+    assert len(backend.prompts) == 2 and '"merge_hint"' in backend.prompts[1]
+    assert store.load_registry().daily_calls == 1
     assert list(store.load_registry().skills) == ["csv-merge-by-date"]

@@ -29,13 +29,30 @@ def default_machine_promotion_verifier(candidate_or_draft, sha256=None):
         digest = skill_content_sha256(text)
         if sha256 is not None and sha256 != digest:
             raise ValueError('MACHINE_VERIFICATION_HASH_MISMATCH')
-        return {'status':'passed', 'verification_kind':'deterministic_static', 'checks_executed':True,
+        return {'outcome': 'pass', 'reason': '', 'status':'passed',
+                'verification_kind':'deterministic_static', 'checks_executed':True,
                 'executed':False, 'contract_valid':True, 'sha256':digest,
                 'receipt_id':'static:'+hashlib.sha256(text.encode()).hexdigest(),
                 'checks':['schema','identity','redaction','procedure_syntax']}
     except (TypeError, ValueError, SyntaxError) as error:
-        return {'status':'failed', 'verification_kind':'deterministic_static', 'checks_executed':True,
-                'executed':False, 'error_code':str(error) if isinstance(error, ValueError) else 'MACHINE_DRAFT_INVALID'}
+        reason = str(error) if isinstance(error, ValueError) else 'MACHINE_DRAFT_INVALID'
+        return {'outcome': 'permanent_reject', 'reason': reason, 'status':'failed',
+                'verification_kind':'deterministic_static', 'checks_executed':True,
+                'executed':False, 'error_code':reason}
+
+
+def verification_outcome(receipt):
+    """兼容旧核验回执的状态字段；结果未知时保留可重试状态。"""
+    receipt = receipt if isinstance(receipt, dict) else {}
+    outcome = receipt.get('outcome')
+    if outcome not in ('pass', 'permanent_reject', 'resumable'):
+        status = receipt.get('status')
+        outcome = ('pass' if status in ('passed', 'succeeded')
+                   else 'permanent_reject' if status == 'failed' else 'resumable')
+    reason = receipt.get('reason') or receipt.get('error_code')
+    if not isinstance(reason, str):
+        reason = '' if outcome == 'pass' else 'SKILL_LEARNING_VERIFICATION_INCOMPLETE'
+    return {'outcome': outcome, 'reason': redact_sensitive_text(reason)[:200]}
 
 
 # LLM: 纯元数据闸门，不打开路径；人格/约定硬拒绝，Skill缺描述单列；路径穿越和脱敏命中整份拒绝。
@@ -136,4 +153,5 @@ def _validate_steps(steps):
 def verify_machine_candidate(publish, sha256, *, store):
     from .skill_learning_host_feedback import builtin_machine_verifier
 
-    return builtin_machine_verifier(publish, sha256, store=store) or default_machine_promotion_verifier(publish, sha256)
+    receipt = builtin_machine_verifier(publish, sha256, store=store)
+    return {**receipt, **verification_outcome(receipt)} if receipt else default_machine_promotion_verifier(publish, sha256)

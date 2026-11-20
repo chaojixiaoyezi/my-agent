@@ -31,7 +31,7 @@ def test_protection_reaches_1500_sources(tmp_path):
     store = SkillLearningStore.for_home(first.home_paths)
     with store.state_lock():
         registry = store.load_registry()
-        saved = registry.import_operations["protection_scan"]
+        saved = registry.protection_scan
         assert saved["generation"] and saved["after"]["scheduler"] > 0
         store.save_registry(replace(registry, daily_calls=1))
     for _ in range(20):

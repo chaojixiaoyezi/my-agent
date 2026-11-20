@@ -241,6 +241,8 @@ class SkillLearningRegistry:
     pending_operation: dict | None = None
     blocked_task_families: tuple[str, ...] = ()
     catalog_generation: str = ""
+    protection_scan: dict | None = field(default=None, kw_only=True)
+    learning_admission: str = field(default="", kw_only=True)
 
     # LLM: 保持原schema和单日快照，另存有界每日调用历史与增量维护/意图状态；不改正式Skill登记事实。
     # 函数用途: 转成写入 registry.json 的字典。
@@ -259,6 +261,8 @@ class SkillLearningRegistry:
             "pending_operation": dict(self.pending_operation) if self.pending_operation is not None else None,
             "blocked_task_families": sorted(set(self.blocked_task_families)),
             "catalog_generation": str(self.catalog_generation),
+            "protection_scan": self.protection_scan,
+            "learning_admission": self.learning_admission,
         }
 
     # LLM: 纯计数接口；只统计单次磁盘归属核验通过的在役（非 archived）机器管辖条目，不触发隐藏磁盘IO。
@@ -285,6 +289,7 @@ class SkillLearningEvent:
     run_id: str = ""
     reason: str = ""
     carrier: str = ""
+    effect_outcome: str = field(default="", kw_only=True)
 
     # LLM: event_id/时间落盘时生成，reason最多200字；只为有载体的新晋升附carrier，保留旧事件形状。
     # 函数用途: 转成写入 ledger.jsonl 的一行。
@@ -302,6 +307,7 @@ class SkillLearningEvent:
             "run_id": self.run_id,
             "reason": self.reason[:200],
             **({'carrier':self.carrier} if self.carrier else {}),
+            **({'effect_outcome': self.effect_outcome} if self.effect_outcome else {}),
         }
 
 
@@ -414,6 +420,9 @@ class SkillLearningStore:
         key = str(request.get("request_key") or "")
         if not re.fullmatch(r"[0-9a-f]{16}", key):
             raise SkillLearningStoreError(CODE_REQUEST_CORRUPT, "invalid learning request key")
+        source = {name: value for name, value in request.items()
+                  if name not in _REQUEST_PROGRESS_FIELDS or name in ("attempt_id", "attempts")}
+        request = _learning_request_progress(source, uuid.uuid4().hex)
         with self.state_lock():
             outcome, event = self._enqueue_locked(request, key)
         if event is not None:
@@ -617,16 +626,24 @@ class SkillLearningStore:
             return None
         if not isinstance(payload, dict) or payload.get("schema_version") != REQUEST_SCHEMA_VERSION:
             return None
-        return payload
+        return _learning_request_progress(payload, name)
 
     # LLM: 重试只改原键，已轮转时写同名缓冲，已被同类新请求替代时不复活旧请求。
     # 函数用途: 原子覆盖一条请求。
-    def rewrite_request(self, path: Path, request: dict[str, object]) -> None:
+    def rewrite_request(self, path: Path, request: dict[str, object], *, expected=None) -> bool:
         with self.state_lock():
-            _folder, name = self._request_parts(path)
-            for folder in ("requests", "requests_overflow"):
-                if read_text_beneath(self.directory, (folder, name)) is not None:
-                    self._write_request_locked(folder, name, request)
+            return self._rewrite_request_locked(path, request, expected=expected)
+
+    def _rewrite_request_locked(self, path, request, *, expected=None):
+        if expected is not None and self.read_request(path) != expected:
+            return False
+        _folder, name = self._request_parts(path)
+        found = False
+        for folder in ("requests", "requests_overflow"):
+            if read_text_beneath(self.directory, (folder, name)) is not None:
+                self._write_request_locked(folder, name, request)
+                found = True
+        return found
 
     # LLM: state锁内先验路径并收敛中断替代关系，再按原文件名删除；删新不复活旧、删旧不误删新，最后补齐FIFO热区。
     # 函数用途: 在保留崩溃替代事实的前提下删除准确请求并补齐热队列。
@@ -676,14 +693,23 @@ class SkillLearningStore:
         today = datetime.now(timezone.utc).date().isoformat()
         with self.state_lock():
             registry = self.load_registry()
-            history = dict(registry.daily_history)
-            calls = max(registry.daily_calls if registry.daily_date == today else 0, history.get(today, 0))
+            calls = self.daily_calls_on(registry, today)
             if limit > 0 and calls >= limit:
                 return False
-            history[today] = calls + 1
-            self.save_registry(replace(registry, daily_date=today, daily_calls=calls + 1,
-                                       daily_history=_recent_daily_history(history)))
+            self._record_daily_admission_locked(registry, today)
         return True
+
+    @staticmethod
+    def daily_calls_on(registry, day):
+        return max(registry.daily_calls if registry.daily_date == day else 0, registry.daily_history.get(day, 0))
+
+    def _record_daily_admission_locked(self, registry, day, *, attempt=""):
+        calls = self.daily_calls_on(registry, day) + 1
+        history = _recent_daily_history({**registry.daily_history, day: calls})
+        # 跨 UTC 日补记中断的准入，不把最新计数快照倒退到旧日期。
+        latest = max(day, registry.daily_date)
+        self.save_registry(replace(registry, daily_date=latest, daily_calls=history.get(latest, calls),
+                                   daily_history=history, learning_admission=attempt or registry.learning_admission))
 
     # LLM: 有界追加（保留最近 MAX_LEDGER_EVENTS 条），自带 per-path 锁，调用方不需要持 state_lock。
     # 函数用途: 往账本追加一条事件。
@@ -1088,7 +1114,7 @@ class SkillLearningStore:
                 detail={"skill_name": name},
             )
         src = self._resolve_op_rel(self._encode_rel("store", ("archived", name)))
-        dst = (self.skills_root, (LEARNED_DIR_NAME, name))
+        dst = (self.skills_root, self.skill_path(name, record=current).parent.relative_to(self.skills_root).parts)
         status, sha = self._dir_skill_sha256_nofollow(*src)
         extra = self._dir_extra_entries_status_nofollow(*src)
         if current.maintenance.get("ownership") == "user_modified" or (
@@ -1819,7 +1845,6 @@ class SkillLearningStore:
         victim, target = str(op["skill_name"]), str(op["candidate_name"])
         original, archived = (self._resolve_op_rel(str(op[key])) for key in ("source_rel", "target_rel"))
         candidate = self._resolve_op_rel(str(op["candidate_rel"]))
-        restored = (self.skills_root, (LEARNED_DIR_NAME, target))
         victims_sha = op["expected_sha256"]
         target_sha = op["candidate_sha256"]
         victim_record, target_record = registry.skills.get(victim), registry.skills.get(target)
@@ -1827,6 +1852,7 @@ class SkillLearningStore:
                 or (victim_record.revision, victim_record.sha256) != (op["expected_revision"], victims_sha)
                 or (target_record.revision, target_record.sha256) != (op["candidate_revision"], target_sha)):
             raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, detail={"operation_id": op["operation_id"]})
+        restored = (self.skills_root, self.skill_path(target, record=target_record).parent.relative_to(self.skills_root).parts)
 
         def evidence(src, dst, sha, *, check_extra=False):
             src_status = self._dir_skill_sha256_nofollow(*src)
@@ -2494,6 +2520,8 @@ def _request_context(request):
 # LLM: 用户总结与自动总结不互吞；显式不同task先拒绝，共同root或谱系不能覆盖来源和子任务身份。
 # 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
 def _mergeable_requests(left, right):
+    if left.get("stage", 0) or right.get("stage", 0):
+        return False
     if left.get('completion_ref') or right.get('completion_ref'):
         return bool(left.get('completion_identity') and left.get('completion_identity') == right.get('completion_identity')
                     and left.get('trajectory_digest') == right.get('trajectory_digest')
@@ -2521,6 +2549,36 @@ def _mergeable_requests(left, right):
         return first == second
     runs = left.get('run_id'), right.get('run_id')
     return not all(runs) or runs[0] == runs[1]
+
+
+_REQUEST_PROGRESS_FIELDS = frozenset({
+    "stage", "attempt_id", "source_version", "attempts", "verified_draft_digest",
+    "merge_target", "draft", "merge_draft", "merge_digest", "source_attempt_id",
+})
+
+
+def learning_source_version(request):
+    source = {key: value for key, value in request.items() if key not in _REQUEST_PROGRESS_FIELDS}
+    return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def learning_attempt_token(request):
+    return hashlib.sha256(json.dumps(
+        [request["request_key"], request["source_version"], request["attempt_id"]], ensure_ascii=False,
+    ).encode()).hexdigest()
+
+
+def _learning_request_progress(request, seed):
+    if all(key in request for key in ("source_version", "stage", "attempt_id", "verified_draft_digest", "merge_target")):
+        return request
+    return {
+        "source_version": learning_source_version(request),
+        "stage": 0,
+        "verified_draft_digest": "",
+        "merge_target": None,
+        **request,
+        "attempt_id": request.get("attempt_id") or uuid.uuid5(uuid.NAMESPACE_URL, seed).hex,
+    }
 
 
 # LLM: request_key 只由运行身份决定，同一次运行重复收口不会重复入队。
@@ -2582,12 +2640,20 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
     catalog_generation = payload.get("catalog_generation", "")
     if not isinstance(catalog_generation, str):
         raise ValueError("registry catalog_generation must be a string")
+    import_operations = dict(payload.get("import_operations") or {})
+    legacy_scan = import_operations.pop("protection_scan", None)
+    protection_scan = payload.get("protection_scan", legacy_scan)
+    learning_admission = payload.get("learning_admission", "")
+    if protection_scan is not None and not isinstance(protection_scan, dict):
+        raise ValueError("registry protection_scan must be an object")
+    if not isinstance(learning_admission, str):
+        raise ValueError("registry learning_admission must be a string")
     return SkillLearningRegistry(
         skills=skills,
         blocked_names=tuple(dict.fromkeys(blocked)),
         daily_date=daily_date,
         daily_calls=calls,
-        import_operations=dict(payload.get("import_operations") or {}),
+        import_operations=import_operations,
         daily_history=history,
         assets=assets,
         last_maintenance_at=clock,
@@ -2596,6 +2662,8 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
         pending_operation=pending_op,
         blocked_task_families=tuple(dict.fromkeys(raw_families)),
         catalog_generation=catalog_generation,
+        protection_scan=protection_scan,
+        learning_admission=learning_admission,
     )
 
 
