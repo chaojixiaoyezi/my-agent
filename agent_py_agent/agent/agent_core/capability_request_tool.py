@@ -11,7 +11,9 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..common import hot_json
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..contracts.tool_input_schema import tool_input_correction, validate_tool_input
 from ..runtime_context import current_subagent_run_id
 from ..subagents.capability_scope import (
     canonical_capability_tool_request_fields,
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
 
 
 _TOOL_NAME = "capability_request"
+_SCHEMA_ERROR_CODE = "CAPABILITY_REQUEST_INVALID"
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class CapabilityRequestTool(BaseTool):
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("capability_requests",)),
         input_policy=ToolInputPolicy(
             internal_parameters=("run_id", "from_run_id", "agent_id"),
+            schema_error_code=_SCHEMA_ERROR_CODE,
         ),
     )
 
@@ -71,6 +75,15 @@ class CapabilityRequestTool(BaseTool):
     # 必须携带直属父级真实 ToolRuntimeSnapshot 权限事实，不能让模型从 child prose 猜可授予性。
     # 函数用途: 记录当前子代理的能力缺口；安全自动批则切片续跑，外部能力则带父级权限快照上报。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        schema = self.model_spec.input_schema
+        internal = self.runtime_policy.input_policy.internal_parameters
+        validation = validate_tool_input({key: value for key, value in params.items() if key not in internal}, schema)
+        if not validation.ok:
+            facts = tool_input_correction(validation, schema, code=_SCHEMA_ERROR_CODE,
+                                          example_text=self.model_spec.hints.examples[0])
+            return ToolHandlerOutcome(_TOOL_NAME, False,
+                hot_json.dumps(facts, ensure_ascii=False), error_code=_SCHEMA_ERROR_CODE,
+                effect_outcome="not_started", result_envelope={"error_details": facts})
         request = _capability_request_input(self.agent, params)
         if isinstance(request, ToolHandlerOutcome):
             return request
@@ -159,6 +172,11 @@ class CapabilityRequestTool(BaseTool):
 
 
 def build_capability_request_model_spec() -> ToolModelSpec:
+    schema = _capability_request_input_schema()
+    example = {"problem": "需要将已核验的报告写入分配的任务目录",
+               "requested_tools": ["write_file"], "constraints": {"delivery": "assigned_root"}}
+    if not validate_tool_input(example, schema).ok:
+        raise ValueError("能力申请示例必须符合输入合同")
     return ToolModelSpec(
         name=_TOOL_NAME,
         description=(
@@ -166,7 +184,7 @@ def build_capability_request_model_spec() -> ToolModelSpec:
             "会被机制层立即自动授权并安排续跑；外部能力（网络/MCP/skill/越界路径/高风险）"
             "记录为待父级处理，本工具自身不执行任何工具。"
         ),
-        input_schema=_capability_request_input_schema(),
+        input_schema=schema,
         hints=ToolModelHints(
             category="orchestration",
             use_cases=(
@@ -179,12 +197,7 @@ def build_capability_request_model_spec() -> ToolModelSpec:
                 "当前已有 run_command、write_file、apply_patch 等普通工具能完成任务",
             ),
             keywords=("capability", "request", "grant", "tool", "skill", "shell", "MCP", "能力申请", "授权"),
-            examples=((
-                '{"tool":"capability_request","problem":"当前工具无法访问必要的内部系统查询结果",'
-                '"needed_capability":"internal_api_access","capability_type":"network",'
-                '"requested_tools":["internal_api_query"],"expected_output":"拿到查询结果或明确失败原因",'
-                '"risk_level":"low"}'
-            ),),
+            examples=(hot_json.dumps(example, ensure_ascii=False),),
         ),
     )
 

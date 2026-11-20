@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from ...common.fast_dataclass import fast_replace
-from ...common.structured_output import json_value_from_complete_response
+from ...common.structured_output import parse_structured_envelope
 from ...contracts.background_public_receipt import CONTRACT_KEY, RESULT_SCHEMA
 from ...conversation.user_visible_text import sanitize_user_visible_text
 from ..model.response_provenance import response_provenance_error, response_provenance_projection
 from ..runtime.guidance import active_turn_user_reply_required, satisfy_active_turn_user_reply
 
-_RESULT_KEYS = {'schema', 'internal_result', 'notification_intent', 'public_reply'}
+_RESULT_KEYS = ('schema', 'internal_result', 'notification_intent', 'public_reply')
 
 
 # LLM: 仅认宿主装配的已知完成合同，不读取模型 attrs、原始正文或默认猜测。
@@ -38,14 +38,14 @@ def public_receipt_contract_prompt(params: object) -> str:
     )
 
 
-# LLM: 只解码整个受管响应的一份 JSON 或其单一 json 围栏，再校验显式 schema；不得搜索说明文字中的对象或改变普通正文路径。
-# 函数用途: 校验完整后台完成信封，兼容无歧义的模型展示包装，返回结构化声明或明确的协议错误。
+# LLM: 只读取完整响应或原工具账的业务信封，公开前须通过同一形态检查。
 def parse_background_result(text: str) -> tuple[dict[str, str] | None, str]:
-    try:
-        value = json_value_from_complete_response(text)
-    except (ValueError, TypeError):
-        return None, 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
-    if not isinstance(value, dict) or set(value) != _RESULT_KEYS:
+    value, _ = parse_structured_envelope(text, expected_fields=_RESULT_KEYS)
+    return _validate_background_result(value)
+
+
+def _validate_background_result(value):
+    if not isinstance(value, dict) or value.keys() != set(_RESULT_KEYS):
         return None, 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
     if any(not isinstance(value[key], str) for key in _RESULT_KEYS):
         return None, 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
@@ -56,6 +56,42 @@ def parse_background_result(text: str) -> tuple[dict[str, str] | None, str]:
     if value['notification_intent'] == 'internal_only' and value['public_reply'].strip():
         return None, 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
     return value, ''
+
+
+def _archive_tail(params):
+    records = getattr(params, 'archive_tool_calls', None) or ()
+    # 沿原修复窗口取最近工具回执，避免重建完整工具历史。
+    return [row for row in records[-12:] if isinstance(row, dict)]
+
+
+def _source_envelope(params, response):
+    structured = getattr(response, 'structured_output', None)
+    if isinstance(structured, dict):
+        return structured
+    for record in reversed(_archive_tail(params)):
+        envelope = record.get('tool_result_envelope')
+        if record.get('ok') is not True or not isinstance(envelope, dict):
+            continue
+        if 'background_result' in envelope:
+            return envelope['background_result']
+        if envelope.get('schema') == RESULT_SCHEMA:
+            return envelope
+    return None
+
+
+def _looks_like_mixed_object(text):
+    source = text.strip()
+    if '{' not in source or '}' not in source:
+        return False
+    for fence in ('```', '~~~'):
+        if fence in source:
+            if source.count(fence) != 2:
+                return False
+            first = source.find(fence)
+            last = source.rfind(fence)
+            return source[first + len(fence):].lstrip().lower().startswith('json') and bool(
+                source[:first].strip() or source[last + len(fence):].strip())
+    return not source.startswith('{') or not source.endswith('}')
 
 
 # LLM: 待投附件来自已声明目标和本 run 原工具产物引用；只复用finalization提取器，不解析正文路径或扫描目录。
@@ -88,9 +124,8 @@ def _invalid_receipt(response: object, code: str) -> object:
 # LLM: 回执修复的执行证据只来自本run原工具账，投影有界，不把模型内部总结升级为宿主证明。
 # 函数用途: 提供最近实际工具结果的状态、效果与产物引用，让一次表达修复能围绕已有事实说明。
 def _tool_receipt_facts(params: object) -> list[dict[str, object]]:
-    records = [item for item in (getattr(params, 'archive_tool_calls', None) or []) if isinstance(item, dict)]
     facts = []
-    for record in records[-12:]:
+    for record in _archive_tail(params):
         envelope = record.get('tool_result_envelope')
         envelope = envelope if isinstance(envelope, dict) else {}
         facts.append({'call_id': record.get('call_id', ''), 'tool': record.get('tool', ''),
@@ -100,21 +135,48 @@ def _tool_receipt_facts(params: object) -> list[dict[str, object]]:
     return facts
 
 
-# LLM: 公开意图只由本次主调用的合法 schema 声明，宿主来源覆盖模型字段；用户插话和附件义务不允许被静默声明取消。
-# 函数用途: 消费主轮完成信封，返回可公开内容或登记至多一次现有零工具表达修复。
+def _queue_background_repair(params, facts, original):
+    from .natural_user_reply import pending_natural_user_reply, queue_natural_user_reply
+
+    state = getattr(params, 'live_archive_state', None)
+    if (not isinstance(state, dict) or state.get('_background_receipt_repair_used') is True
+            or pending_natural_user_reply(params) is not None):
+        return False
+    queue_natural_user_reply(params, kind='background_final_receipt', facts=facts)
+    state['_background_receipt_repair_used'] = True
+    state['_background_receipt_execution_response'] = original
+    return True
+
+
 def prepare_background_public_receipt(params: object, response: object, *, agent=None) -> tuple[str, object]:
     if not explicit_public_receipt_active(params):
         return 'normal', response
     if str(getattr(response, 'runtime_status', 'ok') or 'ok') != 'ok' or getattr(response, 'truncated', False):
         return 'normal', response
-    # 物理空响应继续原空输出恢复，不能在这里捏造 internal_only。
-    if not str(getattr(response, 'text', '') or '').strip():
+    supplied = _source_envelope(params, response)
+    text = getattr(response, 'text', '') or ''
+    if supplied is None and not text.strip():
         return 'normal', response
     if error := response_provenance_error(params, response):
         return 'finish', _invalid_receipt(response, error)
-    payload, error = parse_background_result(response.text)
+    payload, error = _validate_background_result(supplied) if supplied is not None else parse_background_result(text)
     if error:
+        if supplied is None and _looks_like_mixed_object(text):
+            reply_required = active_turn_user_reply_required(params)
+            attachments_required = _has_pending_delivery_artifacts(params, agent=agent)
+            facts = {'envelope_repair': True, 'expected_type': 'object', 'expected_fields': list(_RESULT_KEYS),
+                     'tool_result_facts': _tool_receipt_facts(params),
+                     'current_user_request': str(getattr(params, 'user_prompt', '') or ''),
+                     'public_reply_required': reply_required, 'attachments_required': attachments_required}
+            original = {'envelope_repair': True, 'execution_source': response_provenance_projection(response),
+                        'public_reply_required': reply_required, 'attachments_required': attachments_required}
+            if _queue_background_repair(params, facts, original):
+                return 'repair', _invalid_receipt(response, error)
         return 'finish', _invalid_receipt(response, error)
+    return _prepare_valid_receipt(params, response, payload, agent=agent)
+
+
+def _prepare_valid_receipt(params, response, payload, *, agent=None):
     reply_required = active_turn_user_reply_required(params)
     attachments_required = _has_pending_delivery_artifacts(params, agent=agent)
     source = response_provenance_projection(response)
@@ -127,24 +189,20 @@ def prepare_background_public_receipt(params: object, response: object, *, agent
     if (reply_required and payload['notification_intent'] == 'internal_only') or (
         payload['notification_intent'] == 'publish' and not prepared.text.strip() and not attachments_required
     ):
-        from .natural_user_reply import queue_natural_user_reply
-
-        queue_natural_user_reply(params, kind='background_final_receipt', facts={
+        facts = {
             'current_user_request': str(getattr(params, 'user_prompt', '') or ''),
             'internal_execution_result': payload['internal_result'],
             'internal_result_is_model_authored': True,
             'execution_source': source,
-            'tool_execution_count': len(list(getattr(params, 'archive_tool_calls', None) or [])),
+            'tool_execution_count': len(getattr(params, 'archive_tool_calls', None) or ()),
             'tool_result_facts': _tool_receipt_facts(params),
             'reply_is_interim': False, 'task_continues_without_more_user_input': False,
             'public_reply_required': True,
-        })
-        state = getattr(params, 'live_archive_state', None)
-        if isinstance(state, dict):
-            state['_background_receipt_execution_response'] = {
-                'internal_response': prepared.internal_response, 'public_receipt': dict(receipt),
-            }
-        return 'repair', prepared
+        }
+        original = {'internal_response': prepared.internal_response, 'public_receipt': dict(receipt)}
+        if _queue_background_repair(params, facts, original):
+            return 'repair', prepared
+        return 'finish', _invalid_receipt(prepared, 'BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE')
     if prepared.text.strip() and reply_required:
         satisfy_active_turn_user_reply(params)
     return 'finish', prepared
@@ -161,6 +219,24 @@ def finish_background_receipt_repair(params: object, response: object, *, accept
     if error or not accepted:
         failed = _invalid_receipt(response, error or 'BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE')
         return fast_replace(failed, internal_response=str(original.get('internal_response') or ''))
+    if original.get('envelope_repair') is True:
+        payload, invalid = parse_background_result(response.text)
+        if invalid:
+            return _invalid_receipt(response, invalid)
+        publish = payload['notification_intent'] == 'publish'
+        public = sanitize_user_visible_text(payload['public_reply']).content
+        reply_required = original['public_reply_required']
+        attachments_required = original['attachments_required']
+        if ((reply_required or attachments_required) and not publish
+                or publish and not public.strip() and (reply_required or not attachments_required)):
+            return _invalid_receipt(response, 'BACKGROUND_RECEIPT_PUBLIC_OBLIGATION')
+        if publish and public.strip():
+            satisfy_active_turn_user_reply(params)
+        receipt = {'schema': RESULT_SCHEMA, 'notification_intent': payload['notification_intent'],
+                   'execution_source': original['execution_source'],
+                   'public_source': response_provenance_projection(response)}
+        return fast_replace(response, text=public, internal_response=payload['internal_result'],
+                            public_receipt=receipt)
     receipt = dict(original.get('public_receipt') or {})
     receipt.update(notification_intent='publish', public_source=response_provenance_projection(response))
     satisfy_active_turn_user_reply(params)

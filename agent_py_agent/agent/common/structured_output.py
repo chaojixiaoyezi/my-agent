@@ -30,12 +30,39 @@ _COMPLETE_JSON_FENCE = re.compile(
 
 # LLM: 仅解码整个响应的一份 JSON；可剥离唯一完整 json 围栏，不扫描嵌入对象、不接受前后说明，schema 和身份仍由调用方裁决。
 # 函数用途: 兼容模型对完整 JSON 加代码围栏的展示包装，避免把合规协议误判为失败，不增加请求或改变普通正文。
-def json_value_from_complete_response(text: str) -> Any:
+def json_value_from_complete_response(text: str, *, reject_duplicates: bool = False) -> Any:
     if not isinstance(text, str):
         raise TypeError("完整 JSON 响应必须为文本")
     source = text.strip()
     fence = _COMPLETE_JSON_FENCE.fullmatch(source)
-    return json.loads(fence.group("body") if fence is not None else source)
+    body = fence.group("body") if fence is not None else source
+    if reject_duplicates:
+        return json.loads(body, object_pairs_hook=_unique_object, parse_constant=_non_json_constant)
+    return json.loads(body)
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _non_json_constant(_value):
+    raise ValueError("non-finite JSON constant")
+
+
+def parse_structured_envelope(text: str, *, expected_fields: tuple[str, ...]) -> tuple[dict | None, str]:
+    """只接收整段响应的单个对象，字段集合由调用方提供。"""
+    try:
+        value = json_value_from_complete_response(text, reject_duplicates=True)
+    except (TypeError, ValueError, RecursionError):
+        return None, "STRUCTURED_ENVELOPE_INVALID"
+    if not isinstance(value, dict) or set(value) != set(expected_fields):
+        return None, "STRUCTURED_ENVELOPE_FIELDS_INVALID"
+    return value, ""
 
 
 @dataclass(frozen=True)
@@ -241,4 +268,5 @@ __all__ = [
     "collect_structured_batches",
     "json_objects_from_text",
     "json_value_from_complete_response",
+    "parse_structured_envelope",
 ]

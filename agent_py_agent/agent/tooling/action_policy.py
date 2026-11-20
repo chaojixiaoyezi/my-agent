@@ -291,6 +291,14 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
         "issues": issue_rows,
         "allowed_parameters": sorted(runtime.model_spec.input_schema.get("properties", {})),
     }
+    correction_code = runtime.runtime_policy.input_policy.schema_error_code
+    if correction_code:
+        from ..contracts.tool_input_schema import tool_input_correction
+
+        facts = tool_input_correction(validation, runtime.model_spec.input_schema,
+                                      code=correction_code, example_text=runtime.model_spec.hints.examples[0])
+        evidence["error_details"] = facts
+        evidence["next_action"] = "按 error_details.json_path 和 expected_type 修正参数，参考 example 后重新提交。"
     conflict = next(
         (
             row.get("details")
@@ -303,7 +311,7 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
     if conflict is not None:
         evidence["details"] = dict(conflict)
     return _deny(
-        validation.primary_error_code or "TOOL_INVALID_ARGUMENTS",
+        correction_code or validation.primary_error_code or "TOOL_INVALID_ARGUMENTS",
         stage="validation",
         evidence=evidence,
     )

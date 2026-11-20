@@ -61,7 +61,28 @@ def test_real_provider_json_fence_completes_original_scheduler_without_public_se
     assert not any(row.content == text or row.content == internal for row in rows)
 
 
-@pytest.mark.parametrize('wrap', ['说明\n{body}', '{body}\n后记', '```python\n{body}\n```',
+@pytest.mark.parametrize('wrap', ['说明\n{body}', '{body}\n后记'])
+def test_mixed_receipt_repairs_once_and_publishes_only_the_corrected_envelope(tmp_path, wrap):
+    public = '唯一修复回执。'
+    original = wrap.format(body=_body(public='不可先发布的原响应。'))
+    case, prompts, channels, scheduler = _case(tmp_path, [original, _body(public=public)])
+
+    reports = scheduler.tick(now=case.job['next_run_at'])
+
+    history, errors = case.agent.scheduler_repository.history()
+    assert not errors and history[0]['status'] == 'done' and history[0]['delivery_status'] == 'sent'
+    assert len(prompts) == 2 and len(channels.attempts) == 1 and reports[0].wake_handled
+    assert channels.attempts[0][1].content == public
+    rows = case.store.messages.recent(case.thread.thread_id, limit=0)
+    metadata = next(row for row in rows if row.content == public).metadata['public_receipt']
+    assert metadata['execution_source']['purpose'] == 'main'
+    assert metadata['public_source']['purpose'] == 'background_receipt_repair'
+    assert metadata['execution_source']['call_id'] != metadata['public_source']['call_id']
+    assert '只输出一个完整 JSON 对象' in prompts[1]
+    assert '不可先发布的原响应' not in prompts[1]
+
+
+@pytest.mark.parametrize('wrap', ['```python\n{body}\n```',
     '```json\n{body}\n```\n```json\n{body}\n```'])
 def test_ambiguous_or_non_json_wrapper_cannot_silently_complete_or_reexecute(tmp_path, wrap):
     case, prompts, channels, scheduler = _case(tmp_path, [wrap.format(body=_body('internal_only', ''))])

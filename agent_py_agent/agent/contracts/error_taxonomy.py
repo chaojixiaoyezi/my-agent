@@ -11834,4 +11834,9 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="压缩候选的六段交接摘要未通过结构校验，未提交；宿主只在同一尝试预算内发出纠正请求，用完后保留旧检查点与覆盖游标，不把不完整交接当作摘要提交。",
     ),
+    "CAPABILITY_REQUEST_INVALID": ErrorContract(
+        code="CAPABILITY_REQUEST_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="能力申请尚未记录。按 error_details.json_path 和 expected_type 修正，并参考 example 提交同一申请意图。",
+    ),
 })

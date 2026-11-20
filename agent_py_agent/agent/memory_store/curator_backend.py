@@ -25,6 +25,7 @@ from ..backends.bounded_call import (
 from ..backends.errors import ProviderConfigurationError
 from ..backends.request_scope import provider_request_budget
 from ..common.request_execution_ports import RequestExecutionOutcomeUncertainError
+from ..common.structured_output import parse_structured_envelope
 from .candidate_models import (
     CANDIDATE_TYPES,
     PROMOTION_TARGETS,
@@ -40,6 +41,7 @@ from .curator_models import (
     curator_response_schema,
     parse_curator_extraction,
 )
+from .curator_schema import CuratorOutputViolation, missing_conflict_fields
 from .daily import DAILY_ACTORS, DAILY_EVENT_TYPES
 
 _LOGGER = logging.getLogger(__name__)
@@ -192,15 +194,50 @@ def _response_facts(response: object, text: str) -> dict[str, object]:
     return facts
 
 
-# LLM: 解析语义不变(仍是 ValueError、仍归 CURATOR_SCHEMA_INVALID、不重试、不缩批),只把失败包成
-#   CuratorResponseParseError 并附响应形状;原异常链保留,JSONDecodeError 的出错位置由失败诊断读取。
-# 函数用途: 严格解析一次已返回的模型响应,失败时抛出带响应形状的解析错误。
-def _parse_response(response: object) -> CuratorExtraction:
+# 修复响应只能补入原稿缺失的冲突列表。合并后仍用原 schema 全量校验，再核对修复引用。
+def _parse_response(response: object, *, repair=None) -> CuratorExtraction:
     text = str(getattr(response, "text", "") or "")
     try:
-        return parse_curator_extraction(text)
+        if repair is None:
+            return parse_curator_extraction(text)
+        draft, paths, known_conflicts = repair
+        patch, _ = parse_structured_envelope(text, expected_fields=tuple(paths))
+        if patch is None:
+            raise CuratorOutputViolation("curator conflicts_with repair must match the requested JSON paths",
+                                         code="missing_property", path=next(iter(paths)))
+        for path, index in paths.items():
+            draft["candidates"][index]["conflicts_with"] = patch[path]
+        extraction = parse_curator_extraction(json.dumps(draft, ensure_ascii=False))
+        for path, index in paths.items():
+            if any(ref not in known_conflicts for ref in extraction.candidates[index].conflicts_with):
+                raise CuratorOutputViolation("curator conflict ID is absent from the frozen batch",
+                                             code="conflict_outside_presented_scope", path=path)
+        return extraction
     except ValueError as exc:
         raise CuratorResponseParseError(str(exc), response_facts=_response_facts(response, text)) from exc
+
+
+def _conflict_repair(response, error, prompt, batch):
+    draft = json.loads(response.text)
+    paths = missing_conflict_fields(draft, error.__cause__)
+    if not paths:
+        return None
+    fields = {path: {key: draft["candidates"][index].get(key) for key in ("subject_key", "scope", "content")}
+              for path, index in paths.items()}
+    focus = json.dumps(fields, ensure_ascii=False)
+    repair_prompt = (
+        f"{prompt}\n修复同一批候选缺失的 conflicts_with。保留原候选及其来源、内容和其他字段。"
+        "只返回一个 JSON 对象，键为下列实际 JSON 路径，值必须为字符串数组。"
+        "回查本批正式记忆，有实际冲突时填写输入中的准确条目 ID，确无冲突时填空数组。"
+        '示例 {"$.candidates[0].conflicts_with": []} 或 '
+        '{"$.candidates[0].conflicts_with": ["mem-example-conflicting-entry"]}。'
+        f"待核对的候选：{focus}"
+    )
+    schema = {"type": "object",
+              "properties": {path: {"type": "array", "items": {"type": "string"}} for path in paths},
+              "required": list(paths), "additionalProperties": False}
+    known_conflicts = frozenset(item.authority_id for item in batch.formal_memories)
+    return (draft, paths, known_conflicts), repair_prompt, schema
 
 
 # LLM: 超时判定只读异常类型(含 MRO 类名),绝不解析异常正文——供应商正文可能夹带请求体和
@@ -327,6 +364,7 @@ def extract_with_retries(
     shrinks_left = _TIMEOUT_SHRINK_LIMIT_COUNT
     last_error: BaseException | None = None
     shapes: list[CuratorModelAttempt] = []
+    repair = None
     while True:
         timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
         if granted_seconds + timeout_seconds > budget_seconds:
@@ -360,12 +398,33 @@ def extract_with_retries(
         _LAST_MODEL_ATTEMPTS.set(tuple(shapes))
         if failure is None:
             # 成功形状同样留痕(含 result 类名),失败审计与成功运行都能看出调用形状。
+            try:
+                extraction = _parse_response(response, repair=repair)
+            except CuratorResponseParseError as error:
+                violation = error.__cause__
+                if (repair is not None or retries_left <= 0 or not isinstance(violation, CuratorOutputViolation)
+                        or violation.violation_code != "missing_property"
+                        or not violation.violation_path.endswith(".conflicts_with")):
+                    raise
+                candidate = _conflict_repair(response, error, prompt, effective)
+                if candidate is None:
+                    raise
+                repair, repair_prompt, repair_schema = candidate
+                repair_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(repair_prompt))
+                if len(repair_prompt) > config.max_input_chars or granted_seconds + repair_seconds > budget_seconds:
+                    raise
+                retries_left -= 1
+                prompt, schema = repair_prompt, repair_schema
+                schema_chars = len(json.dumps(schema, ensure_ascii=False))
+                continue
             return CuratorExtractionAttempt(
                 batch=effective,
-                extraction=_parse_response(response),
+                extraction=extraction,
                 shrink_attempts=_TIMEOUT_SHRINK_LIMIT_COUNT - shrinks_left,
             )
         last_error = failure
+        if repair is not None:
+            break
         # 已知永久错误保持旧语义；原短门未结与独立退出未知绝不能借同输入重试或缩批重放。
         if isinstance(failure, (
             CuratorModelStillRunningError, InterruptedError, ProviderConfigurationError,
