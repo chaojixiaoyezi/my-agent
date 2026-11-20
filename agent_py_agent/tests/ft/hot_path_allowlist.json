@@ -48,10 +48,6 @@
       "count": 2,
       "reason": "baseline-d9caa95af pending M14"
     },
-    "agent/agent_core/tool_loop/tool_wait_input.py::submit_wait_item::thread_ctor": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M14"
-    },
     "agent/agent_core/tool_model_generation.py::_GenerationInterruptWake.__init__::super0": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M14"
@@ -69,10 +65,6 @@
       "reason": "baseline-d9caa95af pending M14"
     },
     "agent/agent_core/tool_model_generation.py::_freeze_model_request_budget::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M14"
-    },
-    "agent/agent_core/tool_model_generation.py::_generate_through_wall_guard::thread_ctor": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M14"
     },

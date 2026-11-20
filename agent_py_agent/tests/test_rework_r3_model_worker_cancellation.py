@@ -23,6 +23,7 @@ from agent_py_agent.tests.test_mega_background_lifecycle_controls import (
     native_task_work_file,
     ready_index,
 )
+from agent_py_agent.tests.test_tool_model_generation import _capture_model_work_items
 
 
 def _started_call(ledger, call_id, *, run_id="original-run", attempt_id="original-attempt"):
@@ -35,12 +36,19 @@ def _retentions(ledger, call_id):
             if source is ledger and row.call_id == call_id for token in tokens]
 
 
-def _facts(agent, backend, future, task_id):
+# LLM: The held model call runs as one RUNNING item on a reusable pool thread. Select that exact item by the thread
+#   ident C1.7 publishes while it runs, so completion is judged per item instead of by the pool thread's lifetime.
+def _held_model_item(handles, backend):
+    held, = [handle for handle in handles if handle.ident == backend.waiting_worker.ident]
+    return held
+
+
+def _facts(agent, worker, future, task_id):
     task = agent.conversation_store.session_tasks.require(task_id)
     claim = agent.conversation_store.claims.load(task.target_thread_id)
     ref = claim["runtime_authority"]
     repo = agent.subagents.runtime_db
-    return {"timeout": agent.config.request_timeout, "worker_alive": backend.waiting_worker.is_alive(),
+    return {"timeout": agent.config.request_timeout, "worker_alive": worker.is_alive(),
         "scheduler_done": future.done(), "claim_id": claim["claim_id"], "claim_status": claim["status"],
         "run_id": ref["run_id"], "attempt_id": ref["attempt_id"],
         "attempt_status": repo.get_attempt(ref["attempt_id"])["status"],
@@ -51,17 +59,19 @@ def _facts(agent, backend, future, task_id):
 
 
 @pytest.mark.parametrize("execution_only", [False, True])
-def test_default_timeout_cancellation_waits_for_worker_then_retires(tmp_path, execution_only):
+def test_default_timeout_cancellation_waits_for_worker_then_retires(tmp_path, monkeypatch, execution_only):
     timeout = AgentConfig().request_timeout
     assert timeout == 240
     agent, backend, scheduler, call, task_id, view = native_cancellation_case(tmp_path, request_timeout=timeout)
     store, repo = agent.conversation_store, agent.subagents.runtime_db
     foreign = ModelCallLedger()
     foreign_tokens = []
+    handles, held = _capture_model_work_items(monkeypatch), None
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(scheduler.tick)
         try:
             assert backend.waiting.wait(15)
+            held = _held_model_item(handles, backend)
             task = store.session_tasks.require(task_id)
             ref = store.claims.load(task.target_thread_id)["runtime_authority"]
             # 同 run 的另一 attempt、同 attempt 的另一 run 都不能阻塞本次准确核收。
@@ -75,7 +85,7 @@ def test_default_timeout_cancellation_waits_for_worker_then_retires(tmp_path, ex
                       if execution_only else {"task_id": task_id, "include_descendants": True})
             assert call(action, params)["state"] == "pending"
             future.result(timeout=15)
-            live = _facts(agent, backend, future, task_id)
+            live = _facts(agent, held, future, task_id)
             print("cancelled-worker-live", live)
             assert live["worker_alive"] and live["scheduler_done"]
             assert live["claim_status"] == "cancelled" and live["attempt_status"] == "cancelled"
@@ -87,9 +97,8 @@ def test_default_timeout_cancellation_waits_for_worker_then_retires(tmp_path, ex
                     expected_revision=view["revision"], idempotency_key="default-timeout-retire")
                 assert retiring["agent"]["identity_state"] == "retiring"
             backend.release.set()
-            backend.waiting_worker.join(timeout=15)
-            assert not backend.waiting_worker.is_alive() and backend.returned.is_set()
-            exited = _facts(agent, backend, future, task_id)
+            assert held.join(timeout=15) and backend.returned.is_set()
+            exited = _facts(agent, held, future, task_id)
             print("original-worker-joined", exited)
             assert call(action, params)["state"] == "completed"
             assert foreign_tokens and all(_retentions(foreign, f"foreign-{index}") for index in range(2))
@@ -124,8 +133,8 @@ def test_default_timeout_cancellation_waits_for_worker_then_retires(tmp_path, ex
             assert not native_task_work_file(agent, task_id, "after-cancel-result.txt").exists()
         finally:
             backend.release.set()
-            if backend.waiting_worker is not None:
-                backend.waiting_worker.join(timeout=15)
+            if held is not None:
+                held.join(timeout=15)
             for token in foreign_tokens:
                 token.release()
             future.result(timeout=15)
@@ -144,10 +153,9 @@ def test_logical_failure_and_caller_timeout_do_not_release_worker_retention(monk
     ledger = ModelCallLedger()
     _started_call(ledger, "guard-call")
     entered, release = Event(), Event()
-    workers = []
+    workers = _capture_model_work_items(monkeypatch)
 
     def backend(*_args):
-        workers.append(current_thread())
         entered.set()
         assert release.wait(10)
         return "late"
@@ -183,15 +191,17 @@ def test_missing_or_failed_exact_retention_prevents_backend_start(monkeypatch, m
     assert calls == []
 
 
-@pytest.mark.parametrize("factory", ["_GenerationResultQueue", "copy_context", "Thread"])
+@pytest.mark.parametrize("factory", ["_GenerationResultQueue", "copy_context", "MODEL_CALL_POOL"])
 def test_failure_before_worker_construction_leaves_no_retention(monkeypatch, factory):
     ledger = ModelCallLedger()
     _started_call(ledger, "guard-call")
 
-    def unavailable(**_kwargs):
-        raise RuntimeError("thread construction failed before start")
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("worker construction failed before start")
 
-    monkeypatch.setattr(generation, factory, unavailable)
+    # The model pool's prepare builds the work item; the other two names are called directly.
+    monkeypatch.setattr(generation, factory,
+                        SimpleNamespace(prepare=unavailable) if factory == "MODEL_CALL_POOL" else unavailable)
     with pytest.raises(RuntimeError, match="construction failed"):
         generation._generate_through_wall_guard(_guard_request(), _guard_state(ledger))
     assert not _retentions(ledger, "guard-call")
@@ -210,14 +220,14 @@ def test_start_ack_failure_keeps_retention_until_original_worker_cleanup(monkeyp
         assert release.wait(10)
         return "late"
 
-    def lose_ack(worker, *, on_proven_not_started=None):
-        workers.append(worker)
-        worker.start()
+    def lose_ack(handle, *, on_proven_not_started=None):
+        workers.append(handle)
+        handle.start()
         assert entered.wait(5)
         raise RuntimeError("worker started but startup acknowledgement lost")
 
     monkeypatch.setattr(generation, "_generate_backend_response", backend)
-    monkeypatch.setattr(background_shutdown, "start_background_model_worker", lose_ack)
+    monkeypatch.setattr(background_shutdown, "start_background_model_work_item", lose_ack)
     try:
         with pytest.raises(RuntimeError, match="acknowledgement lost"):
             generation._generate_through_wall_guard(_guard_request(), _guard_state(ledger))
@@ -232,23 +242,28 @@ def test_start_ack_failure_keeps_retention_until_original_worker_cleanup(monkeyp
 
 
 def test_worker_retention_includes_final_interrupt_cleanup(monkeypatch):
+    from agent_py_agent.agent.concurrency import work_item_pool
+
     ledger = ModelCallLedger()
     _started_call(ledger, "guard-call")
     entered_cleanup, release_cleanup = Event(), Event()
-    workers = []
-    original_cleanup = generation.set_interrupt
+    threads, workers = [], _capture_model_work_items(monkeypatch)
+    original_cleanup = work_item_pool.set_interrupt
 
     def backend(*_args):
-        workers.append(current_thread())
+        threads.append(current_thread())
         return "result"
 
-    def cleanup(value):
-        entered_cleanup.set()
-        assert release_cleanup.wait(10)
-        return original_cleanup(value)
+    # After the item the pool clears the interrupt flag and only then runs the item-local reset that releases the
+    # retention. Hold that final clear, and only on the thread that ran the provider call.
+    def cleanup(active, thread_id=None):
+        if threads and current_thread() is threads[0] and not entered_cleanup.is_set():
+            entered_cleanup.set()
+            assert release_cleanup.wait(10)
+        return original_cleanup(active, thread_id)
 
     monkeypatch.setattr(generation, "_generate_backend_response", backend)
-    monkeypatch.setattr(generation, "set_interrupt", cleanup)
+    monkeypatch.setattr(work_item_pool, "set_interrupt", cleanup)
     try:
         assert generation._generate_through_wall_guard(_guard_request(), _guard_state(ledger)) == "result"
         assert entered_cleanup.wait(5)
@@ -269,22 +284,23 @@ def test_zero_timeout_direct_call_keeps_existing_untracked_compatibility(monkeyp
     assert calls == ["direct"]
 
 
-def test_untracked_legacy_marker_is_not_cleared_by_empty_current_ledger(tmp_path):
+def test_untracked_legacy_marker_is_not_cleared_by_empty_current_ledger(tmp_path, monkeypatch):
     agent, backend, scheduler, call, task_id, _view = native_cancellation_case(
         tmp_path, request_timeout=AgentConfig().request_timeout)
     store, repo = agent.conversation_store, agent.subagents.runtime_db
+    handles, held = _capture_model_work_items(monkeypatch), None
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(scheduler.tick)
         try:
             assert backend.waiting.wait(15)
+            held = _held_model_item(handles, backend)
             task = store.session_tasks.require(task_id)
             binding = store.claims.load(task.target_thread_id)["runtime_authority"]
             params = {"task_id": task_id, "include_descendants": True}
             assert call("tasks.cancel", params)["state"] == "pending"
             future.result(timeout=15)
             backend.release.set()
-            backend.waiting_worker.join(timeout=15)
-            assert not backend.waiting_worker.is_alive()
+            assert held.join(timeout=15)
             assert not any(row.run_id == binding["run_id"] and row.metadata.get("attempt_id") == binding["attempt_id"]
                            for _ledger, row, _tokens in model_call_drain_snapshot())
             ref = repo.parent_execution_ref(owner_id=str(agent.home_paths.owner_id), run_id=binding["run_id"],
@@ -302,6 +318,6 @@ def test_untracked_legacy_marker_is_not_cleared_by_empty_current_ledger(tmp_path
                     expected_resource_refs=current.metadata["cancellation_control"]["resource_refs"])
         finally:
             backend.release.set()
-            if backend.waiting_worker is not None:
-                backend.waiting_worker.join(timeout=15)
+            if held is not None:
+                held.join(timeout=15)
             future.result(timeout=15)

@@ -23,6 +23,7 @@ from agent_py_agent.tests.test_mega_background_lifecycle_controls import (
     native_cancellation_case,
     ready_index,
 )
+from agent_py_agent.tests.test_tool_model_generation import _capture_model_work_items
 
 GUARDED_TIMEOUT = AgentConfig().request_timeout
 DIRECT_MODEL = 0
@@ -35,10 +36,12 @@ def _identity(task):
             task.conversation_request_id, task.task_run_id)
 
 
-def _start_cancelled_original(tmp_path, *, request_timeout=GUARDED_TIMEOUT, execution_only=False, while_running=None):
+def _start_cancelled_original(tmp_path, monkeypatch, *, request_timeout=GUARDED_TIMEOUT, execution_only=False,
+                              while_running=None):
     """原业务任务在真实模型调用中被取消；原调度片跑在可显式 join 的独立线程里。"""
     agent, backend, scheduler, call, task_id, view = native_cancellation_case(tmp_path, request_timeout=request_timeout)
     store, outcome = agent.conversation_store, {}
+    model_items = _capture_model_work_items(monkeypatch)
 
     def original_slice():
         try:
@@ -49,9 +52,15 @@ def _start_cancelled_original(tmp_path, *, request_timeout=GUARDED_TIMEOUT, exec
     original_tick = Thread(target=original_slice, name="r8-original-slice")
     original_tick.start()
     case = SimpleNamespace(agent=agent, backend=backend, scheduler=scheduler, call=call, task_id=task_id, view=view,
-                           store=store, repo=agent.subagents.runtime_db, original_tick=original_tick, outcome=outcome)
+                           store=store, repo=agent.subagents.runtime_db, original_tick=original_tick, outcome=outcome,
+                           original_worker=None)
     try:
         assert backend.waiting.wait(15), "native scheduler did not reach the original model call"
+        # A guarded call runs as one model work item whose pool thread outlives it; a direct call runs on the slice
+        # thread itself. Both expose join/is_alive, so the helpers below follow the exact unit holding the provider call.
+        held = [item for item in model_items if item.ident == backend.waiting_worker.ident]
+        assert len(held) == (1 if request_timeout else 0)
+        case.original_worker = held[0] if held else backend.waiting_worker
         task = store.session_tasks.require(task_id)
         case.target = task.target_thread_id
         case.space_id = task.metadata["business_context"]["space_id"]
@@ -82,7 +91,7 @@ def _wait_original_slice(case):
 def _join_original_worker(case):
     # 逻辑cancelled不是物理退出；释放并显式join原模型worker后才允许核收。
     case.backend.release.set()
-    worker = case.backend.waiting_worker
+    worker = case.original_worker
     worker.join(timeout=15)
     assert not worker.is_alive() and case.backend.returned.is_set()
     _wait_original_slice(case)
@@ -95,8 +104,8 @@ def _join_original_worker(case):
 
 def _cleanup(case):
     case.backend.release.set()
-    if case.backend.waiting_worker is not None:
-        case.backend.waiting_worker.join(timeout=15)
+    if case.original_worker is not None:
+        case.original_worker.join(timeout=15)
     case.original_tick.join(timeout=15)
 
 
@@ -174,9 +183,9 @@ def _retire(case, key):
 @pytest.mark.parametrize("execution_only", [False, True], ids=["task-cancel", "execution-cancel"])
 @pytest.mark.parametrize("request_timeout", [GUARDED_TIMEOUT, DIRECT_MODEL], ids=["guarded-240s", "direct-model"])
 def test_original_cancellation_and_retirement_converge_after_healthy_successors(
-        tmp_path, request_timeout, execution_only, successors):
+        tmp_path, monkeypatch, request_timeout, execution_only, successors):
     assert GUARDED_TIMEOUT == 240
-    case = _start_cancelled_original(tmp_path, request_timeout=request_timeout, execution_only=execution_only)
+    case = _start_cancelled_original(tmp_path, monkeypatch, request_timeout=request_timeout, execution_only=execution_only)
     try:
         _join_original_worker(case)
         before = case.store.session_tasks.require(case.task_id)
@@ -235,7 +244,7 @@ def _retry_successor_slice(case, successor_id):
 
 
 def test_single_checkpoint_write_failure_retains_old_claim_and_same_acquisition_retry_succeeds(tmp_path, monkeypatch):
-    case = _start_cancelled_original(tmp_path)
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         old_claim, old_task = case.claim_path.read_bytes(), case.task_path.read_bytes()
@@ -263,7 +272,7 @@ def test_single_checkpoint_write_failure_retains_old_claim_and_same_acquisition_
 
 
 def test_checkpoint_success_then_replacement_failure_is_idempotent_on_retry(tmp_path, monkeypatch):
-    case = _start_cancelled_original(tmp_path)
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         old_claim = case.claim_path.read_bytes()
@@ -321,8 +330,8 @@ def _mutated(claim, field):
     ("thread", "conflict"), ("claim_task", "conflict"), ("run_id", "conflict"),
     ("agent_run_id", "conflict"), ("attempt_id", "conflict"), ("task_id", "conflict"),
 ])
-def test_wrong_claim_identity_cannot_save_proof(tmp_path, field, expected):
-    case = _start_cancelled_original(tmp_path)
+def test_wrong_claim_identity_cannot_save_proof(tmp_path, monkeypatch, field, expected):
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         before, control = case.task_path.read_bytes(), _control(case)
@@ -345,8 +354,8 @@ def test_wrong_claim_identity_cannot_save_proof(tmp_path, field, expected):
 
 
 @pytest.mark.parametrize("wrong", ["owner", "task", "thread", "claim", "run", "attempt"])
-def test_wrong_identity_on_disk_cannot_clear_outstanding_reference(tmp_path, wrong):
-    case = _start_cancelled_original(tmp_path)
+def test_wrong_identity_on_disk_cannot_clear_outstanding_reference(tmp_path, monkeypatch, wrong):
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         if wrong == "owner":
@@ -394,11 +403,11 @@ def test_wrong_identity_on_disk_cannot_clear_outstanding_reference(tmp_path, wro
         _cleanup(case)
 
 
-def test_running_worker_keeps_cancellation_pending_after_claim_proof(tmp_path):
-    case = _start_cancelled_original(tmp_path)
+def test_running_worker_keeps_cancellation_pending_after_claim_proof(tmp_path, monkeypatch):
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _wait_original_slice(case)
-        worker = case.backend.waiting_worker
+        worker = case.original_worker
         assert worker.is_alive() and not case.backend.returned.is_set()
         successor_ids, _backend = _run_successors(case, 2)
         # claim 已终态的证明独立于物理worker；原worker未退出前仍不能完成取消或退休。
@@ -415,14 +424,14 @@ def test_running_worker_keeps_cancellation_pending_after_claim_proof(tmp_path):
 
 def _join_original_worker_after_successors(case):
     case.backend.release.set()
-    case.backend.waiting_worker.join(timeout=15)
-    assert not case.backend.waiting_worker.is_alive() and case.backend.returned.is_set()
+    case.original_worker.join(timeout=15)
+    assert not case.original_worker.is_alive() and case.backend.returned.is_set()
 
 
-def test_unknown_worker_outcome_keeps_cancellation_pending_after_claim_proof(tmp_path):
+def test_unknown_worker_outcome_keeps_cancellation_pending_after_claim_proof(tmp_path, monkeypatch):
     from agent_py_agent.agent.conversation.business_contracts import HostParentExecutionRef
 
-    case = _start_cancelled_original(tmp_path)
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         ref = HostParentExecutionRef.from_dict(_control(case)["execution_ref"])
@@ -438,7 +447,7 @@ def test_unknown_worker_outcome_keeps_cancellation_pending_after_claim_proof(tmp
         _cleanup(case)
 
 
-def test_unsettled_original_operation_keeps_cancellation_pending_until_settled(tmp_path):
+def test_unsettled_original_operation_keeps_cancellation_pending_until_settled(tmp_path, monkeypatch):
     operations = []
 
     def start_operation(case):
@@ -447,7 +456,7 @@ def test_unsettled_original_operation_keeps_cancellation_pending_until_settled(t
         case.repo.mark_operation_executing(row["operation_id"])
         operations.append(row["operation_id"])
 
-    case = _start_cancelled_original(tmp_path, while_running=start_operation)
+    case = _start_cancelled_original(tmp_path, monkeypatch, while_running=start_operation)
     try:
         _join_original_worker(case)
         assert case.repo.unsettled_attempt_operations(case.authority["attempt_id"])
@@ -462,7 +471,7 @@ def test_unsettled_original_operation_keeps_cancellation_pending_until_settled(t
 
 
 def test_available_reuse_checkpoint_has_no_history_scan_or_predecessor_chain(tmp_path, monkeypatch):
-    case = _start_cancelled_original(tmp_path)
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         active, checkpoints = [], []
@@ -514,8 +523,8 @@ def test_available_reuse_checkpoint_has_no_history_scan_or_predecessor_chain(tmp
         _cleanup(case)
 
 
-def test_stale_claim_archive_preserves_needed_proof_then_archives_after_settlement(tmp_path):
-    case = _start_cancelled_original(tmp_path)
+def test_stale_claim_archive_preserves_needed_proof_then_archives_after_settlement(tmp_path, monkeypatch):
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         retention = 60.0
@@ -533,7 +542,7 @@ def test_stale_claim_archive_preserves_needed_proof_then_archives_after_settleme
 
 
 def test_stale_claim_archive_checkpoint_failure_leaves_original_evidence(tmp_path, monkeypatch):
-    case = _start_cancelled_original(tmp_path)
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         retention = 60.0
@@ -552,7 +561,7 @@ def test_stale_claim_archive_checkpoint_failure_leaves_original_evidence(tmp_pat
 
 
 def test_stale_claim_archive_does_not_act_on_unlocked_snapshot(tmp_path, monkeypatch):
-    case = _start_cancelled_original(tmp_path)
+    case = _start_cancelled_original(tmp_path, monkeypatch)
     try:
         _join_original_worker(case)
         stale = deepcopy(case.terminal_claim)

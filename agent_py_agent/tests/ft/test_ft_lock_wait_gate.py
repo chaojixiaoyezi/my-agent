@@ -187,6 +187,7 @@ CASES: list[tuple[str, str]] = [
     ('agent_py_agent.tests.test_conveyor_m12_cure_a_profiled.g1_case_learning_exclusion_entry', 'M12_learning_exclusion_entry'),
     ('agent_py_agent.tests.test_conveyor_m12_cure_a_profiled.g1_case_conversation_thread', 'M12_conversation_thread'),
     ('agent_py_agent.tests.test_conveyor_m12_cure_a_profiled.g1_case_wake_signal', 'M12_wake_signal'),
+    ('agent_py_agent.tests.test_conveyor_m14_work_item_pools.g1_case_registered_model_work_item', 'registered_model_work_item'),
 ]
 
 # C0 规则 9 的 GIL 探针：3.11/3.12 没有 sys._is_gil_enabled，按“GIL 开启”处理，收集阶段不会 AttributeError。

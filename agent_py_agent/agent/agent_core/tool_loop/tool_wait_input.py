@@ -5,30 +5,31 @@ import copy
 import hashlib
 import json
 import logging
-import threading
 import time
 from concurrent.futures import Future, TimeoutError
 from dataclasses import is_dataclass, replace
 
+from ...concurrency.work_item_pool import TOOL_WAIT_POOL
+
 _LOG = logging.getLogger(__name__)
-# 双0保持无新增配额；仅给每个已获主回合准入的活跃工具一条同进程线程，退出显式join。
+
+
 def submit_wait_item(item):
+    """在原捕获上下文中执行工具，等待方仍按工作项确认物理退出。"""
     future = Future()
 
     def run():
         if not future.set_running_or_notify_cancel():
             return
         try:
-            result = item.captured_context.run(item.run)
+            result = item.run()
         except BaseException as error:
             future.set_exception(error)
         else:
             future.set_result(result)
 
-    worker = threading.Thread(target=run, name='my-agent-tool-wait', daemon=True)
-    future._tool_wait_worker = worker
     try:
-        worker.start()
+        future._tool_wait_worker = TOOL_WAIT_POOL.submit(run, context=item.captured_context)
     except BaseException as error:
         future._tool_wait_worker = None
         future.set_exception(error)

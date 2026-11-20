@@ -16,11 +16,12 @@ import logging
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from time import monotonic_ns
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
@@ -122,7 +123,7 @@ class _GatewayResponseBaseContext:
 # 业务判定，失败时静默跳过，避免测量代码反噬执行路径。
 # 函数用途: 把「自某起点以来的耗时」写入可选的请求阶段字典。
 def _record_gateway_stage(
-    stages: dict[str, float] | None,
+    stages: dict[str, object] | None,
     key: str,
     started_mono: float,
 ) -> None:
@@ -135,7 +136,7 @@ def _record_gateway_stage(
 
 
 @contextmanager
-def _measure_gateway_stage(stages: dict[str, float] | None, key: str):
+def _measure_gateway_stage(stages: dict[str, object] | None, key: str):
     """只细分原请求的局部耗时，异常仍交给原收口，数字不参与状态裁决。"""
     try:
         started_mono = time.monotonic()
@@ -146,6 +147,65 @@ def _measure_gateway_stage(stages: dict[str, float] | None, key: str):
     finally:
         if started_mono is not None:
             _record_gateway_stage(stages, key, started_mono)
+
+
+class _ModelRequestStageTiming:
+    """记录同一请求的模型区间，合计时只计算一次重叠部分。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stages: dict[str, object] | None = None
+        self._agent: object = None
+        self._request_id = ""
+        self._segments: list[dict[str, int | None]] = []
+        self._closed = False
+        self._run_started = 0
+        self._active = 0
+        self._wait_started = 0
+        self._settled_wait = 0
+
+    def __enter__(self) -> _ModelRequestStageTiming:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        with self._lock:
+            self._closed = True
+            if self._stages is not None and self._segments:
+                # 已离开原请求的流可能还在收尾，终态阶段快照此后不再改变。
+                self._stages["model_wait_segments_ms"] = self._segments
+
+    def bind(self, agent: object, stages: dict[str, object] | None, *, request_id: str) -> None:
+        with self._lock:
+            if self._stages is None and stages is not None:
+                self._run_started = monotonic_ns()
+                self._agent, self._request_id, self._stages = agent, request_id, stages
+
+    def start(self, agent: object, request_id: str) -> dict[str, int | None] | None:
+        with self._lock:
+            stages = self._stages
+            if self._closed or stages is None or self._agent is not agent or self._request_id != request_id:
+                return None
+            now = monotonic_ns()
+            offset = (now - self._run_started) // 1_000_000
+            stages.setdefault("first_model_request_ms", offset)
+            if not self._active:
+                self._wait_started = now
+            self._active += 1
+            segment = {"started_ms": offset, "ended_ms": None}
+            self._segments.append(segment)
+            return segment
+
+    def finish(self, segment: dict[str, int | None]) -> None:
+        with self._lock:
+            if self._closed or self._stages is None:
+                return
+            now = monotonic_ns()
+            segment["ended_ms"] = (now - self._run_started) // 1_000_000
+            wait = self._settled_wait + now - self._wait_started
+            self._stages["model_wait_ms"] = wait // 1_000_000
+            self._active -= 1
+            if not self._active:
+                self._settled_wait = wait
 
 
 # LLM: 同一请求跨 Compact 重试继续使用当前上下文与完整归档；本包不拥有独立状态。
@@ -160,10 +220,16 @@ class _GatewayRunParamsRequest:
     carried_active_turn_user_inputs: tuple[dict[str, object], ...] = ()
 
 
+@dataclass
+class _GatewayRunParams(RunParams):
+    # 阶段计时只沿宿主运行参数传递，不写入任务属性或恢复记录。
+    stages: dict[str, object] | None = field(default=None, kw_only=True, repr=False, compare=False)
+
+
 # LLM: 策略只由本worker校验receipt后构造，非模型attrs；同栈replace保留，底层循环不从它恢复额外权限。
 # 类用途: 携带本次Bot已核执行约束，让宿主在真实agent.run周围安装执行门。
 @dataclass
-class _BotGatewayRunParams(RunParams):
+class _BotGatewayRunParams(_GatewayRunParams):
     bot_execution_policy: dict | None = field(default=None, repr=False, compare=False)
 
 
@@ -527,12 +593,11 @@ def _execute_gateway_conversation_turn(
         final_only = getattr(context.on_chunk, "set_final_only", None)
         if callable(final_only):
             final_only()
-    result, conversation = _run_gateway_turn_with_conversation_compact(
-        context,
-        prompt,
-        conversation,
-        observer=observer,
-    )
+    timing_scope = _ModelRequestStageTiming() if observer is not None and context.stages is not None else nullcontext()
+    with timing_scope as stage_timing:
+        if stage_timing is not None:
+            observer.model_request_stage_timing = stage_timing
+        result, conversation = _run_gateway_turn_with_conversation_compact(context, prompt, conversation, observer=observer)
     # 能力包宿主核验结论（核验账本的结构化事实）同一批发布、同一批随最终回复提交。
     promoted = queue_pack_verification_notice(context, conversation, result)
     promoted += _turn_tool_notices(context, conversation, notices + promoted)
@@ -752,6 +817,7 @@ def _run_gateway_turn_with_conversation_compact(
     capability_presentation = None
     presentation_evaluated = False
     bot_guard = None
+    stage_timing = getattr(observer, "model_request_stage_timing", None)
 
     # LLM: 回调只由原运行/Compact同步调用；不持久化或改活快照，清旧值后仍保留本turn已评估事实。
     # 函数用途: 在当前请求内保存真实采用结果，让压缩和后续重试使用同一展示或基础面。
@@ -795,6 +861,8 @@ def _run_gateway_turn_with_conversation_compact(
         _run_started = time.monotonic()
         from ..conversation.compact_guard import ConversationCompactCircuitOpenError
 
+        if stage_timing is not None:
+            stage_timing.bind(context.agent, run_params.stages, request_id=run_params.request_id)
         try:
             with bot_execution_scope(context.agent, bot_guard):
                 result = context.agent.run(prompt, params=run_params)
@@ -1102,7 +1170,7 @@ def _gateway_bot_execution_params(inputs, policy, attrs):
 # LLM: 仅已核canonical owner/线程/代次的Bot策略可启用原快照交集；普通插件tool_names非空继续失败关闭。
 # LLM: 离线/根/预算仅从已核receipt冻结为宿主参数；约束投影进attrs但不从模型attrs反授执行权。
 # 函数用途: 在原worker参数接缝应用Bot工具与目录预算限制，不扩大handler或使用旧成员资格。
-def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
+def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> _GatewayRunParams:
     request = inputs.request
     context = inputs.context
     conversation = inputs.conversation
@@ -1170,9 +1238,10 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
             allowed_tools, bot_policy, attrs, boundary = _gateway_bot_execution_params(inputs, plugin_policy, attrs)
         elif plugin_policy.get("tool_names"):
             raise RuntimeError("plugin chat request cannot enable tools on unrestricted worker")
-    params_type = _BotGatewayRunParams if bot_policy is not None else RunParams
+    params_type = _BotGatewayRunParams if bot_policy is not None else _GatewayRunParams
     return params_type(
         **({"bot_execution_policy": bot_policy} if bot_policy is not None else {}),
+        stages=context.stages,
         pending_turn_input_source=pending_turn_input_source(context.agent, request, conversation.thread_id),
         inject=injections,
         allowed_tools=allowed_tools,
@@ -1663,7 +1732,7 @@ def _handle_gateway_request(
 ) -> dict:
     started_mono = time.monotonic()
     context = _prepare_gateway_request_context(agent, request_path)
-    stage_timings: dict[str, float] = context.setdefault("stage_timings", {})
+    stage_timings: dict[str, object] = context.setdefault("stage_timings", {})
     _record_gateway_stage(stage_timings, "request_read_ms", started_mono)
     response = context["response"]
     response["owner_id"] = _executing_owner_id(agent)

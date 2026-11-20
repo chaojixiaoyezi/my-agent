@@ -469,22 +469,26 @@ def test_retirement_observes_original_pty_exit_without_second_stop(tmp_path):
             os.close(master)
 
 
-def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_path):
+def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
     from agent_py_agent.agent.contracts.model_call_ledger import model_call_drain_snapshot
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.tests.test_tool_model_generation import _capture_model_work_items
 
     agent, backend, scheduler, call, task_id, _view = native_cancellation_case(tmp_path, request_timeout=AgentConfig().request_timeout)
+    # The provider call runs as one model work item; its pool thread outlives the item, so follow the item itself.
+    handles, held = _capture_model_work_items(monkeypatch), None
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(scheduler.tick)
         try:
             assert backend.waiting.wait(15)
-            assert backend.waiting_worker.is_alive()
+            held, = [handle for handle in handles if handle.ident == backend.waiting_worker.ident]
+            assert held.is_alive()
             pending = call("tasks.cancel", {"task_id": task_id, "include_descendants": True})
             assert pending["state"] == "pending"
             future.result(timeout=15)
-            assert backend.waiting_worker.is_alive() and not backend.returned.is_set()
+            assert held.is_alive() and not backend.returned.is_set()
             target = agent.conversation_store.session_tasks.require(task_id).target_thread_id
             authority = agent.conversation_store.claims.load(target)["runtime_authority"]
             assert any(tokens and record.run_id == authority["run_id"] and record.metadata.get("attempt_id") == authority["attempt_id"]
@@ -495,9 +499,8 @@ def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_pat
             assert agent.conversation_store.session_tasks.require(task_id).metadata["cancellation_control"]["outstanding_refs"]
         finally:
             backend.release.set()
-            if backend.waiting_worker is not None:
-                backend.waiting_worker.join(timeout=15)
-                assert not backend.waiting_worker.is_alive()
+            if held is not None:
+                assert held.join(timeout=15)
             future.result(timeout=15)
     assert not (native_task_work_file(agent, task_id, "after-cancel-result.txt")).exists()
     assert call("tasks.cancel", {"task_id": task_id, "include_descendants": True})["state"] == "completed"

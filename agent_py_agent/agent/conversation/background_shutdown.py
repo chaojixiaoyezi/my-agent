@@ -5,10 +5,12 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-from ..concurrency.interrupt import _ThreadExitObservation, interrupt_by_name
+from ..concurrency.interrupt import WorkObservation, _ThreadExitObservation, interrupt_by_name
+from ..concurrency.work_item_pool import WorkItemHandle, WorkItemObservation
 from ..runtime_db.operations import (
     AGENT_RUN_TERMINAL_STATUSES,
     ATTEMPT_STATUS_UNKNOWN,
@@ -34,7 +36,7 @@ class BackgroundSlice:
         self.owner = owner
         self.repo = repo
         self.claims = []
-        self.workers = []
+        self.workers: list[WorkObservation] = []
         self.exited_worker_count = 0
         self.finished = False
         self.draining = False
@@ -79,7 +81,7 @@ class BackgroundSlice:
             claims, workers = tuple(self.claims), tuple(self.workers)
         exited = {worker for worker in workers if worker.exited()}
         if exited:
-            # 只在准确原生退出/未启动证明后释放 Thread 引用；UNKNOWN claim 留在原片。
+            # 只在退出或未启动证明后释放原观察引用；UNKNOWN claim 留在原片。
             with self.owner.lock:
                 retained = [worker for worker in self.workers if worker not in exited]
                 self.exited_worker_count += len(self.workers) - len(retained)
@@ -301,6 +303,42 @@ def start_background_model_worker(worker, *, on_proven_not_started=None):
                 on_proven_not_started()
             except BaseException:
                 # 释放失败仍须保留原始启动异常；未释放的原 token 继续构成阻塞。
+                pass
+        raise
+
+
+class _RegisteredModelWorkObservation(WorkItemObservation):
+    __slots__ = ()
+
+    def exited(self) -> bool:
+        # 登记之后、进入 start 之前，预备项也已经是本片的关停责任。
+        if not self.attempted:
+            return self.proven_not_started()
+        return super().exited()
+
+
+def start_background_model_work_item(
+    handle: WorkItemHandle,
+    *,
+    on_proven_not_started: Callable[[], None] | None = None,
+) -> None:
+    """预备项先登记关停责任，再交给可执行它的线程。"""
+    observation = None
+    try:
+        item = _CURRENT.get()
+        observation = _RegisteredModelWorkObservation(handle)
+        if item is not None:
+            with item.owner.lock:
+                item.workers.append(observation)
+        observation.start()
+    except BaseException:
+        if observation is None or not observation.attempted:
+            handle.cancel_if_not_started()
+        if on_proven_not_started is not None and handle.proven_not_started():
+            try:
+                on_proven_not_started()
+            except BaseException:
+                # 保留原始启动异常，未能释放的保留权仍由关停流程核收。
                 pass
         raise
 

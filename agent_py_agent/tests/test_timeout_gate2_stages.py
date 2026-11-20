@@ -39,6 +39,7 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallStartedParams,
 )
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+from agent_py_agent.tests.test_tool_model_generation import _capture_model_work_items
 
 # ---------------------------------------------------------------- helpers
 
@@ -340,7 +341,8 @@ def test_sse_keepalive_without_data_raises_stream_idle(
 class _BlockingBackend:
     name = "blocking-test-backend"
 
-    # LLM: The timeout test reads the exact worker instance after the guard returns to prove that cancellation drained it.
+    # LLM: The timeout test reads this slot to prove a worker entered the provider; the captured model work item proves
+    #   that cancellation drained the call.
     # 函数用途: 初始化可被验收的 worker 观察槽。
     def __init__(self) -> None:
         self.worker_thread = None
@@ -388,8 +390,9 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
     )
 
 
-def test_wall_clock_guard_raises_wall_clock_stage() -> None:
+def test_wall_clock_guard_raises_wall_clock_stage(monkeypatch) -> None:
     """非 stream 后端 + generate 挂起: 墙钟守卫线程超时 -> stage=wall_clock。"""
+    handles = _capture_model_work_items(monkeypatch)
     backend = _BlockingBackend()
     agent = SimpleNamespace(
         backend=backend,
@@ -407,7 +410,8 @@ def test_wall_clock_guard_raises_wall_clock_stage() -> None:
             )
         )
     assert err.value.stage == "wall_clock"
-    assert backend.worker_thread is not None and not backend.worker_thread.is_alive()
+    # The wall-clock retry makes a second call; every call's work item must have drained before the error surfaced.
+    assert backend.worker_thread is not None and handles and all(handle.done() for handle in handles)
     assert time.monotonic() - started < 0.5
 
 

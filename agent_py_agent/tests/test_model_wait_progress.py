@@ -274,6 +274,7 @@ def test_bound_callback_uses_original_sink_owner(tmp_path):
 @pytest.mark.parametrize('blocked_write', [False, True])
 @pytest.mark.parametrize('user_stop', [False, True])
 def test_guard_cancel_is_not_blocked_by_liveness_sink_or_real_chunk_lock(tmp_path, monkeypatch, blocked_write, user_stop):
+    from contextvars import copy_context
     from queue import Queue
 
     from agent_py_agent.agent.agent_core import tool_model_generation as generation
@@ -325,7 +326,8 @@ def test_guard_cancel_is_not_blocked_by_liveness_sink_or_real_chunk_lock(tmp_pat
                 set_interrupt(False)
 
     state.agent.backend = Backend()
-    worker = threading.Thread(target=lambda: _do_backend_generate(state.agent.backend, 'synthetic', state))
+    worker = generation.MODEL_CALL_POOL.prepare(lambda: _do_backend_generate(state.agent.backend, 'synthetic', state),
+                                                context=copy_context())
     failures = []
 
     # LLM: 调用_wait_for_generation_result并在30ms超时后捕获中断或超时异常，完成后置位guard_done。
