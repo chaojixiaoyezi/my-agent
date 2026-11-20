@@ -148,12 +148,23 @@ def _legacy_retention_reason(legacy, signal, task_id):
 # LLM: 回执跨进程锁覆盖本派单完整交接；阶段prepared→published→completed单调推进，冲突身份或损坏回执保留原工作。
 # 函数用途: 交接一条旧派单；返回空串表示已完成交接，否则返回保留原因。
 def _hand_off(home, legacy, signal, commit_transition, *, deadline=None):
-    from ..common.json_io import locked_json_path
-    from ..common.nofollow_fs import ensure_private_dir
+    from ..conversation.background_shutdown import commit_transition_gate
 
     identity = _dispatch_identity(home, signal)
     if identity is None:
         return "not_exact_dispatch"
+    watermark = {"task_id": identity["task_id"], "wake_signal_id": signal.wake_signal_id,
+                 "deadline": deadline}
+    return commit_transition_gate(
+        lambda: _hand_off_locked(home, legacy, signal, identity, commit_transition, watermark),
+        owner=home.owner_id, watermark=watermark,
+    )
+
+
+def _hand_off_locked(home, legacy, signal, identity, commit_transition, watermark):
+    from ..common.json_io import locked_json_path
+    from ..common.nofollow_fs import ensure_private_dir
+
     task_id = identity["task_id"]
     path = home.home_dir.joinpath(*_HANDOFF_PARTS, task_id + ".json")
     ensure_private_dir(path.parent, canonical_root=home.root)
@@ -169,22 +180,44 @@ def _hand_off(home, legacy, signal, commit_transition, *, deadline=None):
         phase = receipt.get("phase") if receipt is not None else ""
         if phase not in {"", "prepared", "published", "completed"}:
             return "handoff_receipt_invalid"
+        position = {**watermark, "phase": phase, "history_copy": receipt.get("history_copy") if receipt else None}
         if phase in {"", "prepared"}:
             reason = _legacy_retention_reason(legacy, signal, task_id)
             if reason:
                 return reason
             prepared = {**expected, "phase": "prepared", "updated_at": time.time(),
                         **({"history_copy": receipt["history_copy"]} if receipt is not None and "history_copy" in receipt else {})}
-            ready = commit_transition(lambda: _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity,
-                                                                  deadline=deadline))
+            ready = _commit_handoff(
+                commit_transition,
+                lambda: _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity,
+                                             deadline=watermark["deadline"]),
+                owner=home.owner_id, watermark=position,
+            )
             if ready is False:
                 return "history_copy_pending"
         status = _verified_canonical_status(home, signal)
         if status not in {"pending", "handled"}:
             return "canonical_publication_unverified"
         published = {**expected, "phase": "published", "canonical_receipt": status, "updated_at": time.time()}
-        commit_transition(lambda: _retire_legacy_wake(path, published, legacy, signal))
+        # 发布阶段可能刚持久推进 history_copy。拒绝退休时引用真实最新续点。
+        latest = _read_receipt(path)
+        if latest is not None:
+            position = {**position, "phase": latest.get("phase"), "history_copy": latest.get("history_copy")}
+        _commit_handoff(commit_transition, lambda: _retire_legacy_wake(path, published, legacy, signal),
+                        owner=home.owner_id, watermark=position)
     return ""
+
+
+def _commit_handoff(transition, operation, *, owner, watermark):
+    """保留原 C/W 提交权威，在执行发布或退休之前复核本进程排空。"""
+    from ..conversation.background_shutdown import BackgroundCommitRefused, commit_transition_gate
+
+    try:
+        return transition(lambda: commit_transition_gate(operation, owner=owner, watermark=watermark))
+    except BackgroundCommitRefused as error:
+        if error.watermark is watermark:
+            raise
+        raise BackgroundCommitRefused(owner, watermark) from error
 
 
 # LLM: 严格读取，缺失为None；损坏或非对象回执原样报错，不能当作无交接。

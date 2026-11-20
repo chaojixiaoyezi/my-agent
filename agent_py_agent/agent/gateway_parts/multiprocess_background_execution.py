@@ -486,11 +486,17 @@ def _execute_learning(agent, ref):
 # LLM: 只消费实际owner原retention事实；原长扫描在T外，逐动作/审计/最终state重核当次claim，shared索引不授W写权。
 # 函数用途: 让归属owner的原请求执行私有维护，并返回实际结构化结果。
 def _execute_maintenance(agent, ref):
+    from ..conversation.background_shutdown import commit_transition_gate
     from ..user_space.owner_maintenance import run_owner_retention_if_due
+
+    def commit(operation):
+        return background_short_operation("owner_maintenance_commit", lambda: commit_transition_gate(
+            operation, owner=agent.home_paths.owner_id, watermark=ref["input_revision"],
+        ))
 
     result = run_owner_retention_if_due(agent.home_paths, include_global_indexes=False,
         config=getattr(agent, "config", None),
-        commit_transition=lambda operation: background_short_operation("owner_maintenance_commit", operation),
+        commit_transition=commit,
         expected_policy_fingerprint=ref["input_revision"],
         expected_state_fingerprint=ref["source_sha256"] if ref["source_exists"] else "missing")
     return {"source_kind": "maintenance", "source_id": ref["source_id"], "outcome": "handled", **result.to_dict()}
