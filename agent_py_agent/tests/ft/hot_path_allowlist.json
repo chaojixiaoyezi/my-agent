@@ -1,0 +1,1425 @@
+{
+  "entries": {
+    "agent/agent_core/orchestration/background/dispatch.py::_BackgroundProcessWaitOwner.__init__::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M18"
+    },
+    "agent/agent_core/orchestration/background/dispatch.py::_reap_then_settle_unactivated_exit::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M18"
+    },
+    "agent/agent_core/orchestration/background/dispatch.py::_start_background_dispatch::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M18"
+    },
+    "agent/agent_core/orchestration/background/dispatch.py::_start_inprocess_dispatch::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M18"
+    },
+    "agent/agent_core/tool_call_archive_record.py::_config_bool::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_archive_record.py::_config_int::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_archive_record.py::_error_facts_from_result::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_archive_record.py::_inline_headroom_remaining::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_archive_record.py::extract_observation_screenshot::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_archive_record.py::extract_observation_screenshot::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_runtime.py::_archive_runtime_tool_output::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_runtime.py::_business_scope_preflight::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_runtime.py::execute_traced_tool_call.<locals>.pre_handler_gate::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_call_runtime.py::execute_traced_tool_call::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/action_summary.py::_json_inline::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/call_reducer.py::_value_size::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/call_reducer.py::_value_summary::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/decision_delivery_quality.py::_run_state_miss_reason::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/live_summary.py::_agents_summary::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/live_summary.py::_json_size::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/live_summary.py::_process_summary::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/live_summary.py::compact_archive_pointer::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/reducer.py::_read_artifact_hint::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/reducer.py::_without_own_archive_refs::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_context/reducer.py::render_tool_result_for_live_prompt::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_guard/call_guardrail.py::tool_guardrail_records::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_guard/call_guardrail_config.py::_hard_enabled::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_guard/call_guardrail_config.py::_hard_threshold::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_guard/call_guardrail_config.py::_soft_threshold::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_guard/identical_failure.py::next_identical_failure_streak::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_guard/unresolved_runtime_issue.py::unresolved_runtime_issue_context::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_ir_compact.py::stub_old_native_tool_results::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_ir_compact.py::stub_old_native_tool_results::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_ir_history.py::_MarkedAssistantTurn.__init__::object_setattr": {
+      "count": 4,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_ir_history.py::_ensure_assistant_turn::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_ir_history.py::_freeze_projection_value::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_loop/background_public_receipt.py::_invalid_receipt::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/background_public_receipt.py::finish_background_receipt_repair::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/background_public_receipt.py::prepare_background_public_receipt::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/closeout.py::generate_tool_loop_closeout::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/deferred_schema_reload.py::reload_schema_after_blind_call::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/natural_user_reply.py::_rejected_tool_feedback_ir::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/natural_user_reply.py::_reply_guidance::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/natural_user_reply.py::finish_natural_user_reply::replace_on_fast_frozen": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/natural_user_reply.py::natural_user_reply_model_params::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/recovery.py::without_tool_call_after_limit::replace_on_fast_frozen": {
+      "count": 6,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_downgrade_next_call_reasoning::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_empty_text_budget_after_progress::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_empty_text::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_protected_marker::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_protocol::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_provider_timeout_resume::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_truncated_output::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_truncated_write::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_inc_unresolved_runtime_issue::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_invalid_tool_arguments_decision::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_is_runtime_status_response::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_native_truncated_write_loop_break_response::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_no_tool_calls_decision::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_no_tool_calls_decision::replace_on_fast_frozen": {
+      "count": 4,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_protocol_violation_decision::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_provider_timeout_probe_delivery::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/response_decision.py::_tool_calls_decision::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_agent_config_int::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_agent_config_int::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_apply_tool_approval_decision::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_approval_description::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_build_runtime_approval_request::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_capture_parallel_thread_context::dyn_getattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_capture_parallel_thread_context::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_ensure_minimal_tool_context_pairing::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_execute_host_action::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_gate_all_calls_for_no_action::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_gate_all_calls_for_no_action::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_host_shutdown_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_input_probe_failed_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_install_parallel_thread_context::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_install_parallel_thread_context::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_interrupted_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_no_action_gated_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_record_bulkhead_fallback::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_record_execution::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_restore_parallel_thread_context::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_started_parallel_call::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_with_applied_approval_fact::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::_with_request_actor::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::execute_tool_round::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/round_execution.py::execute_tool_round::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M10"
+    },
+    "agent/agent_core/tool_loop/tool_wait_input.py::_reply_params::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_loop/tool_wait_input.py::reply_to_pending_input::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_loop/tool_wait_input.py::submit_wait_item::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_GenerationInterruptWake.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_GenerationInterruptWake.set::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_GenerationResultQueue.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_GenerationResultQueue.put::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_freeze_model_request_budget::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_generate_through_wall_guard::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_materialize_native_prompt_facts::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_materialize_native_prompt_facts::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_request_budget_input_identity::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::_retry_once_after_timeout::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_model_generation.py::generate_model_response::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/agent_core/tool_only_execution.py::_express_required_user_action::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_only_execution.py::express_required_user_action::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_request_projection.py::ToolLoopRequestInput.__post_init__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_request_projection.py::ToolLoopRequestInput.__post_init__::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_request_projection.py::_missing_request_fields::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_runtime_ledger.py::_attach_owner_control_write_guards::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_runtime_ledger.py::write_boundary_with_runtime_ledger::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_stream/boundary.py::MalformedToolProtocolStreamAbort.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_stream/boundary.py::_protocol_violation_response::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/agent_core/tool_stream/write_abort.py::LongToolContentStreamAbort.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M11"
+    },
+    "agent/backends/__init__.py::__getattr__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/anthropic.py::AnthropicCompatibleBackend.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/anthropic.py::AnthropicCompatibleBackend.generate_structured::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/anthropic_prompt_cache.py::_normalize_anthropic_block::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/base.py::_utc_now_iso::aware_now": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/bounded_call.py::BoundedCallBusyError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/bounded_call.py::BoundedCallExitUnconfirmedError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/bounded_call.py::_Call.__setattr__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/bounded_call.py::call_with_deadline::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/cache_diagnostics.py::_digest::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/decision_protocol.py::DecisionPrivacySkip.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/decision_protocol.py::DecisionRequest.__init__::object_setattr": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ModelNotConfiguredError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderContextWindowError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderModelCapabilityError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderQuotaExhaustedError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderRequestRejectedError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderRequestShapeInvalidError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderResponseError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderTimeoutError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/errors.py::ProviderTransientError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPConnection.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPConnection.connect::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPHandler.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPSConnection.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPSConnection.connect::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_SplitTimeoutHTTPSHandler.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_dump_provider_rejection::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_dump_provider_rejection::text_open": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_gateway_urlopen_unlimited::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_http_error_detail::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_network_exception_chain::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_provider_error_indicates_context_window::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::_request_http_retry::dyn_getattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_helpers.py::gateway_request_body::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/gateway_request_limits.py::validate_request_limits::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/http.py::_route_header_fingerprint::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/keepalive_transport.py::has_pooled_lease::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/keepalive_transport.py::release_pooled_response::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/oauth.py::OAuthResponsesBackend.request_stream_iter::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/oauth.py::_OAuthMixin.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/openai_chat.py::_openai_function_call::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/openai_chat.py::dump_provider_payload::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/openai_chat.py::dump_provider_payload::text_open": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/provider_headers.py::_opaque_owner_key::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/provider_headers.py::_provider_session_runtime_scope::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/provider_headers.py::current_provider_affinity::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/provider_headers.py::provider_agent_owner_scope::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/provider_headers.py::provider_session_scope::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/provider_send_gate.py::ProviderSendRefused.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/request_budget.py::RequestBudgetExceeded.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses.py::OpenAIResponsesBackend.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses.py::OpenAIResponsesBackend._align_preserved_effort_budget::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses.py::OpenAIResponsesBackend._gateway_request::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses.py::OpenAIResponsesBackend._send_with_reasoning_update_fallback::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses.py::_GenerationObserver.__getattr__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_failure.py::failed_event_error::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_websocket.py::_sticky_request::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_websocket.py::iter_responses_websocket::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_websocket.py::iter_responses_websocket::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_websocket.py::prepare_http_responses_request::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_wire.py::_CollectedResponse.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_wire.py::message_items::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_ws_pool.py::remember_completed::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/responses_ws_pool.py::session_pool_key::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/structured_output_mode.py::json_object_prompt::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M08"
+    },
+    "agent/backends/tool_protocol_adapter.py::_protocol_evidence::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/backends/transport_timing.py::TimedHTTPResponse._read_status::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/backends/transport_timing.py::instrument_connection::type3": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M06"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallAdmissionClosedError.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger._failed_locked::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger.activity::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger.finished::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger.first_token::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger.note_event::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger.provider_attempt::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::ModelCallLedger.timeout::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::_ModelCallAggregate.observe_new::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::_ModelCallAggregate.observe_update::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::_ModelCallAggregate.to_summary::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::_ModelCallTotals._observe_usage_delta::dyn_getattr": {
+      "count": 4,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/model_call_ledger.py::_ModelCallTotals.to_summary::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M07"
+    },
+    "agent/contracts/tool_approval.py::ToolApprovalDecision.__post_init__::object_setattr": {
+      "count": 6,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/contracts/tool_approval.py::ToolApprovalRequest.__post_init__::object_setattr": {
+      "count": 11,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/contracts/tool_approval.py::build_tool_approval_request::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/conversation/wake_attempt_tracking.py::_log::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_attempt_tracking.py::_log_stopping_failure::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_attempt_tracking.py::_trackers::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_domain_closeout.py::_log::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_poison.py::_after_failure::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_poison.py::_after_uncounted::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_poison.py::mark_stall_alerted::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/conversation/wake_poison.py::next_poison_state::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer.server_close::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/bounded_http_server.py::_busy_response_bytes::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/client_session_list.py::_CountPath.__getattr__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/client_session_list.py::_CountReader.__getattr__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/client_session_list.py::_encode_cursor::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/client_session_list.py::_history_from_target::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/client_session_list.py::_owner_store::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/client_session_list.py::_owner_store::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/client_session_list.py::gateway_client_session_list.<locals>.inflight::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/control_service.py::_cancel_request_execution::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::_execute_effort_control::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::_legacy_active_turn_guidance_dedupe_key::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::_render_effort::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::_stop_live_window_request::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::_stop_session_leftovers::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::active_turn_guidance_dedupe_key::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::bind_gateway_control_scope_owner::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/control_service.py::execute_gateway_conversation_control::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/execution_control.py::bind_execution_scope::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/execution_control.py::resolve_execution_control::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/execution_target.py::execution_target_matches::dyn_getattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/http_body_readiness.py::PrefetchedSocket.__getattr__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/http_handlers.py::_handle_persistent_control_operation::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::_http_idempotent_request_identity::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::_prepare_http_gateway_input::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::_read_coordinator_client_history::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::_read_coordinator_client_history::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::_read_payload_report::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::_read_state_report::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_handlers.py::handle_client_history::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_lanes.py::HTTPLaneRouter.__init__::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_lanes.py::_CancellableWorkQueue.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_lanes.py::_CancellableWorkQueue._get::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M21"
+    },
+    "agent/gateway_parts/http_service.py::GatewayHTTPHandler._dispatch_route::dyn_getattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/http_service.py::GatewayHTTPHandler._send_json::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/http_service.py::GatewayHTTPServer.start::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/http_service.py::GatewayLocalCredentialRequired.__init__::super0": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M22"
+    },
+    "agent/gateway_parts/request_entry_admission.py::require_request_execution::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/request_event_hub.py::RequestEvent.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/request_event_routes.py::_ResultView.__getattr__::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/request_event_routes.py::handle_request_events::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/request_execution.py::_finalize_gateway_response::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/gateway_parts/request_execution.py::_gateway_compact_overflowing_turn::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/gateway_parts/request_execution.py::_gateway_run_params::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/gateway_parts/request_execution.py::_recover_gateway_active_turn_authority::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/gateway_parts/request_execution.py::_run_gateway_ask_with_model::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/gateway_parts/request_worker.py::_cache_verified_pending_payload::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/gateway_parts/request_worker.py::_config_without_runtime_paths::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/gateway_parts/request_worker.py::_config_without_runtime_paths::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M20"
+    },
+    "agent/gateway_parts/response_renderer.py::_int_value::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/status_projection.py::status_display_facts::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/status_rendering.py::_base_status_lines::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/status_rendering.py::_json::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/status_rendering.py::_json_list::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/status_rendering.py::_log_cursor_encode::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/gateway_parts/status_rendering.py::gateway_log_page::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M05"
+    },
+    "agent/tooling/models.py::ApprovalPolicy.__post_init__::object_setattr": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::AvailabilityPolicy.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ConcurrencyPolicy.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::EffectResolverPolicy.__post_init__::object_setattr": {
+      "count": 5,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::IdempotencyPolicy.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::OutputPolicy.__post_init__::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ResourceScopePolicy.__post_init__::object_setattr": {
+      "count": 5,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::SandboxPolicy.__post_init__::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::TimeoutPolicy.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ToolHandlerOutcome.__post_init__::object_setattr": {
+      "count": 4,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ToolModelHints.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ToolModelSpec.__post_init__::object_setattr": {
+      "count": 4,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ToolRuntimeSnapshot.__post_init__::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::ToolRuntimeSnapshot.with_presentation::object_setattr": {
+      "count": 15,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::TrustedParameterBinding.__post_init__::object_setattr": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::_tool_runtime_snapshot_hash::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/models.py::tool_schema_hash::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/registry.py::ToolRegistry.__init__::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::ToolRegistry._live_bool::dyn_getattr": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::ToolRegistry._mcp_config_fingerprint::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::ToolRegistry.execute_tool::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::ToolRegistry.render_catalog_section::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_catalog_only_model_spec::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_ensure_registry_borrow_worker::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_ensure_registry_lifecycle_fields::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_narrow_model_spec_for_actions::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_registry_runtime_snapshot::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_registry_with_access_policy::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_safe_tool_availability::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_search_deferred_tool_result::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_share_registry_mcp_state::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_tool_search_index_spec::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::_tool_search_invalid_arguments::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/registry.py::tool_catalog_result::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M25"
+    },
+    "agent/tooling/runtime_contracts.py::AppliedToolApproval.__post_init__::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ProviderToolCapability.__post_init__::object_setattr": {
+      "count": 5,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolCall.__post_init__::object_setattr": {
+      "count": 12,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolChoice.__post_init__::object_setattr": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolContentBlock.__post_init__::object_setattr": {
+      "count": 5,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolProtocolSnapshot.__post_init__::object_setattr": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolResult.__post_init__::object_setattr": {
+      "count": 17,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolResult.output::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolResult.render_for_prompt::json_dumps_default": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolResult.with_execution_facts::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolResult.with_live_prompt_projection::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/runtime_contracts.py::ToolResultRef.__post_init__::object_setattr": {
+      "count": 6,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_attach_operation_facts::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_bounded_unknown_output_preview::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_completion_persistence_unknown_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_execute_admitted_tool_operation::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_execute_claimed_operation::json_dumps_default": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_execute_claimed_operation::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_invoke_with_lease_renewal::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_operation_error::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_reconcile_unknown_operation::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_reopened_operation_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_resolve_claim::replace_on_fast_frozen": {
+      "count": 2,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_restart_gate_not_started::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_settle_reconciled_operation::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_unknown_claim_result::object_setattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_operation_coordinator.py::_unknown_outcome_result::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_program.py::ToolProgramTool._live_payload::json_dumps_default": {
+      "count": 3,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_program.py::ToolProgramTool._step::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "agent/tooling/tool_program.py::ToolProgramTool.execute_scoped::json_dumps_default": {
+      "count": 5,
+      "reason": "baseline-d9caa95af pending M09"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_has_pending_reason::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_available::aware_now": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_record_consumed::aware_now": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_record_consumed::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_record_consumed::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._load_curator_quota::aware_now": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._load_curator_quota::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._maybe_write_heartbeat::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundMainSupervisor._maybe_write_heartbeat::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundOwnerPlannerMixin._owner_plan_idle_delay::dyn_hasattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundOwnerPlannerMixin._owner_planner_signature::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_BackgroundOwnerPlannerMixin._retain_owner_planner_scopes::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_GatewayOrphanReconciler._shutdown_executors::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_GatewayOrphanReconciler._sweep::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_GatewayOwnerMaintenanceController.tick::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_GatewaySchedulerDueController._repair_legacy_once::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_OwnerWakeHints.note_maintenance.<locals>.read::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_float_config::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_positive_int_config::dyn_getattr": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_print_gateway_loop_error::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_read_json_payload::read_write_text": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_record_dispatcher_stall::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_record_dispatcher_stall::text_open": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_run_hinted_controller::replace_on_fast_frozen": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_start_orphan_reconcile_loop::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_start_owner_maintenance_loop::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_start_scheduler_due_loop::thread_ctor": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_thread_inbound_marker::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    },
+    "cli/gateway_loops.py::_write_gateway_heartbeat::json_dumps_default": {
+      "count": 1,
+      "reason": "baseline-d9caa95af pending M19"
+    }
+  },
+  "version": 1
+}

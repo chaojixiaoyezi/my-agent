@@ -631,3 +631,66 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
 - Part A 的 FT-003 仍需明确授权可用的真实请求完成接缝；不把未完成事项藏进其他 open 行。现有配置、进程模型、权限和 owner 业务来源保持不变。
 - 本地复验：使用隔离 HOME/MY_AGENT_HOME，在仓库根跑 `python -m pytest -o addopts='' -q --tb=short -p no:cacheprovider --timeout=60 agent_py_agent/tests/ft`；再跑规格 §9 的组合、ruff、导入边界、clean 与 post。3.14t 默认与 `PYTHON_GIL=1` 分开执行并记录实际 flag；不能用 fallback 的绿色抵消自由线程默认失败。
 - 线上复验：只在集成者批准的分支/提交上触发新增 ubuntu/macOS jobs。动作版本语法来源为 dispatch 当天读取的 [actions/setup-python v7 advanced usage](https://raw.githubusercontent.com/actions/setup-python/v7/docs/advanced-usage.md)，`python-version: "3.14t"`；[checkout v7 action metadata](https://raw.githubusercontent.com/actions/checkout/v7/action.yml) 同时已读取成功。未执行的远端 job 不填通过码。
+
+## 2026-11-19 M00：W0 共享原语与自由线程闸门（Conveyor）
+
+本节记录 Conveyor M00 建立的不变量与验收证据。基线 `d9caa95af`；合同见 Conveyor `INTERFACE_CONTRACTS.MD` C1–C3。本模块只新增文件，不改任何既有生产代码。
+
+**不变量**
+
+- 热路径原语在 `python3.14t -X gil=0` 下不触发类型查找，也不争用共享对象：
+  - `agent/common/hot_json.dumps` 与同参 `json.dumps` 逐字节一致。8 个模块级编码器按分支选取，不查以元组为键的共享字典。G1 实测这种字典在 128 线程时单次查找吞吐只剩 16 线程时的约 5%。
+  - `fast_time.utc_now_iso()` 等于 `datetime.now(timezone.utc).isoformat()`。
+  - `@fast_frozen` 的 `__init__` 经成员描述符 `__set__` 赋值；签名、默认值、`InitVar`、`__post_init__`、相等、哈希、pickle 与 replace 错误同原 dataclass。
+  - `DirectSocketIO.readinto` 只读实例属性，语义同 `SocketIO.readinto`。
+- `agent/concurrency/work_item_pool.py`：
+  - 复用线程、从不排队：有空闲线程就用，否则扩容到 512，再超出就起一次性守护线程。
+  - 句柄状态 `PREPARED → RELEASED → RUNNING → DONE / CANCELLED` 只在句柄锁内比较交换。
+  - `interrupt` 只在 `RUNNING` 时立旗；“未开始”只由 `CANCELLED` 证明，队列移除只是槽位卫生。
+  - 每项前后清中断旗并运行登记的线程局部复位。
+- `agent/concurrency/lifo_work_queue.py` 是 `http_lanes.py` 中 `_LifoWakeCondition` / `_CancellableWorkQueue` 的原样迁出（`discard` 返回 `None`）。M22 切换导入后只剩这一份实现。
+- `agent/common/process_spawn.SpawnPopen` 在 Darwin/Linux 上以 `posix_spawn` 启动 `/bin/sh` 跳板，不 fork 网关：
+  - 子进程 fd 恰为 `{0,1,2} ∪ pass_fds`，环境与 `Popen` 逐字节一致。
+  - 父进程侧检查不通过时，以及契约外选项（`preexec_fn`、`uid`/`gid`/`gids`、`umask`、`close_fds=False`、`executable` 与 argv[0] 不同、`start_new_session` 与 `process_group` 并用），一律原样走 `subprocess.Popen._execute_child`。
+  - macOS 的 `posix_spawn` 文件动作拒绝 fd ≥ `OPEN_MAX`（10240），这种调用同样回落。
+
+**Cure-A 转换规则（C3，M05–M13 及任何改热文件的模块）**
+
+| 规则 | 内容 |
+|---|---|
+| A1 | 仅当 `check_slots_compat(cls) == []` 时，在 `@dataclass(frozen=True, slots=True)` 上方加 `@fast_frozen`。`object.__setattr__(self, "x", v)` 改为模块级 `_set_x = slot_setter(Cls, "x")`，已转换类的 `dataclasses.replace` 改为 `fast_replace`。 |
+| A2 | 仅当每个子类 S 都满足 `S.__mro__[S.__mro__.index(C) + 1] is Base` 时，`super().m(...)` 改为 `Base.m(self, ...)`；须有枚举子类的测试。 |
+| A3 | 动态属性名改为模块字典分派，或一次性计算的 `sys.intern` 名；字面属性名不动。 |
+| A4 | 文本读取改为 `open(p, "rb").read().decode("utf-8")`；按行消费者再做 `\r\n`/`\r` → `\n` 归一。 |
+| A5 | `datetime.now(timezone.utc).isoformat()` 改为 `fast_time.utc_now_iso()`；参与时间运算的 aware datetime 保留。 |
+| A6 | 不在调用中新建类：`transport_timing.TimedHTTPResponse` 静态化，尝试计时走 ContextVar `_ATTEMPT_TIMING`；不用 `functools.partial`。 |
+| A7 | 默认形 `json.dumps` 改为 `hot_json.dumps`。需要 `indent`、`cls`、自定义 `default`、`skipkeys` 或 `allow_nan=False` 的调用保持原样。 |
+| A8 | 套接字读取器改用 `makefile_rb`：客户端为 `keepalive_transport`、`gateway_helpers`、`owner_change_journal`；服务端为 `http_service.GatewayHTTPHandler.setup`。 |
+
+每个转换的类都要有对原 dataclass 的差分测试（R3 §8 G0 口径）。
+
+**G1 锁等待闸门**（`agent_py_agent/tests/ft/test_ft_lock_wait_gate.py`）
+
+- 只在 `getattr(sys, "_is_gil_enabled", lambda: True)() is False` 时判定；3.11/3.12 收集后跳过。
+- 每个 `CASES` 工厂在子进程（`-X gil=0 -m agent_py_agent.tests.ft.test_ft_lock_wait_gate <工厂>`）里以 16 与 128 线程各计时 3 秒。
+  - 计时切成 3 个 16→128→128→16 块，每片 0.5 秒。
+  - 判定值为各块“128 线程吞吐 / 16 线程吞吐”的中位数，须 ≥ 0.8。
+  - 共享主机负载很高时（本机 40–100、18 核），顺序各测 3 秒的同一用例比值在 0.38–1.74 间摆动；分块后稳定在 1.04–1.81，真实争用（元组键字典）稳定在 0.21–0.23。
+- Cure-A 模块只追加自己转换的类的工厂，不删已有 case。
+- 本地命令：`/private/tmp/conveyor-venv-314t/bin/python -X gil=0 -m pytest -q -p no:cacheprovider agent_py_agent/tests/ft/test_ft_lock_wait_gate.py`。
+
+**G2 静态触发器棘轮**（`agent_py_agent/tests/ft/test_hot_path_trigger_scan.py` + `hot_path_allowlist.json`）
+
+- 用 AST 扫描 `HOT_PREFIXES`（R3 §3 的 HTTP 轮询、模型分块、工具轮次、调度节拍前缀，外加 `agent/tooling/runtime_contracts.py` 与 `agent/contracts/tool_approval.py`）下的 12 类触发器。
+- 键为 `路径::限定名::触发器`，不含行号。观测数高于记录数（新增或增加）即失败；低于记录数（过期条目）也失败。降低计数的模块必须在同一提交里收紧白名单。
+- 基线原因写 `baseline-d9caa95af pending <Mxx>`，Mxx 为 `MASTER_SCHEDULE.json` 中第一个在 `files` 里列出该路径的模块。永久例外只允许 `cold-path: ...`、`cooperative-mro: ...` 或 `slots-incompatible: <check_slots_compat 输出>`。
+- 白名单 JSON 为规范格式（`indent=2`、键排序、`ensure_ascii=False`、末尾换行），测试会校验。
+- M12 追加 8 个剖析文件到 `HOT_PREFIXES`，M13 把 13 个 W16 文件放进只检 `nested_class` 的 `NESTED_CLASS_ONLY_PATHS`。
+- R3 列出的 `agent/conversation/scheduler`、`agent/conversation/thread_scheduler` 两个前缀在基线没有文件，只在前缀自检中豁免。
+
+**验收证据（M00，隔离 HOME）**
+
+- G0：hot_json 12、fast_time 3（10^6 个随机纳秒值，含零微秒）、fast_dataclass 24、direct_socket_io 14、process_spawn 21、work_item_pool 10，均在 3.12.13 与 3.14.3t（`-X gil=0`）通过，3.11.15 本地复验同样通过；每个文件 < 3 秒。
+- G1（3.14.3t，GIL 关闭，分块中位数）：hot_json 1.21、fast_time 1.29、fast_frozen DTO 1.04、DirectSocketIO 1.24。按元组键查字典的 hot_json 原实现为 0.22（顺序测量为 0.36），被 G1 拦下后改为分支选取。主机负载 72–91 时连续 3 次 G1+G2 均全部通过。
+- G2：355 个键、509 次基线触发，全部归属 M05–M25。在 `agent/gateway_parts/request_execution.py` 追加一个 `json.dumps(x)` 后，`test_no_new_or_increased_hot_path_triggers` 失败（新键计数 1 对 0）；`git checkout HEAD --` 还原后通过。
+- 常数目录由 1559 项增为 1562 项：`WORK_ITEM_POOL_MAX_THREADS_COUNT`、`_DARWIN_OPEN_MAX_FILES`、`_SHEBANG_LINE_LIMIT_BYTES`。

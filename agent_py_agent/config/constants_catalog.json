@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1559,
+  "count": 1562,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3436,6 +3436,22 @@
       "description": "不透明 ID 的最大字符数；超长视为非法输入直接拒绝，避免把超长串当身份。"
     },
     {
+      "name": "_DARWIN_OPEN_MAX_FILES",
+      "file": "agent_py_agent/agent/common/process_spawn.py",
+      "value": 10240,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "macOS <sys/syslimits.h> 的 OPEN_MAX：posix_spawn 文件动作拒绝不小于它的 fd 号（与 RLIMIT_NOFILE 无关），用到时改走原 Popen。"
+    },
+    {
+      "name": "_SHEBANG_LINE_LIMIT_BYTES",
+      "file": "agent_py_agent/agent/common/process_spawn.py",
+      "value": 256,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "#! 首行最多检查的字节数（Linux BINPRM_BUF_SIZE；macOS 内核上限 512）：首行落在其内时两种内核解析一致，否则改走原 Popen。"
+    },
+    {
       "name": "_CHUNK_BYTES",
       "file": "agent_py_agent/agent/common/text_file_window.py",
       "value": 65536,
@@ -3466,6 +3482,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "重启闸门轮询等待的秒数；重启间隔不足时按这个切片反复探测，避免忙等。"
+    },
+    {
+      "name": "WORK_ITEM_POOL_MAX_THREADS_COUNT",
+      "file": "agent_py_agent/agent/concurrency/work_item_pool.py",
+      "value": 512,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每个池的常驻线程硬上限（R3 §4.9）：只限定池内复用线程数，超出时改用一次性守护线程运行，从不限制准入。"
     },
     {
       "name": "MAX_TRACE_DEPTH",
