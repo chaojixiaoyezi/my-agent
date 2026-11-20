@@ -81,6 +81,7 @@ from ..agent.owner_wake_discovery import (
     OwnerWakeCursor,
     bind_owner_activity_index,
     discover_owner_home_page,
+    owner_wake_schedule,
     seed_registry_page_from_disk,
 )
 from ..agent.runtime_errors import DataCorruptionError, runtime_error_report
@@ -1446,6 +1447,13 @@ class _BackgroundOwnerPlannerMixin:
         self, scheduler: object, delay: float, planned_at: float, cooling: frozenset[str],
     ) -> float:
         store = getattr(scheduler, "store", None)
+        agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+        home = getattr(agent, "home_paths", None)
+        root = getattr(getattr(store, "storage", None), "root", None)
+        if root is not None and getattr(home, "owner_home_dir", None) and getattr(home, "owner_id", None) and not cooling:
+            complete, has_signals, due = owner_wake_schedule(home.owner_home_dir, home.owner_id, root)
+            if complete and not has_signals:
+                return min(delay, max(0.0, due - planned_at)) if due is not None else delay
         wakes = getattr(store, "wakes", None)
         pending = getattr(wakes, "pending", None)
         if callable(pending):

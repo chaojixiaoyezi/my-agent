@@ -39,24 +39,33 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import secrets
 import sqlite3
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import ExitStack, closing, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
-from stat import S_ISLNK
+from stat import S_ISDIR, S_ISLNK
 from typing import Any
 
-from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
+from .common.nofollow_fs import read_text_beneath
+from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS, ProgressPolicy, WakeSignal
 from .conversation.task_state import conversation_task_link_is_terminal
 from .gateway_parts.io import update_json_file_atomic
 from .io.sqlite_probe import _opened_sqlite_header, sqlite_readonly_probe_uri
+from .local_storage.owner_read_index import (
+    OwnerReadIndex,
+    acknowledge_pending_projection_changes,
+    pending_projection_changes,
+)
 from .memory_store import curator_models as _curator_models
 from .runtime_db.operations import exec_lock_scope
 from .runtime_db.repository import (
@@ -67,10 +76,12 @@ from .runtime_db.repository import (
 )
 from .runtime_db.schema import runtime_db_path
 from .runtime_db.user_interrupt import user_interrupt_resume_until
+from .user_space.directory_paging import directory_page
 from .user_space.owner_directory_index import OwnerDirectoryProjection
 from .user_space.run_workspace import FinishRunWorkspaceRequest, finish_run_workspace
 
 _LOGGER = logging.getLogger(__name__)
+_WAKE_REPAIR_TICK = ContextVar("owner_wake_repair_tick", default=None)
 
 # owner home 内会话存储根(conversations 目录)的已知形态。网关按 workspace root 跑时
 # 是 workspace/runtime/workspaces/<slug>/conversations;直连/历史部署可能落在
@@ -647,6 +658,14 @@ def seed_registry_page_from_disk(
 # LLM: 只缓存同一快照内稳定判断；分页probe发现hard后，本次二次判定不得覆盖成否定并长时缓存。
 # 函数用途: 判定一个 owner home 是否有待驱动的事实;贵的判定在文件没变时不再逐盘重读。
 def _owner_fact_kind(owner_home: Path) -> str:
+    tick = _WAKE_REPAIR_TICK.set(False)
+    try:
+        return _owner_fact_kind_cached(owner_home)
+    finally:
+        _WAKE_REPAIR_TICK.reset(tick)
+
+
+def _owner_fact_kind_cached(owner_home: Path) -> str:
     cache_key = str(owner_home)
     cached = _cached_owner_fact_kind(cache_key)
     if cached is not None and time.monotonic() < cached.valid_until:
@@ -790,7 +809,7 @@ def _owner_fact_signature(owner_home: Path) -> tuple[tuple[str, tuple[Any, ...]]
         parts.append((f"wake_normal:{root}", _dir_entries_signature(root / "wake_queue" / "normal", "*.json")))
         parts.append((f"policies:{root}", _dir_entries_signature(root / "progress_policies", "*.json")))
         parts.append((f"messages:{root}", _dir_entries_signature(root / "messages", "*.jsonl")))
-    parts.append(("agents", _subagent_page_signature(owner_home)))
+    parts.append(("agents", _pending_subagent_signature(owner_home)))
     parts.append(
         (
             "task_links",
@@ -877,15 +896,20 @@ def _owner_has_hard_facts(owner_home: Path, *, deadline_out: list[float] | None 
     if notify_due is not None:
         _add_deadline(deadline_out, notify_due)
         return True
-    if any(
-        _has_pending_wake_signal(store_root, owner_home=owner_home, deadline_out=deadline_out)
-        or _has_enabled_progress_policy(store_root, owner_home=owner_home, deadline_out=deadline_out)
-        for store_root in _store_roots(owner_home)
-    ):
-        return True
+    for store_root in _store_roots(owner_home):
+        complete, has_signals, due = owner_wake_schedule(
+            owner_home, _pending_owner_id(owner_home), store_root, advance=False,
+        )
+        if complete and not has_signals and (due is None or due > time.time()):
+            if due is not None:
+                _add_deadline(deadline_out, due)
+            continue
+        if (_has_pending_wake_signal(store_root, owner_home=owner_home, deadline_out=deadline_out)
+                or _has_enabled_progress_policy(store_root, owner_home=owner_home, deadline_out=deadline_out)):
+            return True
     return (
         owner_has_pending_process_completions(owner_home)
-        or _has_unfinished_subagent_run(owner_home)
+        or _has_unfinished_subagent_run(owner_home, deadline_out=deadline_out)
         or _has_unfinished_task_ledger(owner_home, deadline_out=deadline_out)
         or _has_incomplete_watch_lane(owner_home, deadline_out=deadline_out)
         or _has_due_scheduler_fact(owner_home, deadline_out=deadline_out)
@@ -1424,11 +1448,209 @@ def _subagent_projection_is_dangling_orphan(owner_home: Path, run_dir: Path, pay
         return False
 
 
-# LLM: 正事实只由分页器随同一游标累计；穷尽后一起丢弃，跨owner淘汰不会留下仅指向尾页的孤立游标。
-# 函数用途: 读取一页的整轮唤醒结论，未穷尽仍保守为有活；不新建数据库或维护第二份正事实缓存。
-def _has_unfinished_subagent_run(owner_home: Path) -> bool:
-    positive, exhausted = _probe_subagent_page(owner_home)
-    return positive or not exhausted
+def _pending_owner_id(owner_home: Path) -> str:
+    # 规范 owner 路径已由发现入口校验；独立工作区仍绑定到自己的 ORI。
+    parts = owner_home.parts
+    owner_id = owner_home.name
+    if len(parts) >= 3 and parts[-3:-1] == ("owners", "local"):
+        owner_id = "/".join(parts[-2:])
+    elif len(parts) >= 5 and parts[-5:-3] == ("owners", "providers"):
+        owner_id = "/".join(parts[-4:])
+    return owner_id
+
+
+def _owner_pending_index(owner_home: Path) -> OwnerReadIndex:
+    return OwnerReadIndex(owner_home, owner_id=_pending_owner_id(owner_home))
+
+
+def _agents_stamp(owner_home: Path):
+    return _pending_source_stamp(owner_home / "agents")
+
+
+def _pending_source_stamp(directory):
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        return None
+    if not S_ISDIR(info.st_mode):
+        raise OSError("owner projection is not a directory")
+    return list(_directory_metadata(info))
+
+
+def _small_agent_inventory(owner_home, stamp):
+    # 小目录保留即时工作区和状态重验；不可靠 link count 的平台只抽取固定窗口。
+    maximum = 16
+    if stamp[-1] > maximum + 2:
+        return False
+    with os.scandir(owner_home / "agents") as entries:
+        for number, _entry in enumerate(entries):
+            if number == maximum:
+                return False
+    return True
+
+
+def _pending_subagent_signature(owner_home: Path) -> tuple:
+    stamp = _agents_stamp(owner_home)
+    if stamp is None:
+        return (None,)
+    if _small_agent_inventory(owner_home, stamp):
+        return _subagent_page_signature(owner_home)
+    index = _owner_pending_index(owner_home)
+    receipt, pending, _ = index.pending_wake_summary()
+    if not receipt or not receipt["complete"]:
+        raise ValueError("subagent wake repair incomplete")
+    changes = pending_projection_changes(owner_home, "wake")
+    return (stamp, receipt["generation"], pending, tuple(changes.items()))
+
+
+def _has_unfinished_subagent_run(owner_home: Path, *, deadline_out=None) -> bool:
+    try:
+        stamp = _agents_stamp(owner_home)
+        if stamp is None:
+            return False
+        if _small_agent_inventory(owner_home, stamp):
+            positive, exhausted = _probe_subagent_page(owner_home)
+            return positive or not exhausted
+        index = _owner_pending_index(owner_home)
+        receipt, pending, next_due = index.pending_wake_summary()
+        now = time.time()
+        changes = pending_projection_changes(owner_home, "wake")
+        if (receipt and receipt["complete"] and receipt["stamp"] == stamp
+                and now < receipt["next_repair_at"] and not changes):
+            _add_deadline(deadline_out, receipt["next_repair_at"])
+            if next_due is not None:
+                _add_deadline(deadline_out, next_due)
+            if not pending or (next_due is not None and next_due > now):
+                return False
+            candidates = index.pending_subagent_references(_SUBAGENT_SCAN_MAX_DIRS + 1)
+            if candidates is None or len(candidates) > _SUBAGENT_SCAN_MAX_DIRS:
+                return True
+            if any(_subagent_run_has_wake_fact(owner_home, owner_home / "agents" / ref)
+                   for ref in candidates if ref and Path(ref).name == ref and ref not in {".", ".."}):
+                return True
+        return _repair_subagent_wake_page(owner_home, index, stamp, receipt, changes, now, deadline_out)
+    except (OSError, ValueError, TypeError, KeyError):
+        positive, exhausted = _probe_subagent_page(owner_home)
+        return positive or not exhausted
+
+
+def _repair_subagent_wake_page(owner_home, index, stamp, receipt, changes, now, deadlines):
+    # 外层事实缓存可能复核同一 owner；修复已占用本拍时只保守返回，不再推进第二片。
+    if _WAKE_REPAIR_TICK.get() is True:
+        return True
+    # 同进程更新只核对相关 run；跨进程写入无提示，按固定时间轮转目录游标。
+    patch = (changes and receipt and receipt["complete"] and receipt["stamp"] == stamp
+             and now < receipt["next_repair_at"] and "" not in changes)
+    if patch:
+        next_receipt = dict(receipt)
+        names = ()
+    else:
+        resume = receipt and not receipt["complete"] and receipt["stamp"] == stamp and "" not in changes
+        next_receipt = dict(receipt) if resume else {
+            "generation": secrets.token_hex(16), "stamp": stamp, "cursor": {},
+            "coverage": "partial", "complete": False, "rebuilt_at": 0.0, "visited": 0, "backlog": 1,
+        }
+        names, cursor, complete = directory_page(
+            owner_home, ("agents",), next_receipt["cursor"], _SUBAGENT_SCAN_MAX_DIRS, require_dir_fd=False,
+        )
+        next_receipt.update(cursor={} if complete else cursor, complete=complete,
+                            coverage="complete" if complete else "partial", backlog=int(not complete),
+                            visited=next_receipt["visited"] + cursor.get("last_scanned", 0))
+        if complete:
+            next_receipt.update(rebuilt_at=now, next_repair_at=now + _HISTORY_REVERIFY_SECONDS)
+    references, rows = [], []
+    for ref in dict.fromkeys((*names, *changes)):
+        if not ref or Path(ref).name != ref:
+            continue
+        run_dir = owner_home / "agents" / ref
+        references.append(ref)
+        if not run_dir.is_symlink() and run_dir.is_dir():
+            thread_id = _subagent_run_has_wake_fact(owner_home, run_dir, include_thread=True)
+            if thread_id is not None:
+                rows.append((thread_id, "subagent", None, ref))
+    # 外部换代中不能发表完整结果；下拍沿新目录重启核对。
+    if stamp != _agents_stamp(owner_home):
+        return True
+    if _WAKE_REPAIR_TICK.get() is False:
+        _WAKE_REPAIR_TICK.set(True)
+    if not index.write_pending_wakes(receipt, next_receipt, references, rows):
+        positive, exhausted = _probe_subagent_page(owner_home)
+        return positive or not exhausted
+    acknowledge_pending_projection_changes(owner_home, "wake", changes)
+    if not next_receipt["complete"]:
+        return True
+    _add_deadline(deadlines, next_receipt["next_repair_at"])
+    verified, pending, _ = index.pending_wake_summary()
+    return verified != next_receipt or pending or bool(pending_projection_changes(owner_home, "wake"))
+
+
+def owner_wake_schedule(owner_home, owner_id, store_root, *, advance=True):
+    """仅以覆盖完整的会话队列缩短规划；原消费入口继续验证信号资格。"""
+    owner_home, store_root = Path(owner_home), Path(store_root)
+    sources = (("wake_queue", "urgent"), ("wake_queue", "normal"), ("progress_policies",))
+    try:
+        relative = store_root.relative_to(owner_home)
+        if ".." in relative.parts:
+            return False, False, None
+        parts = tuple(relative.parts + source for source in sources)
+        index = OwnerReadIndex(owner_home, owner_id=owner_id)
+        key = "wake_schedule:" + hashlib.sha256(str(relative).encode()).hexdigest()
+        stamp = [_pending_source_stamp(owner_home.joinpath(*source)) for source in parts]
+        old, pending, due = index.pending_schedule_summary(key)
+        now = time.time()
+        changes = pending_projection_changes(store_root, "schedule")
+        if old and old["complete"] and old["stamp"] == stamp and now < old["next_repair_at"] and not changes:
+            return True, pending, due
+        if not advance:
+            return False, False, None
+        resume = old and not old["complete"] and old["stamp"] == stamp and not changes
+        receipt = dict(old) if resume else {
+            "generation": secrets.token_hex(16), "stamp": stamp, "cursor": {}, "source": 0,
+            "coverage": "partial", "complete": False, "rebuilt_at": 0.0,
+        }
+        return _repair_owner_schedule(owner_home, index, key, parts, old, receipt, now, store_root, changes)
+    except (AttributeError, OSError, ValueError, TypeError, KeyError):
+        return False, False, None
+
+
+def _repair_owner_schedule(home, index, key, parts, old, receipt, now, store_root, changes):
+    references, rows = [], []
+    remaining = _SUBAGENT_SCAN_MAX_DIRS
+    while receipt["source"] < len(parts) and remaining > 0:
+        source = parts[receipt["source"]]
+        names, cursor, complete = directory_page(home, source, receipt["cursor"], remaining, require_dir_fd=False)
+        for name in names:
+            if not name.startswith(".") and name.endswith(".json"):
+                ref = key + ":" + "/".join((*source, name))
+                references.append(ref)
+                value = json.loads(read_text_beneath(home, (*source, name)))
+                if source[-1] == "progress_policies":
+                    policy = ProgressPolicy.from_dict(value)
+                    if policy.enabled:
+                        due = float(policy.next_due_at)
+                        if not math.isfinite(due):
+                            raise ValueError("invalid progress deadline")
+                        rows.append((policy.thread_id, "progress", due, ref))
+                else:
+                    signal = WakeSignal.from_dict(value)
+                    if signal.status == "pending":
+                        rows.append((signal.thread_id, "signal", None, ref))
+        remaining -= cursor.get("last_scanned", len(names))
+        receipt["cursor"] = {} if complete else cursor
+        if not complete:
+            break
+        receipt["source"] += 1
+    if receipt["stamp"] != [_pending_source_stamp(home.joinpath(*source)) for source in parts]:
+        return False, False, None
+    if receipt["source"] == len(parts):
+        receipt.update(coverage="complete", complete=True, rebuilt_at=now, next_repair_at=now + _HISTORY_REVERIFY_SECONDS)
+    if index.write_pending_wakes(old, receipt, references, rows, key=key):
+        acknowledge_pending_projection_changes(store_root, "schedule", changes)
+        if receipt["complete"] and not pending_projection_changes(store_root, "schedule"):
+            verified, pending, due = index.pending_schedule_summary(key)
+            if verified == receipt:
+                return True, pending, due
+    return False, False, None
 
 
 # LLM: 用同锁观察回调把正事实绑定分页游标；读取错误不伪造穷尽，不再在发现层单独聚合或淘汰正事实。
@@ -1467,30 +1689,40 @@ def _read_wake_state(path: Path) -> dict[str, Any]:
 # LLM: 保持原单投影closeout优先、孤儿过滤与runtime终态/静止判据；只读，不将读取失败当新活跃事实。
 #   只复用指纹一致的解析字段，结论每轮按字段现判；BLOCKED/RUNNING 的 runtime 库与孤儿目标检查照旧每轮执行。
 # 函数用途: 为分页器观察一个真实运行目录是否存在需驱动的子代理事实。
-def _subagent_run_has_wake_fact(owner_home: Path, run_dir: Path) -> bool:
+def _subagent_run_has_wake_fact(
+    owner_home: Path, run_dir: Path, *, include_thread=False,
+) -> bool | str | None:
     from .subagents.services.persistence.locator_hygiene import (
         projection_runtime_facts,
+        read_projection_object,
         wake_projection_fields,
     )
 
+    missing = None if include_thread else False
     state = run_dir / "state.json"
     try:
-        payload = wake_projection_fields(state, os.lstat(state), _read_wake_state)
+        info = os.lstat(state)
+        if include_thread:
+            payload = read_projection_object(state)
+        else:
+            payload = wake_projection_fields(state, info, _read_wake_state)
     except (OSError, UnicodeError, ValueError):
-        return False
+        return missing
     if bool(payload.get("runtime_closeout_pending")):
-        return True
+        return str(payload.get("thread_id") or payload.get("conversation_thread_id") or "") if include_thread else True
     status = str(payload.get("status") or "").strip().upper()
     if status not in _UNFINISHED_RUN_STATUSES or _subagent_projection_is_dangling_orphan(owner_home, run_dir, payload):
-        return False
+        return missing
     if status in {"PLANNING", "PENDING", "RUNNING"}:
         try:
             runtime_status, pending = projection_runtime_facts(owner_home, run_dir.name, payload)
             if not pending and runtime_status in AGENT_RUN_TERMINAL_STATUSES:
-                return False
+                return missing
         except (OSError, ValueError, TypeError, sqlite3.Error):
             pass
-    return status != "BLOCKED" or not _blocked_subagent_is_quiescent(owner_home, run_dir.name, payload)
+    if status == "BLOCKED" and _blocked_subagent_is_quiescent(owner_home, run_dir.name, payload):
+        return missing
+    return str(payload.get("thread_id") or payload.get("conversation_thread_id") or "") if include_thread else True
 
 
 _TASK_STATUS_CACHE_MAX_ENTRIES_COUNT = 131072

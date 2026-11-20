@@ -149,8 +149,14 @@ class ProgressStore:
             route_target=str(request.get("route_target") or ""),
             metadata=request.get("metadata") or {},
         )
-        write_json_file_atomic(self.storage.policy_path(policy.policy_id), policy.to_dict())
+        self._write_policy(policy)
         return policy
+
+    def _write_policy(self, policy: ProgressPolicy) -> None:
+        write_json_file_atomic(self.storage.policy_path(policy.policy_id), policy.to_dict())
+        from ..local_storage.owner_read_index import note_pending_projection_dirty
+
+        note_pending_projection_dirty(self.storage.root, "schedule")
 
     # LLM: 坏账保持原只返回对象的入口语义，需严格诊断时使用列表报告。
     # 函数用途: 按精确 ID 读取进度策略。
@@ -240,7 +246,7 @@ class ProgressStore:
         updated = replace(
             policy, last_report_at=current, next_due_at=current + interval, metadata=metadata
         )
-        write_json_file_atomic(self.storage.policy_path(policy_id), updated.to_dict())
+        self._write_policy(updated)
         return updated
 
     # LLM: 检查时间不同于模型报告时间，不能把无变化探测计为一次模型汇报。
@@ -266,7 +272,7 @@ class ProgressStore:
             next_due_at=current + max(0, policy.interval_seconds),
             metadata=metadata,
         )
-        write_json_file_atomic(self.storage.policy_path(policy_id), updated.to_dict())
+        self._write_policy(updated)
         return updated
 
     # LLM: 失败次数、退避长度来自调度层；按原阈值退休并保留失败账。
@@ -305,7 +311,7 @@ class ProgressStore:
             next_due_at=current + float(backoff_seconds),
             metadata=metadata,
         )
-        write_json_file_atomic(self.storage.policy_path(policy_id), updated.to_dict())
+        self._write_policy(updated)
         return updated
 
     # LLM: 沿原文件锁调用结构化 updater，None 表示明确放弃而不是保存空数据。
@@ -364,7 +370,7 @@ class ProgressStore:
             return policy
         current = now if now is not None else time.time()
         updated = replace(policy, enabled=False, last_report_at=current)
-        write_json_file_atomic(self.storage.policy_path(policy_id), updated.to_dict())
+        self._write_policy(updated)
         return updated
 
     # LLM: The canonical task lifecycle writer calls this exact-task cleanup on every terminal or
@@ -411,7 +417,7 @@ class ProgressStore:
         metadata["expedited_at"] = current
         metadata["expedite_reason"] = str(reason or "")
         updated = replace(policy, next_due_at=float(due_at), metadata=metadata)
-        write_json_file_atomic(self.storage.policy_path(policy_id), updated.to_dict())
+        self._write_policy(updated)
         return updated
 
     # LLM: 仅归档已禁用且超过原保留期的策略，继续移动原文件及锁；不得改动仍启用的策略。
