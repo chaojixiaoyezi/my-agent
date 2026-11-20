@@ -286,9 +286,10 @@ def test_failure_releases_run_lock_and_allows_safe_rollback(case, checkout, monk
 def test_restart_uses_existing_service_only_after_success(case, checkout, monkeypatch):
     observed = []
 
-    def restart(paths, *, target_pid, requester, reason, cooldown_seconds, now):
+    def restart(paths, *, target_pid, requester, reason, cooldown_seconds, now, config):
         assert _git(checkout.repo, ['rev-parse', 'HEAD']) == checkout.after
         assert checkout.installs == [checkout.after]
+        assert config is case.host.config
         observed.append((paths, target_pid, requester, cooldown_seconds, now))
         return {'status': 'scheduled'}
 

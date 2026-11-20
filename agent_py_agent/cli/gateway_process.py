@@ -27,6 +27,7 @@ import sysconfig
 import threading
 import time
 import traceback
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -87,6 +88,7 @@ from ..agent.gateway_parts.io import (
     update_json_file_atomic,
     write_json_file_atomic,
 )
+from ..agent.gateway_parts.restart_service import measure_restart_startup, restart_startup_timing
 from ..agent.gateway_parts.standalone_lifecycle import record_standalone_stop_observation
 from ..agent.gateway_parts.standalone_stop import record_standalone_stop
 
@@ -214,7 +216,7 @@ def _gateway_log_size(path: Path) -> int:
 # 函数用途: 生成当前运行状态投影；权限与就绪仍由原控制器验证。
 def _http_capacity(request: GatewayThreadsRequest) -> dict:
     server = request.http_server
-    if request.http_port and server is not None and server.server is not None:
+    if server is not None and server.server is not None:
         return server.server.effective_capacity()
     return {}
 
@@ -446,14 +448,15 @@ def _cmd_gateway_run_setup(agent, paths, *, context=None, restart_marker=_UNSET_
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
     restart_marker = take_restart_marker(paths) if restart_marker is _UNSET_RESTART_MARKER else restart_marker
-    recovery = recover_gateway_processing_requests(
-        paths,
-        startup=True,
-        max_attempts=agent.config.gateway_request_max_attempts,
-        timeout_seconds=agent.config.gateway_processing_timeout_seconds,
-        agent=agent,
-        planned_restart=restart_marker is not None,
-    )
+    with measure_restart_startup("request_continuation"):
+        recovery = recover_gateway_processing_requests(
+            paths,
+            startup=True,
+            max_attempts=agent.config.gateway_request_max_attempts,
+            timeout_seconds=agent.config.gateway_processing_timeout_seconds,
+            agent=agent,
+            planned_restart=restart_marker is not None,
+        )
     requeued = recovery["requeued"]
     attempt_recovery = _recover_gateway_stale_attempts(agent)
     from ..agent.gateway_parts.gateway_state_bounds import fit_or_refuse
@@ -506,6 +509,7 @@ def _restart_state_fields(marker) -> dict:
     if not marker:
         return {}
     return {"restart_request_id": str(marker.get("request_id") or ""),
+        **({"restart_receipt": marker["restart_receipt"]} if marker.get("restart_receipt") else {}),
         "cleanup_result": dict(marker.get("cleanup_result") or {}),
         "forced_after_drain_timeout": bool(marker.get("forced_after_drain_timeout")),
         "unresolved_operation_refs": list(marker.get("unresolved_operation_refs") or [])}
@@ -553,14 +557,15 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=N
     # 就认定网关就绪。若在 HTTP bind 之前启动 heartbeat 线程，绑定失败崩溃时
     # start 会对一个已死的网关谎报成功（旧时序：heartbeat 先写 running，再 bind）。
     try:
-        request_thread.start()
-        background_thread.start()
-        http_server = _start_gateway_http(agent, paths, http_port)
-        request = replace(request, http_server=http_server)
-        heartbeat_thread.start()
-        state = {**_build_run_state(request, pid), **_restart_state_fields(restart_marker)}
-        if not _commit_gateway_state(paths, state, context=context, pid=pid, replace=True):
-            raise RuntimeError("gateway startup generation changed")
+        with measure_restart_startup("listener_ready"):
+            request_thread.start()
+            background_thread.start()
+            http_server = _start_gateway_http(agent, paths, http_port)
+            request = replace(request, http_server=http_server)
+            heartbeat_thread.start()
+            state = {**_build_run_state(request, pid), **_restart_state_fields(restart_marker)}
+            if not _commit_gateway_state(paths, state, context=context, pid=pid, replace=True):
+                raise RuntimeError("gateway startup generation changed")
         if restart_marker is not None:
             receipt = announce_restart_completed(agent, restart_marker, requeued=request.requeued,
                 paths=paths, expected_generation=context.process_identity)
@@ -1256,7 +1261,7 @@ def _gateway_termination_identity_fields(paths: GatewayPaths, context: GatewayRu
         if state.get("diagnostic_sigusr1") is True:
             fields["diagnostic_sigusr1"] = True
         # failed/stopped仍要绑定原重启请求，避免严格readiness把明确失败误投影成starting。
-        fields.update({key: state[key] for key in ("restart_request_id", "cleanup_result",
+        fields.update({key: state[key] for key in ("restart_request_id", "restart_receipt", "cleanup_result",
             "forced_after_drain_timeout", "unresolved_operation_refs") if key in state})
     return fields
 
@@ -1423,17 +1428,24 @@ def _isolate_gateway_package_path() -> None:
 # 函数用途: 持原锁启动单进程；正数旧配置先完成可恢复迁移，绝不再选择worker拓扑。
 # LLM: Count0在来源门和业务副作用之前退役已证明死亡的MP设施，未知来源仍按原结构码拒绝。
 def cmd_gateway_run(args) -> int:
-    _isolate_gateway_package_path()
-    from .common import frozen_gateway_arguments
+    with restart_startup_timing():
+        return _cmd_gateway_run_timed(args)
+
+
+def _cmd_gateway_run_timed(args) -> int:
+    with measure_restart_startup("import"):
+        _isolate_gateway_package_path()
+        from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+        from .common import frozen_gateway_arguments
+        from .gateway_log_stamp import install_gateway_log_timestamps
 
     args = frozen_gateway_arguments(args)
     mark_hosting_gateway_process()
-    from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
-    from .gateway_log_stamp import install_gateway_log_timestamps
 
     install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     install_gateway_log_timestamps(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
-    predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
+    with measure_restart_startup("epoch_transfer"):
+        predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
     count = args._gateway_worker_count
     from ..agent.gateway_parts.standalone_lifecycle import (
         StandaloneLifecycleUnavailable,
@@ -1445,7 +1457,9 @@ def cmd_gateway_run(args) -> int:
         return coordinated_refusal("GATEWAY_PREDECESSOR_TIMEOUT")
     try:
         paths = _cold_gateway_paths(args)
-        with standalone_lifecycle_guard(paths.root) as lifecycle:
+        with ExitStack() as stack:
+            with measure_restart_startup("epoch_transfer"):
+                lifecycle = stack.enter_context(standalone_lifecycle_guard(paths.root))
             if count > 0:
                 from copy import copy, deepcopy
 
@@ -1483,7 +1497,8 @@ def cmd_gateway_run(args) -> int:
                 print("[gateway-run] retired multiprocess generation(s) "
                       + ", ".join(row["c_run_id"] for row in retired["generations"]), file=sys.stderr)
             require_standalone_sources(paths, lifecycle)
-            _heal_runtime_db_before_agent(args)
+            with measure_restart_startup("db_open"):
+                _heal_runtime_db_before_agent(args)
             with gateway_memory_tracing(getattr(args, "_gateway_frozen_config", None)) as memory_tracing:
                 args._gateway_memory_trace = memory_tracing
                 from ..agent.llm_scale.gateway_transport_admission import gateway_transport_binding

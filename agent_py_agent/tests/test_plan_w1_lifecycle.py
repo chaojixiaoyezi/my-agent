@@ -322,7 +322,8 @@ def test_clean_drain_waits_on_original_tool_event():
         assert restart_gate.executing_tool_count() == 1 and restart_gate.tool_gate_closed()
         release.set()
         drain_thread.join(3)
-        assert results == [{"ok": True, "request_id": "clean", "active_turns_at_exit": 0}]
+        assert results == [{"ok": True, "request_id": "clean", "active_turns_at_exit": 0,
+                            "restart_receipt": service.restart_receipt(drain_timeout_seconds=2)}]
         assert restart_gate.executing_tool_count() == 0
     finally:
         release.set()

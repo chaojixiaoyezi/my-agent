@@ -6,14 +6,17 @@
 # 模块用途: 让代理、/restart 和终端都能安全地安排 Gateway 重启：先排空再换进程，重启后由新进程续跑并通知发起方。
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
+from ..common.nofollow_fs import read_bytes_beneath
 from ..concurrency.restart_gate import (
     close_tool_gate,
     executing_tool_count,
@@ -21,6 +24,7 @@ from ..concurrency.restart_gate import (
     open_tool_gate,
     wait_until_no_executing_tools,
 )
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES, project_refs, ref_count
 from .io import (
     read_json_file_report,
     update_json_file_atomic,
@@ -47,6 +51,137 @@ RESTART_DRAIN_HOLD_REASON = "gateway_restart_draining"
 
 _phase_lock = threading.Lock()
 _phase: dict[str, object] = {"phase": "idle", "request_id": "", "since": 0.0}
+_STARTUP_PHASES = ("import", "config", "db_open", "index_warm", "mcp_spawn", "listener_ready",
+                   "epoch_transfer", "request_continuation")
+_startup_clock = threading.local()
+
+
+class _RestartStartupTiming:
+    """对启动线程的嵌套阶段独占计时，避免同一时间重复归账。"""
+
+    def __init__(self):
+        self.started_ns = self.at_ns = time.perf_counter_ns()
+        self.active = "config"
+        self.elapsed = dict.fromkeys(_STARTUP_PHASES, 0)
+        self.status = {"config": "complete"}
+
+    def _advance(self):
+        now = time.perf_counter_ns()
+        self.elapsed[self.active] += now - self.at_ns
+        self.at_ns = now
+
+    @contextmanager
+    def measure(self, name):
+        self._advance()
+        previous, self.active = self.active, name
+        try:
+            yield
+        except BaseException:
+            self.status[name] = "failed"
+            raise
+        else:
+            self.status[name] = "complete"
+        finally:
+            self._advance()
+            self.active = previous
+
+    def snapshot(self):
+        self._advance()
+        return {
+            "phases": [{"name": name, "ms": self.elapsed[name] / 1_000_000,
+                        "status": self.status.get(name, "pending")} for name in _STARTUP_PHASES],
+            "startup_wall_ms": (self.at_ns - self.started_ns) / 1_000_000,
+        }
+
+
+@contextmanager
+def restart_startup_timing():
+    previous = getattr(_startup_clock, "current", None)
+    clock = _RestartStartupTiming()
+    _startup_clock.current = clock
+    try:
+        yield clock
+    finally:
+        _startup_clock.current = previous
+
+
+def measure_restart_startup(name):
+    clock = getattr(_startup_clock, "current", None)
+    return clock.measure(name) if clock is not None else nullcontext()
+
+
+def mark_restart_startup_phase(name, status):
+    clock = getattr(_startup_clock, "current", None)
+    if clock is not None:
+        clock.status[name] = status
+
+
+def restart_startup_snapshot():
+    clock = getattr(_startup_clock, "current", None)
+    return clock.snapshot() if clock is not None else {}
+
+
+def restart_budget_options(config):
+    return {
+        "mode": str(getattr(config, "gateway_restart_mode", "graceful")),
+        "fast_timeout_seconds": float(getattr(config, "gateway_restart_fast_timeout_seconds", 2.0)),
+        "turn_wait_seconds": float(getattr(config, "gateway_restart_turn_wait_seconds", 300) or 0),
+        "drain_timeout_seconds": float(getattr(config, "gateway_restart_drain_timeout_seconds", 600) or 0),
+    }
+
+
+def restart_receipt(*, operation="restart", mode="graceful", fast_timeout_seconds=2.0, turn_wait_seconds=0.0,
+                    drain_timeout_seconds=0.0, http_capacity=None):
+    fast = mode == "fast" and operation == "restart"
+    return {
+        "mode": "fast" if fast else "drain",
+        "phases": [{"name": name, "ms": 0, "status": "pending"} for name in _STARTUP_PHASES],
+        "budgets": {"turn_wait_seconds": 0.0 if fast else max(0.0, float(turn_wait_seconds or 0.0)),
+                    "drain_seconds": float(fast_timeout_seconds if fast else drain_timeout_seconds or 0.0)},
+        "blockers": [],
+        "http_capacity": dict(http_capacity or {}),
+    }
+
+
+def receipt_with_blockers(receipt, rows):
+    return {**receipt, "blockers": project_refs(list(rows))}
+
+
+def live_restart_capacity(paths, pid):
+    try:
+        raw = read_bytes_beneath(paths.root, (paths.state.name,), max_bytes=GATEWAY_STATE_MAX_BYTES)
+        state = json.loads(raw) if raw is not None else {}
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if isinstance(state, dict) and state.get("pid") == pid and isinstance(state.get("http_capacity"), dict):
+        return state["http_capacity"]
+    return {}
+
+
+def render_restart_receipt(receipt):
+    if not receipt:
+        return ""
+    budgets = receipt["budgets"]
+    drain = budgets["drain_seconds"]
+    budget_text = f"排空预算 {drain:g} 秒" if drain > 0 else "排空无固定时限"
+    mode = "快速模式" if receipt["mode"] == "fast" else "排空模式"
+    wait = budgets["turn_wait_seconds"]
+    phases = [f"{phase['name']} {phase['ms']:.1f} ms" if phase["status"] == "complete"
+              else f"{phase['name']} {phase['status']}"
+              for phase in receipt["phases"] if phase["status"] != "pending"]
+    capacity = receipt["http_capacity"].get("max_request_workers")
+    blockers = receipt["blockers"]
+    parts = [mode, budget_text]
+    if wait:
+        parts.append(f"回合等待预算 {wait:g} 秒")
+    parts.append("阶段 " + "、".join(phases) if phases else "接班阶段待观察")
+    if capacity is not None:
+        parts.append(f"HTTP 工作线程容量 {capacity}")
+    if blockers:
+        reasons = "、".join(dict.fromkeys(str(row.get("reason") or "unknown") for row in blockers
+                                        if isinstance(row, dict)))
+        parts.append(f"未结清 {ref_count(blockers)} 项" + (f"（{reasons}）" if reasons else ""))
+    return "，".join(parts) + "。"
 
 
 # LLM: 托管身份只来自 Gateway 服务进程启动时写进自身环境的进程号（cli/gateway_host_guard 负责写入）；缺失或坏值返回 0。
@@ -116,6 +251,7 @@ def submit_restart_request(
     cooldown_seconds: float,
     operation: str = "restart",
     now: float | None = None,
+    config: object | None = None,
 ) -> dict[str, object]:
     if operation not in {"restart", "stop_for_update"}:
         raise ValueError("排空操作无效")
@@ -125,6 +261,8 @@ def submit_restart_request(
     if refusal is not None:
         return refusal
     outcome: dict[str, object] = {}
+    planned = restart_receipt(operation=operation, **restart_budget_options(config),
+                              http_capacity=live_restart_capacity(paths, target_pid))
 
     def updater(existing: dict) -> dict:
         if existing.get("schema") == REQUEST_SCHEMA and existing.get("status") == "pending" \
@@ -148,12 +286,14 @@ def submit_restart_request(
             "requested_at": current,
             "requester": requester,
             "additional_requesters": [],
+            "restart_receipt": planned,
         }
 
     payload = update_json_file_atomic(restart_request_path(paths), updater)
     if outcome.get("status") == "scheduled":
         _record_recent_request(paths, requester, current)
-    return {"status": outcome.get("status", "scheduled"), "request": payload}
+    return {"status": outcome.get("status", "scheduled"), "request": payload,
+            "restart_receipt": payload.get("restart_receipt") or planned}
 
 
 def _cooldown_or_loop_refusal(
@@ -226,6 +366,14 @@ def run_restart_drain(
         return {"ok": False, "reason": "invalid_restart_policy", "request_id": request_id,
                 "error_code": "GATEWAY_RESTART_POLICY_INVALID", "side_effect_state": "not_started",
                 "next_step": "设置 gateway_restart_mode=fast|graceful，fast_timeout_seconds 必须为正有限秒数"}
+    planned = request.get("restart_receipt") or {}
+    receipt = restart_receipt(operation=request.get("operation") or "restart", mode=mode,
+                              fast_timeout_seconds=fast_timeout_seconds, turn_wait_seconds=turn_wait_seconds,
+                              drain_timeout_seconds=drain_timeout_seconds, http_capacity=planned.get("http_capacity"))
+
+    def finish(result, blockers=()):
+        return {**result, "restart_receipt": receipt_with_blockers(receipt, blockers)}
+
     _set_phase("turn_wait", request_id)
     report = on_progress or (lambda _facts: None)
     deadline = time.monotonic() + (0.0 if fast else max(0.0, float(turn_wait_seconds or 0.0)))
@@ -236,25 +384,26 @@ def run_restart_drain(
         turns = int(active_turns())
     if stop_requested():
         reset_restart_drain_state()
-        return {"ok": False, "reason": "stop_requested", "request_id": request_id}
+        return finish({"ok": False, "reason": "stop_requested", "request_id": request_id})
     _set_phase("tool_drain", request_id)
     close_tool_gate()
     report({"phase": "tool_drain", "active_turns": turns, "executing_tools": executing_tool_count()})
     if stop_requested():
         reset_restart_drain_state()
-        return {"ok": False, "reason": "stop_requested", "request_id": request_id}
+        return finish({"ok": False, "reason": "stop_requested", "request_id": request_id})
     timeout = float(fast_timeout_seconds) if fast else float(drain_timeout_seconds or 0.0)
     drained = wait_until_no_executing_tools(timeout if timeout > 0 else None)
     if stop_requested():
         reset_restart_drain_state()
-        return {"ok": False, "reason": "stop_requested", "request_id": request_id}
+        return finish({"ok": False, "reason": "stop_requested", "request_id": request_id})
     if not drained and (fast or not force_on_drain_timeout):
         executing = executing_tool_count()
+        blockers = executing_tool_snapshot(limit=None)
         reset_restart_drain_state()
-        return {"ok": False, "reason": "drain_timeout", "executing": executing, "request_id": request_id,
+        return finish({"ok": False, "reason": "drain_timeout", "executing": executing, "request_id": request_id,
                 **({"error_code": "GATEWAY_RESTART_WRITES_UNSETTLED", "side_effect_state": "unknown",
-                    "executing_tools": executing_tool_snapshot(limit=None),
-                    "next_step": "核对原工具操作回执后重新安排重启；不要重放未确认写入"} if fast else {})}
+                    "executing_tools": blockers,
+                    "next_step": "核对原工具操作回执后重新安排重启；不要重放未确认写入"} if fast else {})}, blockers)
     _set_phase("exiting", request_id)
     result = {"ok": True, "request_id": request_id, "active_turns_at_exit": turns}
     if fast:
@@ -263,7 +412,7 @@ def run_restart_drain(
         snapshot = executing_tool_snapshot(limit=None)
         result.update(forced_after_drain_timeout=True, executing_tools_at_exit=len(snapshot),
                       executing_tools=snapshot, unresolved_operation_refs=snapshot)
-    return result
+    return finish(result, result.get("unresolved_operation_refs", ()))
 
 
 # LLM: 旧进程排空或显式强制超时后原子写交接标记；强制保留工具未退事实，不授重放权，不启动任何进程。
@@ -327,6 +476,7 @@ def cancel_restart_request(paths: GatewayPaths, request: dict[str, object], resu
             "request_id": str(request.get("request_id") or ""),
             "reason": str(result.get("reason") or ""),
             **{key: result[key] for key in ("error_code", "side_effect_state", "next_step") if key in result},
+            **({"restart_receipt": result["restart_receipt"]} if "restart_receipt" in result else {}),
             "executing": int(result.get("executing") or 0),
             **({"executing_tools": snapshot} if snapshot else {}),
             "cancelled_at": time.time(),
@@ -419,7 +569,9 @@ def append_restart_cancellation(
            else "Gateway 没有重启、照常服务。") +
         "不要立刻重复安排；先告诉用户哪些工作还在跑，由用户决定等它结束后再重启还是放弃。"
     )
-    return notify_restart_requesters(request, home_root=home_root, event_type=CANCELLED_EVENT_TYPE, summary=summary)
+    receipt = result.get("restart_receipt") or request.get("restart_receipt")
+    record = {**request, "restart_receipt": receipt} if receipt else request
+    return notify_restart_requesters(record, home_root=home_root, event_type=CANCELLED_EVENT_TYPE, summary=summary)
 
 
 # LLM: 只给记录了会话存储根与会话编号的发起方各写一条观测+唤醒（按事件类型+请求编号去重）；存储根必须位于 my-agent
@@ -429,6 +581,10 @@ def notify_restart_requesters(
     record: dict[str, object], *, home_root: str | Path, event_type: str, summary: str,
 ) -> dict[str, object]:
     from ..conversation.store import ConversationStore
+
+    receipt = record.get("restart_receipt")
+    if receipt:
+        summary += " " + render_restart_receipt(receipt)
 
     root = Path(home_root).expanduser().resolve(strict=False) if home_root else None
     request_id = str(record.get("request_id") or "")
@@ -464,6 +620,8 @@ def notify_restart_requesters(
             continue
         shared = {"thread_id": thread_id, "urgency": "normal",
                   "metadata": {"restart_request_id": request_id, "old_pid": record.get("old_pid") or record.get("target_pid")}}
+        if receipt:
+            shared["metadata"]["restart_receipt"] = receipt
         try:
             store = ConversationStore(store_root, initialize=False)
             thread = store.threads.load(thread_id)

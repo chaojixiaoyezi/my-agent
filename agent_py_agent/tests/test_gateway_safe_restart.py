@@ -226,7 +226,9 @@ def test_drain_waits_for_turns_then_executing_tools_and_keeps_gate_closed():
         on_progress=lambda facts: phases.append(str(facts["phase"])),
     )
     tool_thread.join(timeout=5)
+    receipt = result.pop("restart_receipt")
     assert result == {"ok": True, "request_id": "gwrestart-1", "active_turns_at_exit": 0}
+    assert receipt["mode"] == "drain" and receipt["blockers"] == []
     assert phases == ["turn_wait", "tool_drain"]
     assert service.restart_phase()["phase"] == "exiting"
     assert restart_gate.tool_gate_closed() is True, "成功排空后关口保持关闭直到进程退出"
@@ -254,7 +256,9 @@ def test_turn_wait_timeout_moves_on_and_drain_timeout_cancels_without_killing():
     finally:
         release_tool.set()
         tool_thread.join(timeout=5)
+    receipt = result.pop("restart_receipt")
     assert result == {"ok": False, "reason": "drain_timeout", "executing": 1, "request_id": "gwrestart-2"}
+    assert receipt["mode"] == "drain"
     assert service.restart_draining() is False
     assert restart_gate.tool_gate_closed() is False, "取消后恢复正常服务"
 
@@ -792,7 +796,9 @@ def test_incident_stop_requested_at_drain_boundaries(monkeypatch, stop_at, force
                                       turn_wait_seconds=0, drain_timeout_seconds=1,
                                       force_on_drain_timeout=force,
                                       stop_requested=lambda: stopping['value'], on_progress=progress)
+    receipt = result.pop("restart_receipt")
     assert result == {'ok': False, 'reason': 'stop_requested', 'request_id': 'stop-case'}
+    assert receipt["budgets"]["drain_seconds"] == 1
     assert service.restart_phase()['phase'] == 'idle' and not restart_gate.tool_gate_closed()
     assert bool(waited) == stop_at.startswith('wait_')
 
