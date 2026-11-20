@@ -85,6 +85,8 @@ def execute_turn_recovery_control(
     if command.operation.startswith("owner_"):
         return _execute_owner_recovery(owner_agent, repo, command)
     thread_id = str(getattr(thread, "thread_id", "") or "")
+    if command.recover_operations_page is not None:
+        return _no_block_result(repo, thread_id, page=command.recover_operations_page)
     if command.target_id:
         return _execute_targeted_recovery(owner_agent, repo, thread_id, command)
     task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
@@ -99,20 +101,31 @@ def execute_turn_recovery_control(
 
 # LLM: 没有阻塞时仍如实列出本线程未结清的未知工具操作（只读、不处置、不重做），不能只回“无需恢复”。
 # 函数用途: 生成无阻塞 /recover 回执，附带待人工核对的未知工具操作清单。
-def _no_block_result(repo: object, thread_id: str) -> ConversationControlResult:
-    total, operations = unknown_thread_operations(repo, thread_id, _UNSETTLED_OPERATION_LIST_MAX_COUNT)
-    if not total:
+def _no_block_result(
+    repo: object, thread_id: str, *, page: tuple[int, int] | None = None,
+) -> ConversationControlResult:
+    limit, offset = page or (_UNSETTLED_OPERATION_LIST_MAX_COUNT, 0)
+    total, operations = unknown_thread_operations(repo, thread_id, limit, offset=offset)
+    if not total and page is None:
         return ConversationControlResult("recover", True, _NO_BLOCK)
-    lines = [_NO_BLOCK, f"另有 {total} 条工具操作结果未知、尚未核对；它们不阻塞会话，系统也不会自动重做："]
+    details = {"unsettled_operation_count": total,
+               "unsettled_operation_ids": [item["operation_id"] for item in operations]}
+    if page is not None or any(item.get("legacy_normalized") for item in operations):
+        details["unsettled_operations"] = operations
+    if page is None:
+        lines = [_NO_BLOCK, f"另有 {total} 条工具操作结果未知、尚未核对；它们不阻塞会话，系统也不会自动重做："]
+        if total > len(operations):
+            lines.append(f"（仅列出最近 {len(operations)} 条）")
+    else:
+        lines = [f"本线程有 {total} 条工具操作结果未知，当前从偏移 {offset} 列出 {len(operations)} 条。"]
     lines.extend(f"{_operation_line(item)}｜操作 {item['operation_id']}" for item in operations)
-    if total > len(operations):
-        lines.append(f"（仅列出最近 {len(operations)} 条）")
-    lines.append("请核对这些操作在外部是否已经生效；需要重做时，在新消息里明确说明要重做哪一步。")
-    return ConversationControlResult(
-        "recover", True, "\n".join(lines),
-        details={"unsettled_operation_count": total,
-                 "unsettled_operation_ids": [item["operation_id"] for item in operations]},
-    )
+    if offset + len(operations) < total:
+        next_offset = offset + len(operations)
+        details["next_unsettled_operation_offset"] = next_offset
+        lines.append(f"下一页可输入 /recover --limit {limit} --offset {next_offset}。")
+    if operations:
+        lines.append("请核对这些操作在外部是否已经生效；需要重做时，在新消息里明确说明要重做哪一步。")
+    return ConversationControlResult("recover", True, "\n".join(lines), details=details)
 
 
 # LLM: 目标编号只来自已通过 opaque 校验的解析字段；写入口在锁内复核 thread/open TaskRun/current unknown，

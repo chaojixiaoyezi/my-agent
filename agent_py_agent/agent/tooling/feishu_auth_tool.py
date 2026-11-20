@@ -6,6 +6,7 @@ import json
 
 from ..user_space.feishu_authorization import authorization_guidance
 from ..user_space.feishu_oauth import (
+    FeishuOAuthError,
     _application_credentials,
     _assert_network,
     oauth_configuration,
@@ -56,58 +57,66 @@ def _available_auth_entry_advice(agent, guidance: dict, *, group_owner: bool = F
 
 
 def _classify_oauth_runtime_failure(agent, action: str, exc: Exception, guidance: dict) -> tuple[str, str, str, dict]:
-    text = str(exc) if isinstance(exc, ValueError) else ""
-    if "已有待处理请求" in text:
+    details = {"action": action}
+    reason = ""
+    if isinstance(exc, FeishuOAuthError):
+        details["phase"] = exc.phase
+        if exc.provider_code is not None:
+            details["provider_code"] = exc.provider_code
+        if exc.phase in {"authorize", "revoke"}:
+            reason = exc.reason_code
+    if reason == "OAUTH_PENDING_REQUEST_EXISTS":
         return (
             "本人飞书授权已有未到期的待处理登录卡，未重复发送新卡。",
             "not_started",
             '请提示用户完成已私发的飞书登录授权卡，或先调用 feishu_auth(action="status") 核实、必要时调用 feishu_auth(action="revoke") 撤销旧请求后再重新 authorize。',
-            {"reason_code": "OAUTH_PENDING_REQUEST_EXISTS", "action": action, "available_entry": 'feishu_auth(action="status")'},
+            {**details, "reason_code": "OAUTH_PENDING_REQUEST_EXISTS", "available_entry": 'feishu_auth(action="status")'},
         )
-    if "网络权限不可用" in text:
+    if reason == "NETWORK_DISABLED":
         return (
             "当前任务或子代理网络权限已禁用，未发起本人飞书授权。",
             "not_started",
             '可先调用只读 feishu_auth(action="permissions") 查看所需权限清单，并在开启网络权限的主会话中执行 feishu_auth(action="authorize")。',
-            {"reason_code": "NETWORK_DISABLED", "action": action, "available_entry": 'feishu_auth(action="permissions")'},
+            {**details, "reason_code": "NETWORK_DISABLED", "available_entry": 'feishu_auth(action="permissions")'},
         )
-    if any(token in text for token in ("群资源使用应用身份", "没有本人飞书身份", "管理员本人绑定已失效")):
-        entry, advice = _available_auth_entry_advice(agent, guidance, group_owner=("群资源使用应用身份" in text))
+    if reason in {"GROUP_SESSION_OAUTH_UNSUPPORTED", "PERSONAL_IDENTITY_UNAVAILABLE"}:
+        entry, advice = _available_auth_entry_advice(agent, guidance, group_owner=reason == "GROUP_SESSION_OAUTH_UNSUPPORTED")
         return (
-            text,
+            str(exc),
             "not_started",
             advice,
-            {"reason_code": "PERSONAL_IDENTITY_UNAVAILABLE", "action": action, "available_entry": entry},
+            {**details, "reason_code": "PERSONAL_IDENTITY_UNAVAILABLE", "available_entry": entry},
         )
-    if any(token in text for token in ("没有有效执行上下文", "任务执行已失效")):
+    if reason == "EXECUTION_SCOPE_INACTIVE":
         return (
-            text,
+            str(exc),
             "not_started",
             '本次授权前置执行范围核验未通过（未发起请求）：可先调用只读 feishu_auth(action="status") 查询当前授权状态，并在活跃用户会话回合中重新发起 authorize。',
-            {"reason_code": "EXECUTION_SCOPE_INACTIVE", "action": action, "available_entry": 'feishu_auth(action="status")'},
+            {**details, "reason_code": "EXECUTION_SCOPE_INACTIVE", "available_entry": 'feishu_auth(action="status")'},
         )
-    if any(token in text for token in ("授权功能未启用", "回调", "范围配置无效", "飞书应用尚未配置")):
+    if reason == "OAUTH_CONFIGURATION_UNAVAILABLE":
         entry, advice = _available_auth_entry_advice(agent, guidance)
         return (
-            text,
+            str(exc),
             "not_started",
             advice,
-            {"reason_code": "OAUTH_CONFIGURATION_UNAVAILABLE", "action": action, "available_entry": entry},
+            {**details, "reason_code": "OAUTH_CONFIGURATION_UNAVAILABLE", "available_entry": entry},
         )
-    if "未送达或输入登记失败" in text:
+    if reason == "OAUTH_CARD_DELIVERY_FAILED":
         return (
             "本人飞书授权卡发送或待输入登记失败，本次挂起请求已自动收口为失败状态。",
             "failed",
             '请先调用 feishu_auth(action="status") 确认当前记录已收口且飞书私聊通道可达，再重新调用 feishu_auth(action="authorize")。',
-            {"reason_code": "OAUTH_CARD_DELIVERY_FAILED", "action": action, "available_entry": 'feishu_auth(action="status")'},
+            {**details, "reason_code": "OAUTH_CARD_DELIVERY_FAILED", "available_entry": 'feishu_auth(action="status")'},
         )
     exc_type = type(exc).__name__
-    effect = "not_started" if action in {"permissions", "status"} else "unknown"
+    if isinstance(exc, FeishuOAuthError) and exc.original_error_type:
+        exc_type = exc.original_error_type
     return (
         f"本人飞书授权操作遇到存储或运行时异常（{exc_type}）。",
-        effect,
+        "unknown",
         '请先调用只读 feishu_auth(action="status") 或 feishu_auth(action="permissions") 核实当前授权状态，切勿盲目连续重复提交。',
-        {"reason_code": "OAUTH_RUNTIME_ERROR", "action": action, "exception_type": exc_type, "available_entry": 'feishu_auth(action="status")'},
+        {**details, "reason_code": "OAUTH_RUNTIME_ERROR", "exception_type": exc_type, "available_entry": 'feishu_auth(action="status")'},
     )
 
 
@@ -215,7 +224,9 @@ class FeishuAuthTool(BaseTool):
             if params["action"] == "authorize":
                 try:
                     _assert_network(self.agent, invocation_mode=params.get("__network_access_mode"))
-                except (OSError, ValueError, TypeError, KeyError):
+                except FeishuOAuthError as exc:
+                    if exc.phase != "authorize" or exc.reason_code != "NETWORK_DISABLED":
+                        raise
                     guidance = authorization_guidance(self.agent)
                     return ToolHandlerOutcome(
                         "feishu_auth",
@@ -228,6 +239,7 @@ class FeishuAuthTool(BaseTool):
                             "error_details": {
                                 "reason_code": "NETWORK_DISABLED",
                                 "action": "authorize",
+                                "phase": exc.phase,
                                 "available_entry": 'feishu_auth(action="permissions")',
                             },
                         },

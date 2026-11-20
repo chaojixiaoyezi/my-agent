@@ -262,7 +262,11 @@ def test_domain_errors_keep_specific_cause(tmp_path: Path, monkeypatch: pytest.M
         feishu_auth_tool,
         "request_oauth",
         lambda agent, invocation_mode=None: (_ for _ in ()).throw(
-            ValueError("本人授权已有待处理请求，请完成或撤销原授权。")
+            feishu_auth_tool.FeishuOAuthError(
+                "本人授权已有待处理请求，请完成或撤销原授权。",
+                phase="authorize",
+                reason_code="OAUTH_PENDING_REQUEST_EXISTS",
+            )
         ),
     )
     pending_err = auth_tool.execute({"action": "authorize"})

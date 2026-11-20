@@ -38,23 +38,37 @@ from .task_credentials import _cipher, _credential_mutation, _save_credential_ro
 _API = "https://open.feishu.cn/open-apis"
 
 
+class FeishuOAuthError(RuntimeError, ValueError):
+    """携带 OAuth 阶段与脱敏原因，兼容旧调用方的 ValueError 捕获。"""
+
+    def __init__(
+        self, message: str, *, phase: str, provider_code: str | None = None,
+        reason_code: str = "", original_error_type: str = "",
+    ) -> None:
+        RuntimeError.__init__(self, message)
+        self.phase = phase
+        self.provider_code = provider_code
+        self.reason_code = reason_code
+        self.original_error_type = original_error_type
+
+
 # LLM: 只读宿主 deployment 配置，普通 owner 不能扩大 OAuth 范围；未知配置拒绝，不用用户局部 YAML 替代。
 # 函数用途: 校验准确 HTTPS 回调、开放开关和部署者声明的 scope。
 def oauth_configuration(agent):
     config = deployment_capability_config(agent.home_paths)
     if not config.feishu_user_oauth_enabled:
-        raise ValueError("本人飞书授权功能未启用。")
+        raise FeishuOAuthError("本人飞书授权功能未启用。", phase="authorize", reason_code="OAUTH_CONFIGURATION_UNAVAILABLE")
     uri = config.feishu_oauth_redirect_uri
     if not isinstance(uri, str):
-        raise ValueError("本人授权回调配置无效。")
+        raise FeishuOAuthError("本人授权回调配置无效。", phase="authorize", reason_code="OAUTH_CONFIGURATION_UNAVAILABLE")
     parts = urlsplit(uri)
     if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
             or parts.path != "/feishu/oauth/callback" or parts.query or parts.fragment):
-        raise ValueError("本人飞书授权回调尚未配置，请部署者登记准确 HTTPS 回调。")
+        raise FeishuOAuthError("本人飞书授权回调尚未配置，请部署者登记准确 HTTPS 回调。", phase="authorize", reason_code="OAUTH_CONFIGURATION_UNAVAILABLE")
     scopes = config.feishu_oauth_scopes
     if (not isinstance(scopes, list) or any(not isinstance(value, str) or not value
             or any(character.isspace() for character in value) for value in scopes)):
-        raise ValueError("本人飞书授权范围配置无效。")
+        raise FeishuOAuthError("本人飞书授权范围配置无效。", phase="authorize", reason_code="OAUTH_CONFIGURATION_UNAVAILABLE")
     return uri, list(dict.fromkeys(scopes))
 
 
@@ -63,7 +77,7 @@ def oauth_configuration(agent):
 def _application_credentials(agent):
     app_id, secret = agent.config.feishu_app_id, agent.config.feishu_app_secret
     if not isinstance(app_id, str) or not app_id or not isinstance(secret, str) or not secret:
-        raise ValueError("宿主飞书应用尚未配置。")
+        raise FeishuOAuthError("宿主飞书应用尚未配置。", phase="authorize", reason_code="OAUTH_CONFIGURATION_UNAVAILABLE")
     return app_id, secret
 
 
@@ -96,13 +110,13 @@ def _assert_network(agent, scope=None, *, invocation_mode=None):
             or (isinstance(permissions, dict) and permissions.get("network_enabled") is False)
             or not resolve_effective_owner_policy(agent.home_paths).network_enabled
             or getattr(getattr(agent, "owner_policy", None), "network_enabled", True) is False):
-        raise ValueError("当前任务或用户网络权限不可用。")
+        raise FeishuOAuthError("当前任务或用户网络权限不可用。", phase="authorize", reason_code="NETWORK_DISABLED")
     kind = scope.get("agent_kind") if isinstance(scope, dict) else getattr(scope, "agent_kind", "")
     run_id = scope.get("run_id") if isinstance(scope, dict) else getattr(scope, "run_id", "")
     if kind == "subagent":
         task = agent.subagents.load(run_id)
         if (task.effective_permissions or {}).get("network_enabled") is False:
-            raise ValueError("当前子代理网络权限不可用。")
+            raise FeishuOAuthError("当前子代理网络权限不可用。", phase="authorize", reason_code="NETWORK_DISABLED")
 
 
 # LLM: 群不能拥有共享个人身份；普通 owner 只认自身准确 ID，本机管理员还要保持原私人绑定。
@@ -110,14 +124,14 @@ def _assert_network(agent, scope=None, *, invocation_mode=None):
 def oauth_actor(agent, scope=None):
     owner = owner_identity_from_config(agent.config)
     if owner.owner_kind == "group":
-        raise ValueError("群资源使用应用身份；本人授权请在私人助手会话进行。")
+        raise FeishuOAuthError("群资源使用应用身份；本人授权请在私人助手会话进行。", phase="authorize", reason_code="GROUP_SESSION_OAUTH_UNSUPPORTED")
     if owner.provider == "feishu" and owner.owner_kind == "user":
         return owner.owner_id
     if owner.provider != "local" or owner.owner_kind != "main" or scope is None:
-        raise ValueError("当前 owner 没有本人飞书身份。")
+        raise FeishuOAuthError("当前 owner 没有本人飞书身份。", phase="authorize", reason_code="PERSONAL_IDENTITY_UNAVAILABLE")
     channel, actor = approval_recipient(agent, scope)
     if channel != "feishu" or find_admin_channel_identity(agent.home_paths.root, channel, actor) is None:
-        raise ValueError("当前管理员本人绑定已失效。")
+        raise FeishuOAuthError("当前管理员本人绑定已失效。", phase="authorize", reason_code="PERSONAL_IDENTITY_UNAVAILABLE")
     return actor
 
 
@@ -148,10 +162,16 @@ def _oauth_api(method, path, body=None, token=""):
     if token:
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(_API + path, data=data, method=method, headers=headers)
+    phase = "probe"
+    if path == "/authen/v2/oauth/token":
+        phase = "refresh" if isinstance(body, dict) and body.get("grant_type") == "refresh_token" else "token_exchange"
+    provider_code = None
     try:
         with open_authenticated_request(request, timeout=20) as response:
             raw = response.read(1024 * 1024 + 1)
         result = json.loads(raw) if len(raw) <= 1024 * 1024 else None
+        if isinstance(result, dict) and type(result.get("code")) is int and result["code"] != 0:
+            provider_code = str(result["code"])
         if not isinstance(result, dict) or result.get("error"):
             raise ValueError("OAuth 返回无效")
         if "code" in result and (type(result["code"]) is not int or result["code"] != 0):
@@ -164,7 +184,9 @@ def _oauth_api(method, path, body=None, token=""):
             raise ValueError("本人证明没有返回状态码")
         return result
     except (OSError, ValueError, TypeError):
-        raise ValueError("飞书本人授权接口未返回可验证结果，请重新发起授权。") from None
+        raise FeishuOAuthError(
+            "飞书本人授权接口未返回可验证结果，请重新发起授权。", phase=phase, provider_code=provider_code,
+        ) from None
 
 
 # LLM: 实际 open_id 必须与宿主 actor 相等；state 中的身份不代替供应商证明。
@@ -173,35 +195,35 @@ def _verify_actor(token, actor):
     result = _oauth_api("GET", "/authen/v1/user_info", token=token)
     data = result.get("data") if isinstance(result, dict) else None
     if not isinstance(data, dict) or data.get("open_id") != actor:
-        raise ValueError("登录的飞书账号不是原发起人，未保存授权。")
+        raise FeishuOAuthError("登录的飞书账号不是原发起人，未保存授权。", phase="probe")
 
 
 # LLM: 期限只认正整数；bool/字符串/NaN/无限均拒绝，不能凭缺失字段延长 refresh 授权。
 # 函数用途: 取得供应商明确声明的 token 有效秒数。
-def _expires_seconds(value):
+def _expires_seconds(value, *, phase="token_exchange"):
     if type(value) is not int or not 0 < value <= 31536000:
-        raise ValueError("本人授权有效期无效。")
+        raise FeishuOAuthError("本人授权有效期无效。", phase=phase)
     return value
 
 
 # LLM: token 和 scope 只读结构化响应；没有 refresh token 可保留仅 access 授权，有 refresh token 则必须给准确期限。
 # 函数用途: 校验响应、验证本人并立即加密 token，不生成默认授权期限或伪造已授 scope。
-def _ready_row(agent, row, result):
+def _ready_row(agent, row, result, *, phase="token_exchange"):
     if not isinstance(result, dict):
-        raise ValueError("本人授权响应无效。")
+        raise FeishuOAuthError("本人授权响应无效。", phase=phase)
     token, refresh = result.get("access_token"), result.get("refresh_token", "")
     if (not isinstance(token, str) or not token or len(token) > 8192 or any(c.isspace() for c in token)
             or not isinstance(refresh, str) or len(refresh) > 8192 or any(c.isspace() for c in refresh)):
-        raise ValueError("本人授权没有有效 token。")
+        raise FeishuOAuthError("本人授权没有有效 token。", phase=phase)
     if "token_type" in result and (not isinstance(result["token_type"], str) or result["token_type"].casefold() != "bearer"):
-        raise ValueError("本人授权的 token 类型未支持。")
-    expires = _expires_seconds(result.get("expires_in"))
-    refresh_expires = _expires_seconds(result.get("refresh_token_expires_in")) if refresh else 0
+        raise FeishuOAuthError("本人授权的 token 类型未支持。", phase=phase)
+    expires = _expires_seconds(result.get("expires_in"), phase=phase)
+    refresh_expires = _expires_seconds(result.get("refresh_token_expires_in"), phase=phase) if refresh else 0
     if "refresh_token_expires_in" in result and not refresh:
-        _expires_seconds(result["refresh_token_expires_in"])
+        _expires_seconds(result["refresh_token_expires_in"], phase=phase)
     granted = result.get("scope", row.get("granted_scopes", ""))
     if not isinstance(granted, str) or not set(granted.split()).issubset(row["requested_scopes"]):
-        raise ValueError("本人授权返回的范围无效。")
+        raise FeishuOAuthError("本人授权返回的范围无效。", phase=phase)
     _verify_actor(token, row["actor_id"])
     secret = {"access_token": token, "refresh_token": refresh}
     return {**row, "status": "ready", "ciphertext": _cipher(agent.home_paths.owner_home_dir).encrypt(
@@ -227,10 +249,10 @@ def _fail_oauth(agent, actor, input_id):
 def request_oauth(agent, *, invocation_mode=None):
     current = getattr(agent, '_current_run_params', None)
     if current is None:
-        raise ValueError('当前本人操作没有有效执行上下文。')
+        raise FeishuOAuthError("当前本人操作没有有效执行上下文。", phase="authorize", reason_code="EXECUTION_SCOPE_INACTIVE")
     scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
     if not scope.active or not tool_approval_scope_is_current(agent, scope):
-        raise ValueError("当前任务执行已失效。")
+        raise FeishuOAuthError("当前任务执行已失效。", phase="authorize", reason_code="EXECUTION_SCOPE_INACTIVE")
     _assert_network(agent, scope, invocation_mode=invocation_mode)
     actor = oauth_actor(agent, scope)
     facts = _configuration_facts(agent, create_key=True)
@@ -245,7 +267,7 @@ def request_oauth(agent, *, invocation_mode=None):
     with _credential_mutation(agent, oauth_path(agent, actor)) as admission:
         previous = read_json_object_report(oauth_path(agent, actor), context="oauth.request").payload
         if previous and previous.get("status") in {"pending", "exchanging"} and previous.get("expires_at", 0) > time.time():
-            raise ValueError("本人授权已有待处理请求，请完成或撤销原授权。")
+            raise FeishuOAuthError("本人授权已有待处理请求，请完成或撤销原授权。", phase="authorize", reason_code="OAUTH_PENDING_REQUEST_EXISTS")
         _save_credential_row(admission, oauth_path(agent, actor), row)
     try:
         create_input_dependency(agent, scope, input_id=nonce, provider="feishu_oauth", expires_at=expires,
@@ -253,7 +275,7 @@ def request_oauth(agent, *, invocation_mode=None):
         _deliver_oauth_card(agent, scope, row, challenge)
     except (OSError, RuntimeError, ValueError, TypeError, KeyError):
         _fail_oauth(agent, actor, nonce)
-        raise ValueError("本人授权卡未送达或输入登记失败。") from None
+        raise FeishuOAuthError("本人授权卡未送达或输入登记失败。", phase="authorize", reason_code="OAUTH_CARD_DELIVERY_FAILED") from None
     return {"input_id": nonce, "status": "waiting_input", "expires_at": expires}
 
 
@@ -284,20 +306,20 @@ def _deliver_oauth_card(agent, scope, row, challenge):
 def complete_oauth(agent, payload, state, code):
     actor, input_id = payload["actor_id"], payload["input_id"]
     if payload.get("owner") != asdict(owner_identity_from_config(agent.config)):
-        raise ValueError("本人授权 owner 不匹配。")
+        raise FeishuOAuthError("本人授权 owner 不匹配。", phase="token_exchange")
     _assert_actor(agent, actor)
     path = oauth_path(agent, actor)
     dependency = read_json_object_report(input_dependency_path(agent, input_id), context="oauth.input").payload
     with _credential_mutation(agent, path) as admission:
         row = read_json_object_report(path, context="oauth.callback").payload
         if not row or row.get("state") != state or row.get("input_id") != input_id:
-            raise ValueError("本人授权引用已变化。")
+            raise FeishuOAuthError("本人授权引用已变化。", phase="token_exchange")
         replay = row.get("status") == "ready"
         if not replay and (row.get("status") != "pending" or time.time() >= row["expires_at"]):
-            raise ValueError("本人授权已结束或到期。")
+            raise FeishuOAuthError("本人授权已结束或到期。", phase="token_exchange")
         if not replay:
             if not dependency or dependency.get("status") != "pending" or not input_dependency_current(agent, dependency):
-                raise ValueError("原授权输入或任务已结束。")
+                raise FeishuOAuthError("原授权输入或任务已结束。", phase="token_exchange")
             _save_credential_row(admission, path, {**row, "status": "exchanging"})
     try:
         _assert_configuration(agent, row)
@@ -305,22 +327,26 @@ def complete_oauth(agent, payload, state, code):
         if not replay:
             ready = _exchange_oauth(agent, row, code)
             _commit_oauth_ready(agent, path, row, ready, dependency)
-    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
         if not replay:
             _fail_oauth(agent, actor, input_id)
-        raise ValueError("本人授权未完成，请重新发起授权。") from None
+        phase = exc.phase if isinstance(exc, FeishuOAuthError) and exc.phase == "probe" else "token_exchange"
+        provider_code = exc.provider_code if isinstance(exc, FeishuOAuthError) else None
+        raise FeishuOAuthError(
+            "本人授权未完成，请重新发起授权。", phase=phase, provider_code=provider_code,
+        ) from None
     # ready 先持久化；恢复提交失败保留它，重复 callback 只补原 Wake，不能重新兑换一次性 code。
     try:
         resolve_input_dependency(agent, input_id, status="ready", result_refs=(input_id,))
     except (OSError, RuntimeError, ValueError, TypeError, KeyError):
-        raise ValueError("本人授权已保存，原任务恢复提交未完成，请重试原回调。") from None
+        raise FeishuOAuthError("本人授权已保存，原任务恢复提交未完成，请重试原回调。", phase="token_exchange") from None
     return {"ok": True, "status": "ready"}
 
 
 # LLM: 此入口不持 quota/凭据锁；PKCE 与 app secret 只存在本次宿主请求，响应校验后立即加密。
 # 函数用途: 用原配置交换授权码并核对账号本人。
 def _exchange_oauth(agent, row, code):
-    verifier = _decrypt_oauth(agent, row["ciphertext"], verifier=True)
+    verifier = _decrypt_oauth(agent, row["ciphertext"], verifier=True, phase="token_exchange")
     result = _oauth_api("POST", "/authen/v2/oauth/token", {"grant_type": "authorization_code",
         "code": code, "client_id": row["app_id"], "client_secret": agent.config.feishu_app_secret,
         "redirect_uri": row["redirect_uri"], "code_verifier": verifier})
@@ -333,11 +359,11 @@ def _commit_oauth_ready(agent, path, original, ready, dependency):
     _assert_configuration(agent, original)
     _assert_network(agent, dependency["scope"])
     if not input_dependency_current(agent, dependency):
-        raise ValueError("原授权任务已结束。")
+        raise FeishuOAuthError("原授权任务已结束。", phase="token_exchange")
     with _credential_mutation(agent, path) as admission:
         latest = read_json_object_report(path, context="oauth.commit").payload
         if not latest or latest.get("input_id") != original["input_id"] or latest.get("status") != "exchanging":
-            raise ValueError("原授权请求已变化。")
+            raise FeishuOAuthError("原授权请求已变化。", phase="token_exchange")
         _save_credential_row(admission, path, ready)
 
 
@@ -373,10 +399,10 @@ def _user_access_token_with_authority(agent, actor, *, revalidate):
     value = _decrypt_oauth(agent, row["ciphertext"])
     if _stored_deadline(row.get("ready_expires_at")) <= time.time() + 30:
         if _stored_deadline(row.get("refresh_expires_at")) <= time.time() or not value.get("refresh_token"):
-            raise ValueError("本人飞书授权已过期，请重新授权。")
+            raise FeishuOAuthError("本人飞书授权已过期，请重新授权。", phase="refresh")
         result = _oauth_api("POST", "/authen/v2/oauth/token", {"grant_type": "refresh_token",
             "refresh_token": value["refresh_token"], "client_id": row["app_id"], "client_secret": agent.config.feishu_app_secret})
-        ready = _ready_row(agent, row, result)
+        ready = _ready_row(agent, row, result, phase="refresh")
         _assert_configuration(agent, row)
         revalidate()
         _assert_network(agent)
@@ -384,7 +410,7 @@ def _user_access_token_with_authority(agent, actor, *, revalidate):
         with _credential_mutation(agent, path) as admission:
             latest = read_json_object_report(path, context="oauth.refresh_commit").payload
             if not latest or latest.get("status") != "ready" or latest.get("ciphertext") != row["ciphertext"]:
-                raise ValueError("刷新期间原授权已变化。")
+                raise FeishuOAuthError("刷新期间原授权已变化。", phase="refresh")
             _save_credential_row(admission, path, ready)
         value = _decrypt_oauth(agent, ready["ciphertext"])
     revalidate()
@@ -396,7 +422,7 @@ def _user_access_token_with_authority(agent, actor, *, revalidate):
 
 # LLM: 密文/JSON 损坏只产生固定安全错误；缓存 token 必须保持原两字段形状，不能把损坏内容回显或当作可用身份。
 # 函数用途: 在宿主解密 PKCE 或 token，并拒绝无效类型，不写盘或联网。
-def _decrypt_oauth(agent, ciphertext, *, verifier=False):
+def _decrypt_oauth(agent, ciphertext, *, verifier=False, phase="probe"):
     try:
         raw = _cipher(agent.home_paths.owner_home_dir).decrypt(ciphertext.encode()).decode()
         if verifier:
@@ -410,7 +436,7 @@ def _decrypt_oauth(agent, ciphertext, *, verifier=False):
             raise ValueError("token类型无效")
         return value
     except Exception:  # noqa: BLE001 密文/解析阶段包含可选加密库异常，绝不能泄漏原材料或留 exchanging。
-        raise ValueError("本人授权密文记录不可读，请重新授权。") from None
+        raise FeishuOAuthError("本人授权密文记录不可读，请重新授权。", phase=phase) from None
 
 
 # LLM: 已保存的墙钟期限也要验证类型与有限值；坏账不能假装永远 ready。
@@ -425,6 +451,22 @@ def _stored_deadline(value):
 # 状态不返回密文/state/URL；撤销结算原输入，使旧回调不能复活，联测 Gateway 首次查询及原 OAuth 回调矩阵。
 # 函数用途: 查询或撤销本人授权；查询不创建任务，撤销会清密文并结算原输入，不伪造供应商远端撤销。
 def oauth_status(agent, *, revoke=False):
+    phase = "revoke" if revoke else "probe"
+    try:
+        return _oauth_status(agent, revoke=revoke)
+    except FeishuOAuthError as exc:
+        if exc.phase == phase:
+            raise
+        raise FeishuOAuthError(
+            str(exc), phase=phase, provider_code=exc.provider_code, reason_code=exc.reason_code,
+        ) from None
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise FeishuOAuthError(
+            "本人授权状态暂时无法核对。", phase=phase, original_error_type=type(exc).__name__,
+        ) from None
+
+
+def _oauth_status(agent, *, revoke):
     current = getattr(agent, "_current_run_params", None)
     owner = owner_identity_from_config(agent.config)
     needs_scope = revoke or owner.provider != "feishu" or owner.owner_kind != "user"

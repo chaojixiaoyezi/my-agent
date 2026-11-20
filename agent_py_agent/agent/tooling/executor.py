@@ -24,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 from ..common.cancellation import CancellationToken
 from ..common.log_redaction import redact_sensitive_text, redact_sensitive_value
 from ..contracts.diagnostics import DiagnosticEnvelope
+from ..contracts.effect_settlement import SETTLEMENT_APPLIED, classify_effect_settlement
 from ..contracts.error_taxonomy import error_contract
 from ..contracts.idempotency import BusinessEffectIdentity
 from ..io.sqlite_connection import sqlite_error_details
@@ -76,7 +77,6 @@ from .tool_input_completion import (
 )
 from .tool_operation_coordinator import (
     ToolOperationExecutionRequest,
-    _is_deterministic_pre_handler_failure,
     execute_tool_operation,
 )
 
@@ -585,6 +585,8 @@ def _pre_handler_failure_execution(
 ) -> ToolExecution:
     states = progress.states
     states.append("failed")
+    if not outcome.ok and not outcome.effect_outcome:
+        outcome.effect_outcome = "not_started"
     if request.host_output_redaction is not None:
         from .host_output_redaction import redact_host_tool_outcome
         redaction = request.host_output_redaction
@@ -864,7 +866,8 @@ def _decision_result(
         _decision_message(decision),
         error_code=code,
         failure_stage=stage,
-        facts=ToolFailureFacts(duration_ms=_elapsed_ms(started_at), status=status, metadata=metadata),
+        facts=ToolFailureFacts(duration_ms=_elapsed_ms(started_at), effect_outcome="not_started",
+                               status=status, metadata=metadata),
     )
 
 
@@ -1042,6 +1045,8 @@ def _invoke_with_operation_policy(
                 operation_managed=decision.resolved_effect != "read_only",
             )
         )
+        if not outcome.ok and not outcome.handler_executed and not outcome.effect_outcome:
+            outcome.effect_outcome = "not_started"
         outcome.duration_ms = max(0, _elapsed_ms(started_at))
         if decision.resolved_effect != "read_only":
             outcome.tool = op_identity
@@ -1077,6 +1082,7 @@ def _invoke_with_operation_policy(
                 False,
                 f"资源 scope 解析失败（fail-closed，拒绝执行）: {exc}",
                 error_code="TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED",
+                effect_outcome="not_started",
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
             ),
@@ -1165,6 +1171,7 @@ def _require_operation_authority(
                 False,
                 str(exc),
                 error_code="TOOL_AUTHORITY_CONTEXT_MISSING",
+                effect_outcome="not_started",
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
             ),
@@ -1673,17 +1680,26 @@ def _operation_from_outcome(
         or value.get("reconciliation_source_ref")
         or (f"tool-operation://{call.run_id}/{operation_id}" if status == "succeeded" else "")
     )
+    recorded_execution = value.get("original_tool_execution")
+    handler_executed = outcome.handler_executed
+    if isinstance(recorded_execution, dict):
+        original = recorded_execution.get("handler_executed")
+        handler_executed = original if type(original) is bool else None
+    elif value.get("replayed") is True:
+        handler_executed = None
+    explicit = outcome.effect_outcome or str(value.get("effect_outcome") or "").strip().lower()
+    if not explicit and status == "not_started":
+        explicit = "not_started"
+    if explicit in {"none", "committed"}:
+        explicit = ""
+    settlement = classify_effect_settlement(handler_executed, explicit, status)
     return ToolOperation(
         operation_id=operation_id,
         idempotency_key=call.idempotency_key,
         args_hash=call.args_hash,
         status=status,
         handler_executed=outcome.handler_executed,
-        effect_outcome=str(
-            outcome.effect_outcome
-            or ("not_started" if status == "failed" and _is_deterministic_pre_handler_failure(outcome) else "")
-            or _effect_from_operation_status(value, handler_executed=outcome.handler_executed)
-        ),
+        effect_outcome="confirmed" if settlement == SETTLEMENT_APPLIED else settlement,
         effect_source_ref=source_ref,
         attempt_count=max(1, int(value.get("attempt_count") or 1)),
         result_ref=str(value.get("result_ref") or ""),
@@ -1696,36 +1712,16 @@ def _effect_outcome(
     outcome: ToolHandlerOutcome,
     operation: ToolOperation | None,
 ) -> str:
-    if decision.resolved_effect == "read_only":
-        return "confirmed" if outcome.ok else (outcome.effect_outcome or "not_started")
-    if operation is not None:
+    read_only = decision.resolved_effect == "read_only"
+    if operation is not None and not read_only:
         return operation.effect_outcome
-    if outcome.ok:
-        return "confirmed"
-    if outcome.effect_outcome:
-        return outcome.effect_outcome
-    return "unknown" if outcome.handler_executed else "not_started"
-
-
-def _effect_from_operation_status(
-    value: dict[str, Any],
-    *,
-    handler_executed: bool | None = None,
-) -> str:
-    explicit = str(value.get("effect_outcome") or "").strip().lower()
-    if explicit in {"confirmed", "not_started", "failed", "unknown"}:
-        return explicit
-    status = str(value.get("status") or "").strip().lower()
-    if status == "succeeded":
-        return "confirmed"
-    if status == "not_started":
-        return "not_started"
-    orig_exec = value.get("original_tool_execution")
-    if isinstance(orig_exec, dict) and orig_exec.get("handler_executed") is False:
-        return "not_started"
-    if handler_executed is False and value.get("replayed") is not True:
-        return "not_started"
-    return "unknown"
+    explicit = outcome.effect_outcome
+    if not explicit and not outcome.ok and (read_only or not outcome.handler_executed):
+        explicit = "not_started"
+    settlement = classify_effect_settlement(
+        outcome.handler_executed, explicit, "succeeded" if outcome.ok else "unknown",
+    )
+    return "confirmed" if settlement == SETTLEMENT_APPLIED else settlement
 
 
 def _result_refs(outcome: ToolHandlerOutcome) -> tuple[ToolResultRef, ...]:

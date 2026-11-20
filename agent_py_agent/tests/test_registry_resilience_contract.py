@@ -665,9 +665,8 @@ def test_deterministic_handler_failure_operation_status_failed(
         )
     )
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-    # execute_authorized_tool 按统一入口语义标 handler_executed=True(能走到
-    # 派发=handler 被调用); 修复点=_operation_status_for_result 识别执行前
-    # 确定性失败族(category=tool/path 且 retryable), 即使 True 也终态 FAILED。
+    # Handler 已进入，原参数校验仍能证明写入未开始。
+    assert result.effect_outcome == "not_started"
     assert _operation_status_for_result(result) == "failed"
 
 
@@ -715,35 +714,21 @@ def test_wrong_status_surface_is_not_started_and_does_not_halt_turn(
     assert _operation_status_for_result(result) == "failed"
 
 
-def test_owner_quota_unavailable_deterministic_failure_failed() -> None:
-    """问题B同族(2026-08-14 真机, bs4 复刻): write_file 因 owner 配额无法
-    可靠读取 fail-closed(OWNER_QUOTA_UNAVAILABLE, 副作用零发生)必须终态 FAILED
-    而非 UNKNOWN——修复前归 UNKNOWN 禁止自动重试, bs4 最后一笔 write_file
-    (fix5.py)因此卡死到轮限(真机 outcome_json=effect_outcome_unknown:
-    OWNER_QUOTA_UNAVAILABLE)。归 FAILED 后模型可如实报告/换策略, 不再哑卡。
-    """
+def test_owner_quota_unavailable_without_phase_fact_stays_unknown() -> None:
+    """直接错误工厂没有写入阶段证据，实际文件调用点负责标记明确的未写入。"""
     from agent_py_agent.agent.tooling._filesystem_read import owner_quota_error_result
     from agent_py_agent.agent.tooling.tool_operation_coordinator import (
         _operation_status_for_result,
     )
 
-    outcome = owner_quota_error_result(
-        "write_file", RuntimeError("owner disk usage scan failed")
-    )
+    outcome = owner_quota_error_result("write_file", RuntimeError("owner disk usage scan failed"))
     assert outcome.error_code == "OWNER_QUOTA_UNAVAILABLE"
-    # 与 TOOL_INVALID_ARGUMENTS 同族: 执行前确定性失败(retryable)即使
-    # execute_authorized_tool 标了 handler_executed=True 也终态 FAILED。
-    assert _operation_status_for_result(outcome) == "failed"
+    assert not outcome.effect_outcome
+    assert _operation_status_for_result(outcome) == "unknown"
 
 
 def test_path_outside_workspace_deterministic_failure_failed() -> None:
-    """EXEC-03(2026-08-15 compact 场景真机): PATH_OUTSIDE_WORKSPACE 是校验
-    阶段确定性拒绝(零副作用), 但 taxonomy retryable=False——旧判定叠加
-    retryable 闸使其永不命中白名单 → 归 UNKNOWN → unknown 收口闸 → 模型无法
-    改路径重试, 任务死(真机: python heredoc working_dir 越界, RC=2)。
-    终态 FAILED 不授予自动重试(同参重放仍回 FAILED), 只解除收口让模型
-    读 recovery_hint 改参后以新调用继续——正是 retryable=False 的语义。
-    """
+    """越界路径校验的明确未执行回执应结算为 FAILED，供模型改参后重新调用。"""
     from agent_py_agent.agent.tooling.tool_operation_coordinator import (
         _operation_status_for_result,
     )
@@ -753,15 +738,14 @@ def test_path_outside_workspace_deterministic_failure_failed() -> None:
         False,
         "COMMAND_ACCESS_DENIED: 多用户 owner 只能在当前任务工作区或结构化授权目录执行命令。",
         error_code="PATH_OUTSIDE_WORKSPACE",
+        effect_outcome="not_started",
         handler_executed=True,
     )
     assert _operation_status_for_result(outcome) == "failed"
 
 
 def test_write_forbidden_deterministic_failure_failed() -> None:
-    """EXEC-03 同族: WRITE_FORBIDDEN(permission/retryable=False)也是校验阶段
-    确定性拒绝——旧 retryable 闸使其归 UNKNOWN 收口; 白名单是唯一权威。
-    """
+    """写入权限拒绝带明确未执行回执，即使已进入工具入口也保持 FAILED。"""
     from agent_py_agent.agent.tooling.tool_operation_coordinator import (
         _operation_status_for_result,
     )
@@ -771,6 +755,7 @@ def test_write_forbidden_deterministic_failure_failed() -> None:
         False,
         "write forbidden by policy",
         error_code="WRITE_FORBIDDEN",
+        effect_outcome="not_started",
         handler_executed=True,
     )
     assert _operation_status_for_result(outcome) == "failed"

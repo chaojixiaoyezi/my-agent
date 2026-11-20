@@ -35,6 +35,10 @@ from ..common.request_execution_ports import (
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable, tool_write_claim_scope
 from ..concurrency.restart_gate import tool_execution_admission
+from ..contracts.effect_settlement import (
+    classify_effect_settlement,
+    operation_status_for_settlement,
+)
 from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_scope import sqlite_connection_reuse
 from ..local_storage import (
@@ -237,7 +241,6 @@ def _execute_admitted_tool_operation(request: ToolOperationExecutionRequest) -> 
         # 作为阻塞依据单列；保存失败遗留的 RUNNING 仍不能被新 call 绕过。
         result = _operation_error(request.tool_name, "TOOL_OPERATION_IN_FLIGHT",
             "同参数操作仍在执行或等待原终态，本次请求未执行，请先核对原操作。")
-        result.effect_outcome = "not_started"
         result.result_envelope["blocking_operation"] = {
             "operation_id": attempt.claim.record.operation_id,
             "attempt_id": attempt.claim.record.attempt_id,
@@ -533,9 +536,13 @@ def _settle_reconciled_operation(
             claim,
             diagnostic="reconciliation_result_mismatch",
         )
-    terminal_status = (
-        TOOL_OPERATION_SUCCEEDED if reconciled_result.ok else TOOL_OPERATION_FAILED
-    )
+    if not reconciled_result.ok and not reconciled_result.effect_outcome:
+        # 终态核对自带权威来源引用，明确的 failed 核对即为已知失败。
+        reconciled_result.effect_outcome = "failed"
+    terminal_status = _operation_status_for_result(reconciled_result)
+    if terminal_status == TOOL_OPERATION_UNKNOWN:
+        _release_unknown_reconciliation(request, attempt)
+        return _unknown_claim_result(request, claim, diagnostic="reconciliation_effect_unconfirmed", source_ref=source_ref)
     reconciled_result.effect_source_ref = (
         reconciled_result.effect_source_ref or source_ref
     )
@@ -792,7 +799,6 @@ def _unknown_claim_result(
         "此前执行可能已经产生副作用，但目标系统尚未给出可证明的终态；本次调用未执行，系统不会自动重做，请人工核验目标系统状态。",
         reported_error_code=reported,
     )
-    result.effect_outcome = "not_started"
     if prior.next_action:
         result.next_action = prior.next_action
     if not isinstance(getattr(result, "result_envelope", None), dict):
@@ -928,6 +934,18 @@ def _execute_claimed_operation(
         raise_if_transport_uncertain(exc)
         if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable, ToolCancelled, InterruptedError, KeyboardInterrupt)):
             raise
+        diagnostic = type(exc).__name__
+        fallback = ToolHandlerOutcome(
+            request.tool_name,
+            False,
+            hot_json.dumps({"ok": False, "error": f"coordinator post-execution failed: {diagnostic}"}, ensure_ascii=False),
+            error_code="INTERNAL_ERROR",
+            effect_outcome="unknown",
+            failure_stage=ToolFailureStage.EXECUTION.value,
+            handler_executed=True,
+            next_action="请核对原工具操作是否已生效，确认前不要重复执行。",
+        )
+        storage_error = exc
         try:
             request.store.finish_tool_operation(
                 ToolOperationCompletionRequest(
@@ -936,40 +954,28 @@ def _execute_claimed_operation(
                     operation_id=claim.record.operation_id,
                     holder_id=claim.record.holder_id,
                     generation=claim.record.generation,
-                    status=TOOL_OPERATION_FAILED,
-                    result=_result_payload(
-                        ToolHandlerOutcome(
-                            request.tool_name,
-                            False,
-                            hot_json.dumps({"error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
-                            error_code="INTERNAL_ERROR",
-                            effect_outcome="unknown",
-                        ),
-                        request.settled_effect_outcome,
-                        redacted_input=request.redacted_input,
-                    ),
-                    error_code="INTERNAL_ERROR",
-                    unknown_reason=f"coordinator_post_execution_error:{type(exc).__name__}",
+                    status=TOOL_OPERATION_UNKNOWN,
+                    result=_result_payload(fallback, redacted_input=request.redacted_input),
+                    error_code=fallback.error_code,
+                    unknown_reason=f"coordinator_post_execution_error:{diagnostic}",
                 )
             )
-        except Exception:
-            pass
-        fallback = ToolHandlerOutcome(
-            request.tool_name,
-            False,
-            hot_json.dumps({"ok": False, "error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
-            error_code="INTERNAL_ERROR",
-            effect_outcome="unknown",
-        )
+        except Exception as persist_error:  # noqa: BLE001 - 任一已执行事实都不能因结算故障变成可重试。
+            raise_if_transport_uncertain(persist_error)
+            if isinstance(persist_error, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable,
+                                          ToolWriteContextUnavailable, ToolCancelled, InterruptedError)):
+                raise
+            storage_error = persist_error
+            fallback.result_envelope["persistence_exception_type"] = type(persist_error).__name__
         _attach_operation_facts(
             fallback,
             request,
-            status=TOOL_OPERATION_FAILED,
+            status=TOOL_OPERATION_UNKNOWN,
             action="coordinator_post_execution_failed",
-            diagnostic=type(exc).__name__,
-            storage_error=exc,
+            diagnostic=diagnostic,
+            storage_error=storage_error,
         )
-        return apply_tool_execution_facts(fallback, failure_stage=ToolFailureStage.EXECUTION, handler_executed=True)
+        return fallback
 
 
 # LLM: Recovery cleanup is strictly downstream of authoritative terminal persistence. Hook
@@ -1113,74 +1119,10 @@ def _invoke_with_lease_renewal(
 
 
 def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
-    if result.ok:
-        return TOOL_OPERATION_SUCCEEDED
-    # failed=handler 结构化声明的确定性失败(如进程完整退出自报退出码,
-    # 2026-08-15 长代码真机: unittest 校验失败被归 UNKNOWN 导致任务死)。
-    # 与 not_started 同属「结果是确定的」——终态 FAILED, 模型可读输出修正,
-    # 不触发 unknown 收口闸; 失败可能部分生效由模型观测文件/输出裁决。
-    if result.effect_outcome in {"not_started", "failed"}:
-        return TOOL_OPERATION_FAILED
-    # 问题B(2026-08-14 真机实证, ④类复刻): handler 显式返回的「执行前确定性
-    # 失败」(taxonomy category=tool/path 且 retryable——参数/路径类, 副作用在
-    # 校验阶段就未发生) 即使 execute_authorized_tool 标了 handler_executed=True
-    # 也按 FAILED 终态归档。修复前一律 UNKNOWN → 系统禁止自动重试 → 模型
-    # 卡死到轮限(真机 outcome_json: effect_outcome_unknown:TOOL_INVALID_ARGUMENTS,
-    # apply_patch 无效补丁卡死整个复刻任务)。
-    if _is_deterministic_pre_handler_failure(result):
-        return TOOL_OPERATION_FAILED
-    # Once a mutating/dangerous handler was entered, a generic failure cannot
-    # prove that no side effect happened.  Only an explicit structured
-    # ``not_started`` fact may make the operation terminal-failed; error text
-    # and taxonomy labels never grant replay authority.
-    if result.effect_outcome == "unknown" or result.handler_executed:
-        return TOOL_OPERATION_UNKNOWN
-    return TOOL_OPERATION_FAILED
-
-
-# 执行前确定性失败族: handler 在副作用前显式返回的校验类错误码白名单——
-# 参数/路径/写入边界在触碰任何副作用目标前失败, 零副作用是结构化机器事实,
-# 即使 execute_authorized_tool 标了 handler_executed=True 也应终态 FAILED。
-# 不能用 taxonomy 动作/category 当判据: TOOL_TIMEOUT 与 TOOL_ERROR 也是
-# category=tool+retryable(+REPAIR_TOOL_ARGUMENTS), 但它们「可能已生效」
-# 必须保持 UNKNOWN(禁止自动重试)。白名单=只含校验阶段专属码, 新增校验码
-# 须同步登记(漏登=保守回 UNKNOWN, 安全方向)。
-#
-# OWNER_QUOTA_UNAVAILABLE(2026-08-14 真机, bs4 复刻): owner 配额无法可靠读取
-# 时写入 fail-closed、副作用零发生(owner_quota_error_result 在触碰任何文件前
-# 显式拒绝), taxonomy=state/retryable——与 TOOL_INVALID_ARGUMENTS 同属「执行前
-# 确定性失败」族。修复前归 UNKNOWN → 禁止自动重试 → bs4 最后一笔 write_file
-# (fix5.py)因此卡死到轮限(真机 outcome_json=effect_outcome_unknown:
-# OWNER_QUOTA_UNAVAILABLE)。归 FAILED 后模型可如实报告/换策略, 不再哑卡。
-# OWNER_DISK_QUOTA_EXCEEDED 同样 fail-closed, 但可能部分生效语义未决,
-# 由 effect_outcome/其他路径裁决, 不进本白名单。
-_PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
-    {
-        "TOOL_INVALID_ARGUMENTS",
-        "TOOL_INTERNAL_PARAMETER_FORBIDDEN",
-        "PATH_OUTSIDE_WORKSPACE",
-        "PATH_NOT_FOUND",
-        "WRITE_FORBIDDEN",
-        "PERSONA_WRITE_REQUIRES_TOOL",
-        "OWNER_QUOTA_UNAVAILABLE",
-        # H3：文件工具在写之前按路径拒写宿主配置/运行状态（WriteScopeError.access_code），零副作用。
-        "PATH_HOST_CONFIG_WRITE_BLOCKED",
-        "PATH_HOST_STATE_WRITE_BLOCKED",
-    }
-)
-
-
-# LLM: 白名单是「校验阶段确定性拒绝」的唯一权威——判定不得再叠加 taxonomy
-# retryable 闸。EXEC-03(2026-08-15 compact 场景真机): PATH_OUTSIDE_WORKSPACE
-# (path/retryable=False)与 WRITE_FORBIDDEN(permission/retryable=False)是
-# 校验阶段零副作用拒绝, 但旧判定 `code in 白名单 and contract.retryable`
-# 使这两个码永不命中 → 归 UNKNOWN → unknown 收口闸 → 模型无法改路径重试,
-# 任务死。终态 FAILED 不授予自动重试(同参重放仍回 FAILED 不重执行), 只是
-# 解除 UNKNOWN 收口, 让模型读 recovery_hint 改参后以新调用继续——这正是
-# retryable=False 的语义(不自动重试同一操作, 允许人工/模型换参重来)。
-def _is_deterministic_pre_handler_failure(result: ToolHandlerOutcome) -> bool:
-    code = str(result.error_code or "").upper()
-    return code in _PRE_HANDLER_DETERMINISTIC_CODES
+    settlement = classify_effect_settlement(
+        result.handler_executed, result.effect_outcome, "succeeded" if result.ok else "unknown",
+    )
+    return operation_status_for_settlement(settlement, ok=result.ok)
 
 
 def _bounded_unknown_output_preview(raw: object) -> str:
@@ -1514,6 +1456,7 @@ def _operation_error(
         ),
         error_code=error_code,
         reported_error_code=reported_error_code,
+        effect_outcome="not_started",
     )
 
 
