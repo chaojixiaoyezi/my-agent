@@ -5,12 +5,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..action_protocol import RunScope
 from ..common.cancellation import CancellationToken
 from ..concurrency.interrupt import is_interrupted
 from .model.context_estimate_cache import ContextEstimateMemo
+
+if TYPE_CHECKING:
+    from ._tool_loop_service import MutationBook
 
 # 参数减量第 3 批 D 组（2026-09-27）：协议违规修复机会次数不再是配置项 max_protocol_repairs，这里是唯一定义；
 # ToolLoopExecuteParams.max_protocol_repairs 的字段默认值与 runtime/loop_support 装配参数都用它，response_decision 只读 params。
@@ -56,6 +59,7 @@ class FinalizeContext:
     # Typed sink used only to retrieve tool-boundary-confirmed assistant parts.
     on_chunk: object = None
     attempt_id: str = ""
+    mutation_book: MutationBook | None = field(default=None, kw_only=True, repr=False, compare=False)
 
 
 # LLM: ToolLoopExecuteParams保存本run事实；降级桩依四元来源，15%重试基线仅本轮replace传递，不序列化或授权。

@@ -744,73 +744,36 @@ def test_w8_36_truncated_length_zero_tool_calls_routes_into_bounded_continuation
 
 
 # ------------------------------------------------------------------
-# 6. Item #37 — Asset Mutation State Map Eviction Beyond 32 Entries
+# 6. Item #37 — Asset Mutation Isolation Between Attempts
 # ------------------------------------------------------------------
 
 
-def test_w8_37_asset_mutation_states_evicts_clean_before_mutated_and_keeps_latest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    observed_calls: list[tuple[str, str]] = []
-
-    class _FakeLedger:
-        def observe(self, state, tool_name, args, value, **kwargs):
-            book = state.setdefault("asset_mutations", {"targets": {}, "evidence_tags": []})
-            observed_calls.append((tool_name, str(args.get("path") or "")))
-            if tool_name == "write_file":
-                target_path = str(args.get("path") or "")
-                book["targets"][target_path] = {"kind": "script", "path": target_path}
-
-    from agent_py_agent.agent.assets import mutation_ledger
-
-    monkeypatch.setattr(mutation_ledger, "AssetMutationLedger", _FakeLedger)
-
+def test_w8_37_asset_mutation_book_keeps_nested_attempts_separate(tmp_path: Path) -> None:
     agent = SimpleNamespace(
         root=tmp_path,
         home_paths=SimpleNamespace(owner_home_dir=tmp_path),
         config=SimpleNamespace(enable_self_learning=True),
     )
+    first = _tool_loop_service.MutationBook("run", "attempt-1", [])
+    second = _tool_loop_service.MutationBook("run", "attempt-2", [])
 
-    def _observe(run_idx: int, *, tool_name: str, file_path: str) -> dict[str, object]:
-        state: dict[str, object] = {}
-        params = SimpleNamespace(
-            context_scope="conversation",
-            run_id=f"run-{run_idx}",
-            attempt_id="attempt-1",
-            live_archive_state=state,
-            in_use_method_ids=(),
-            task_attributes={},
-        )
+    def observe(book, tool_name: str, path: str) -> None:
         record = SimpleNamespace(
-            params=params,
-            call=SimpleNamespace(tool_name=tool_name, arguments={"path": file_path}, call_id=f"c-{run_idx}"),
+            params=book,
+            call=SimpleNamespace(tool_name=tool_name, arguments={"path": path}, call_id=tool_name),
             result=SimpleNamespace(ok=True, output={}, error_code=""),
         )
-        archive_record = {"tool": tool_name, "parameters": {"path": file_path}, "call_id": f"c-{run_idx}"}
-        _tool_loop_service._observe_turn_asset_mutations(agent, record, archive_record)
-        return state
+        _tool_loop_service._observe_turn_asset_mutations(agent, record, {})
 
-    # Fill 32 slots: first 10 clean read-only runs, next 22 real mutated runs.
-    for idx in range(10):
-        _observe(idx, tool_name="read_file", file_path=str(tmp_path / f"read_{idx}.py"))
-    for idx in range(10, 32):
-        _observe(idx, tool_name="write_file", file_path=str(tmp_path / f"mut_{idx}.py"))
-    assert len(agent._asset_mutation_states) == 32
+    (tmp_path / "candidate.py").write_text("pass\n", encoding="utf-8")
+    with _tool_loop_service.mutation_book_scope(first):
+        observe(first, "read_file", "candidate.py")
+        with _tool_loop_service.mutation_book_scope(second):
+            observe(first, "write_file", "candidate.py")
+            observe(second, "write_file", "candidate.py")
+        assert _tool_loop_service.current_mutation_book(first.run_id, first.attempt_id) is first
 
-    # Runs 32..39 mutate files -> clean runs (0..7) must be evicted BEFORE any mutated run (10..31).
-    for idx in range(32, 40):
-        _observe(idx, tool_name="write_file", file_path=str(tmp_path / f"mut_{idx}.py"))
-
-    assert len(agent._asset_mutation_states) == 32
-    for idx in range(10, 40):
-        assert (f"run-{idx}", "attempt-1") in agent._asset_mutation_states
-    assert ("run-8", "attempt-1") in agent._asset_mutation_states
-    assert ("run-9", "attempt-1") in agent._asset_mutation_states
-    for idx in range(8):
-        assert (f"run-{idx}", "attempt-1") not in agent._asset_mutation_states
-
-    # Now all 32 retained entries have mutations; inserting run-40 evicts oldest remaining (run-8).
-    _observe(40, tool_name="write_file", file_path=str(tmp_path / "mut_40.py"))
-    assert len(agent._asset_mutation_states) == 32
-    assert ("run-8", "attempt-1") not in agent._asset_mutation_states
-    assert ("run-40", "attempt-1") in agent._asset_mutation_states
+    [first_state] = first.mutations
+    [second_state] = second.mutations
+    assert not first_state["asset_mutations"]["targets"]
+    assert len(second_state["asset_mutations"]["targets"]) == 1

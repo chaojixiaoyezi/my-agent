@@ -31,6 +31,7 @@ from ..settings.live_switches import refresh_live_switches
 from ..settings.runtime_guard_config import RuntimeGuardPolicy
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
+from ._tool_loop_service import MutationBook, current_mutation_book, mutation_book_scope
 from .cli_run_conversation import (
     bind_cli_run_conversation,
     persist_cli_run_assistant,
@@ -260,6 +261,7 @@ class SimpleAgentRuntimeMixin:
             request_id=params.request_id,
             attempt_id=params.attempt_id,
             run_id=params.run_id,
+            mutation_book=current_mutation_book(params.run_id, params.attempt_id),
             task_id=params.task_id,
             source=params.source,
             do_save=self.config.auto_save_memory if params.save is None else params.save,
@@ -1070,12 +1072,14 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 ),
             )
             _log_run_stage("context_ready", params, started_mono=_run_stage_started)
-            loop_result = _execute_runtime_loop(
-                agent,
-                _runtime_loop_params(user_prompt, prepared, params),
-            )
-            _log_run_stage("loop_done", params, started_mono=_run_stage_started)
-            ctx = agent._build_finalize_context(root_user_prompt, prepared, loop_result, params)
+            # 账本随已绑定的尝试生存，跨本尝试内的 Compact 参数替换共用。
+            with mutation_book_scope(MutationBook(params.run_id, params.attempt_id, [])):
+                loop_result = _execute_runtime_loop(
+                    agent,
+                    _runtime_loop_params(user_prompt, prepared, params),
+                )
+                _log_run_stage("loop_done", params, started_mono=_run_stage_started)
+                ctx = agent._build_finalize_context(root_user_prompt, prepared, loop_result, params)
             result = agent._get_finalization_service().finalize(ctx)
             if params.business_context is not None and str(getattr(result, "runtime_status", "")) == "ok":
                 from ..conversation.session_tasks import stage_background_learning_candidate

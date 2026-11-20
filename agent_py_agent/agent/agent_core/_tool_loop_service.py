@@ -10,10 +10,13 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from threading import Lock
 
 from ..backends import ModelResponse
 from ..backends.errors import (
@@ -215,6 +218,45 @@ class ToolLoopRunResult:
     final_response: ModelResponse | None
     tool_rounds: int
     params: ToolLoopExecuteParams
+
+
+@dataclass
+class MutationBook:
+    """一次执行尝试独占的变更账，使用现有账本的有界状态格式。"""
+
+    run_id: str
+    attempt_id: str
+    mutations: list[dict]
+    registered: bool = False
+    _registration_lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
+
+
+@dataclass
+class _MutationBookBinding:
+    book: MutationBook | None
+
+
+_active_mutation_book: ContextVar[_MutationBookBinding | None] = ContextVar("active_mutation_book", default=None)
+
+
+@contextmanager
+def mutation_book_scope(book: MutationBook):
+    binding = _MutationBookBinding(book)
+    token = _active_mutation_book.set(binding)
+    try:
+        yield
+    finally:
+        # 工作线程可能复制上下文，退出时同时释放这些副本里的账本引用。
+        binding.book = None
+        _active_mutation_book.reset(token)
+
+
+def current_mutation_book(run_id: str, attempt_id: str) -> MutationBook | None:
+    binding = _active_mutation_book.get()
+    book = binding.book if binding is not None else None
+    if book is not None and (book.run_id, book.attempt_id) == (run_id, attempt_id):
+        return book
+    return None
 
 
 # LLM: This is one immutable candidate for reducing native history; binding and generation are
@@ -3194,43 +3236,24 @@ def _record_tool_post_archive(agent, record, archive_record, result_rendered):
     _observe_turn_asset_mutations(agent, record, archive_record)
 
 
-# LLM: 同run/attempt只保原live_archive_state引用，异常不改回执、不进入工具循环；开关关闭或子代理不捕获。
-# 函数用途: 将工具完成事实接入有界脚本变更账。
 def _observe_turn_asset_mutations(agent, record, archive_record):
+    """把工具完成事实记在当前尝试的账本中，Compact 参数副本共用同一本账。"""
     try:
         if not getattr(getattr(agent, 'config', None), 'enable_self_learning', False):
             return
         params = record.params
         if getattr(params, 'context_scope', '') == 'task_local':
             return
+        mutation_book = current_mutation_book(getattr(params, 'run_id', ''), getattr(params, 'attempt_id', ''))
+        if mutation_book is None or mutation_book.registered:
+            return
         from ..assets.mutation_ledger import AssetMutationLedger, evolution_receipt
 
         home = agent.home_paths.owner_home_dir
-        state = params.live_archive_state
-        key = (getattr(params, 'run_id', ''), getattr(params, 'attempt_id', ''))
-        states = getattr(agent, '_asset_mutation_states', None)
-        if states is None:
-            states = agent._asset_mutation_states = {}
-        if key not in states and len(states) >= 32:
-            # 超过 32 个并发/历史 (run_id, attempt_id) 键时优先淘汰最早一条无真实写入记录的键；
-            # 若 32 条均记录过变更，再按插入顺序淘汰最老一条，避免静默丢弃第 33+ 条变更追踪。
-            evict_key = next(
-                (
-                    candidate_key
-                    for candidate_key, candidate_state in states.items()
-                    if not (
-                        isinstance(candidate_state, dict)
-                        and isinstance(candidate_state.get('asset_mutations'), dict)
-                        and (
-                            candidate_state['asset_mutations'].get('targets')
-                            or candidate_state['asset_mutations'].get('executions')
-                        )
-                    )
-                ),
-                next(iter(states)),
-            )
-            states.pop(evict_key, None)
-        states[key] = state
+        # 原账本聚合目标、执行与归属，整个尝试只维护同一份聚合状态。
+        if not mutation_book.mutations:
+            mutation_book.mutations.append({})
+        state = mutation_book.mutations[0]
         from ..assets.asset_metadata import normalize_member_of
 
         book = state.setdefault('asset_mutations', {'targets': {}, 'evidence_tags': []})

@@ -462,22 +462,25 @@ def test_post_archive_hook_preserves_receipt(capture, monkeypatch):
     from agent_py_agent.agent.agent_core import _tool_loop_service as loop
     from agent_py_agent.agent.conversation import tool_discovery
 
-    _, state, home, work = capture
+    _, _, home, work = capture
     (work / 'a.py').write_text('pass\n')
     agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), root=work,
                             home_paths=SimpleNamespace(owner_home_dir=home))
-    record = SimpleNamespace(params=SimpleNamespace(live_archive_state=state, run_id='run', attempt_id='a',
+    book = loop.MutationBook('run', 'a', [])
+    record = SimpleNamespace(params=SimpleNamespace(run_id=book.run_id, attempt_id=book.attempt_id,
                                                     in_use_method_ids=('owner:carried',)),
         call=SimpleNamespace(tool_name='write_file', arguments={'path': 'a.py'}, call_id='c'),
         result=SimpleNamespace(ok=True, output={'written': True}, error_code=''))
     monkeypatch.setattr(loop, '_record_tool_call_ir_if_native', lambda record, rendered: None)
     monkeypatch.setattr(tool_discovery, 'persist_discovered_tools', lambda agent, params, archive: None)
     before = json.dumps(record.result.output).encode()
-    loop._record_tool_post_archive(agent, record, {'tool': 'write_file'}, 'unchanged')
-    assert state['asset_mutations']['targets']
-    assert state['asset_mutations']['member_of'] == [{'kind': 'skill', 'id': 'carried'}]
-    monkeypatch.setattr(AssetMutationLedger, 'observe', None)
-    loop._record_tool_post_archive(agent, record, {'tool': 'write_file'}, 'unchanged')
+    with loop.mutation_book_scope(book):
+        loop._record_tool_post_archive(agent, record, {'tool': 'write_file'}, 'unchanged')
+        [state] = book.mutations
+        assert state['asset_mutations']['targets']
+        assert state['asset_mutations']['member_of'] == [{'kind': 'skill', 'id': 'carried'}]
+        monkeypatch.setattr(AssetMutationLedger, 'observe', None)
+        loop._record_tool_post_archive(agent, record, {'tool': 'write_file'}, 'unchanged')
     assert json.dumps(record.result.output).encode() == before
 
 
