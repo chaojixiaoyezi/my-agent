@@ -507,8 +507,8 @@ def test_touch_recreates_missing_leaf_and_rejects_symlink_parent(tmp_path, monke
 
 def test_portable_sweep_keeps_reachable_and_deletes_only_aged_regular_leaf(tmp_path, monkeypatch):
     from agent_py_agent.agent.common import nofollow_fs as fs
-    from agent_py_agent.agent.user_space import directory_paging
     from agent_py_agent.agent.conversation.hamt_reachability import sweep_unreachable_nodes
+    from agent_py_agent.agent.user_space import directory_paging
 
     namespace = tmp_path / "index"
     namespace.mkdir()
