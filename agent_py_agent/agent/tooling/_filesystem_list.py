@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..common.cancellation import raise_if_cancelled
+from ..common.nofollow_fs import NoFollowPathError
 from ..path_access_policy import PATH_SCOPE_FULL, PATH_SCOPE_NORMAL, PATH_SCOPE_OWNER_WALL
 from ._filesystem_helpers import (
     _FALLBACK_SCAN_MAX_SECONDS,
@@ -169,13 +170,16 @@ class ListFilesTool(FileSystemTool):
         is_dir: bool,
         is_file: bool,
         request: _ListFilesRequest,
+        display: str | None = None,
     ) -> bool:
         if (is_dir and not request.include_dirs) or (is_file and not request.include_files):
             return False
         if not request.file_glob:
             return True
-        display = self.display_path(item)
-        return fnmatch.fnmatch(item.name, request.file_glob) or fnmatch.fnmatch(display, request.file_glob)
+        # 名称命中时不再计算显示路径；选取阶段对宽目录的每个叶调用本谓词，由遍历给出同值的显示路径。
+        return fnmatch.fnmatch(item.name, request.file_glob) or fnmatch.fnmatch(
+            self.display_path(item) if display is None else display, request.file_glob,
+        )
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,12 @@ def _path_sort_key(text: str) -> _ListKey:
     return (text.lower(), text)
 
 
+# 目录身份取跟随链接后的 (st_dev, st_ino)，联接点因此绑定其目标；路径已不是目录时返回 None。
+def _directory_identity(directory: str) -> tuple[int, int] | None:
+    info = os.stat(directory)
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+
+
 class _ListWalkNode(NamedTuple):
     key: _ListKey
     scan_directory: str
@@ -320,6 +330,16 @@ class _ListWalkNode(NamedTuple):
     resume_scan: bool = False
     resolved_directory: Path | None = None
     is_reparse_point: bool = False
+    # 待下钻目录在已核验的父目录选取窗口内记录的身份；根目录首轮选取时为 None。
+    identity: tuple[int, int] | None = None
+
+
+# 子目录已消失或不再是目录时不记录身份：条目照常判定，延迟下钻因缺少身份而跳过。
+def _bind_directory_identity(child: _ListWalkNode) -> _ListWalkNode:
+    try:
+        return child._replace(identity=_directory_identity(child.key[1]))
+    except OSError:
+        return child
 
 
 class _LazyListWalk:
@@ -358,14 +378,35 @@ class _LazyListWalk:
         )
         return cls(tool, target, request, file_filter=file_filter)
 
-    def _schedule_descent(self, directory: str, *, depth: int, resolved_directory: Path | None = None) -> None:
+    def _schedule_descent(
+        self, directory: str, *, depth: int, resolved_directory: Path | None = None,
+        identity: tuple[int, int] | None = None,
+    ) -> None:
         # "/" 中断 Unicode 大小写上下文。每个后代的排序键都大于这个前缀，
         # 所以能按真实全局顺序延迟下钻，即使相邻目录仅大小写不同。
         prefix = directory.rstrip("/") + "/"
         heapq.heappush(
             self._pending,
-            _ListWalkNode(_path_sort_key(prefix), directory, depth, resolved_directory=resolved_directory),
+            _ListWalkNode(
+                _path_sort_key(prefix), directory, depth, resolved_directory=resolved_directory, identity=identity,
+            ),
         )
+
+    def _leaf_display(self, directory: str) -> Callable[[str, str], str]:
+        # display_path 逐项按深度构造路径；同一目录的普通子项与目录同属工作区内或外，显示路径即目录显示加名称。
+        # 子项本身是工作区根时归属会变，仍逐项调用 display_path。
+        parent = Path(directory)
+        base = self._tool.display_path(parent)
+        roots = (self._tool.workspace_root, *self._tool.workspace_roots)
+        exact = {os.path.normcase(root.name) for root in roots if root.parent == parent and root != parent}
+
+        def display(name: str, text: str) -> str:
+            if exact and os.path.normcase(name) in exact:
+                return self._tool.display_path(Path(text))
+            name = name.replace("\\", "/")
+            return name if base == "." else base.rstrip("/") + "/" + name
+
+        return display
 
     def _can_descend(self, depth: int) -> bool:
         return self._request.recursive and (not self._request.max_depth or depth < self._request.max_depth)
@@ -395,7 +436,7 @@ class _LazyListWalk:
                 )
                 if safe is not None:
                     if node.is_dir:
-                        self._schedule_descent(node.key[1], depth=node.depth)
+                        self._schedule_descent(node.key[1], depth=node.depth, identity=node.identity)
                     elif node.is_file and (self._after_key is None or node.key > self._after_key):
                         return item, False
                 continue
@@ -412,7 +453,10 @@ class _LazyListWalk:
             if node.is_dir and self._can_descend(node.depth) and (
                 not managed or policy.is_admin_readable_service_log_ancestor(resolved)
             ):
-                self._schedule_descent(node.key[1], depth=node.depth, resolved_directory=resolved if resolved != item else None)
+                self._schedule_descent(
+                    node.key[1], depth=node.depth, resolved_directory=resolved if resolved != item else None,
+                    identity=node.identity,
+                )
             if run_id is not None or managed or (self._after_key is not None and node.key <= self._after_key):
                 continue
             is_dir = node.is_dir or (node.is_symlink and item.is_dir())
@@ -433,6 +477,12 @@ class _LazyListWalk:
         folded_prefix = prefix.lower()
         depth = marker.depth + 1
         can_descend = self._can_descend(depth)
+        # 列表的类型与 glob 筛选在选取时作用于叶：既不会输出也不会下钻的条目不占批次名额，
+        # 稀疏或零命中的平铺页因此只需一次按宽度的枚举。链接的类型未知，只按 glob 预筛，出队时再精确判定。
+        filter_leaves = self._file_filter is None and bool(
+            self._request.file_glob or not self._request.include_dirs or not self._request.include_files
+        )
+        leaf_display = self._leaf_display(directory) if filter_leaves and self._request.file_glob else None
         cursor = self._after_key
         batch_after = marker.key if marker.resume_scan else None
         accepted = 0
@@ -473,6 +523,11 @@ class _LazyListWalk:
                 )
                 if self._file_filter is not None and (is_reparse_point or not (is_dir or is_file)):
                     continue
+                if filter_leaves and not (is_dir and can_descend) and not self._tool._list_item_visible(
+                    Path(key[1]), is_dir=is_dir, is_file=is_file, request=self._request,
+                    display=leaf_display(name, key[1]) if leaf_display is not None else None,
+                ):
+                    continue
                 accepted += 1
                 yield _ListWalkNode(
                     key, "", depth, is_dir, is_symlink, is_file,
@@ -480,18 +535,27 @@ class _LazyListWalk:
                 )
 
         try:
+            # 下钻目录必须仍是父目录选取时记录的同一目录；根目录首轮选取记录身份，供其续扫批次比对。
+            identity = _directory_identity(directory)
+            expected = identity if marker.depth == 0 and marker.identity is None else marker.identity
+            if identity is None or identity != expected:
+                raise NoFollowPathError("listed directory changed before enumeration")
             with os.scandir(directory) as entries:
                 batch = heapq.nsmallest(self._MAX_BATCH_ENTRIES, candidates(entries))
+            batch = [_bind_directory_identity(child) if child.is_dir and can_descend else child for child in batch]
+            # 按路径枚举，与 directory_page 的可移植分支相同：选取前后身份一致才发布本批名称。
+            if _directory_identity(directory) != identity:
+                raise NoFollowPathError("listed directory changed during enumeration")
         except OSError:
             if not self._request.recursive or self._file_filter is not None:
                 raise
-            return  # 保留递归枚举跳过不可读或消失目录的行为。
+            return  # 保留递归枚举跳过不可读、消失或已被替换目录的行为。
         raise_if_cancelled()
         for child in batch:
             heapq.heappush(self._pending, child)
         if accepted > len(batch):
             # 同键的真实条目先出队。下一批只选位于该键之后的同层条目。
-            heapq.heappush(self._pending, marker._replace(key=batch[-1].key, resume_scan=True))
+            heapq.heappush(self._pending, marker._replace(key=batch[-1].key, resume_scan=True, identity=identity))
 
 
 def _offset_page_window(request: _OffsetPageWindowRequest) -> dict[str, int | bool | str]:

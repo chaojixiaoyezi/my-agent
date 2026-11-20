@@ -127,6 +127,8 @@ def mixed_tree(tmp_path, request):
     {"recursive": True, "include_files": False},
     {"recursive": True, "file_glob": "*.txt", "include_ignored": False},
     {"recursive": False},
+    {"recursive": True, "file_glob": "a*/leaf.txt"},
+    {"recursive": False, "file_glob": "link-*", "include_dirs": False},
 ])
 def test_offset_pages_match_legacy_order(mixed_tree, params):
     tool, root, owner = mixed_tree
@@ -377,15 +379,24 @@ def test_cursor_merges_case_colliding_directory_names(tmp_path, monkeypatch, lim
     ]
     expected.sort(key=lambda row: (row.rstrip("/").lower(), row.rstrip("/")))
     original = os.scandir
+    original_identity = list_module._directory_identity
+    virtual_directories = sorted((root / parent).as_posix() for parent in files)
 
     def enumerate_tree(path):
         names = choices.get(Path(path).as_posix())
         return _Scandir(entry for entry in names) if names is not None else original(path)
 
+    def identity(directory):
+        # Virtual directories have no inode; give each one a stable identity.
+        if directory in virtual_directories:
+            return (0, virtual_directories.index(directory) + 1)
+        return original_identity(directory)
+
     actual = []
     cursor = ""
     with monkeypatch.context() as scoped:
         scoped.setattr(os, "scandir", enumerate_tree)
+        scoped.setattr(list_module, "_directory_identity", identity)
         for _ in range(len(expected) + 1):
             result = tool.execute({"recursive": True, "after_entry": cursor})
             actual.extend(_rows(result))
@@ -504,3 +515,141 @@ def test_cancelled_selection_closes_iterator(tmp_path, monkeypatch):
             tool.execute({"recursive": True})
     assert closed
     assert 300 <= read_count <= 300 + 256
+
+
+def _counted_wide_root(monkeypatch, root, virtual_entries):
+    original = os.scandir
+    scans = []
+
+    def unordered(path):
+        if isinstance(path, (str, Path)) and Path(path) == root:
+            scans.append(path)
+            return _Scandir(entry for entry in virtual_entries)
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", unordered)
+    return scans
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+@pytest.mark.parametrize(("params", "expected_scans"), [
+    ({"file_glob": "*.missing", "include_ignored": False}, 1),
+    # The implicit ignore fallback adds exactly one more bounded pass.
+    ({"file_glob": "*.missing"}, 2),
+    ({"file_glob": "z4999[5-9].txt", "include_ignored": False}, 1),
+    ({"include_files": False}, 1),
+])
+def test_sparse_filter_first_page_enumerates_wide_directory_once(
+    tmp_path, monkeypatch, wide_entries, recursive, params, expected_scans,
+):
+    root = tmp_path.resolve()
+    virtual_entries, ordered = wide_entries
+    pattern = params.get("file_glob", "")
+    expected = [
+        name for name in ordered
+        if params.get("include_files", True) and (not pattern or fnmatch.fnmatch(name, pattern))
+    ]
+    scans = _counted_wide_root(monkeypatch, root, virtual_entries)
+    result = ListFilesTool(root, max_entries=50).execute({**params, "recursive": recursive, "offset": 0, "limit": 1})
+    assert _rows(result) == expected[:1]
+    assert result.result_envelope["page_window"]["complete"] == (len(expected) <= 1)
+    assert len(scans) == expected_scans
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+def test_sparse_glob_keyset_pages_keep_order_and_enumerate_once_per_page(
+    tmp_path, monkeypatch, wide_entries, recursive,
+):
+    root = tmp_path.resolve()
+    virtual_entries, ordered = wide_entries
+    pattern = "[az]4999[5-9].txt"
+    expected = [name for name in ordered if fnmatch.fnmatch(name, pattern)]
+    assert len(expected) == 10
+    scans = _counted_wide_root(monkeypatch, root, virtual_entries)
+    tool = ListFilesTool(root, max_entries=3)
+    actual = []
+    cursor = ""
+    for _ in range(len(expected)):
+        before = len(scans)
+        result = tool.execute({"recursive": recursive, "file_glob": pattern, "include_ignored": False,
+                               "after_entry": cursor})
+        page = _rows(result)
+        actual.extend(page)
+        assert len(scans) == before + 1
+        if result.result_envelope["page_window"]["complete"]:
+            break
+        next_cursor = result.result_envelope["next_after_entry"]
+        assert next_cursor == page[-1]
+        assert (next_cursor.lower(), next_cursor) > (cursor.lower(), cursor)
+        cursor = next_cursor
+    assert actual == expected
+
+
+@pytest.fixture
+def replaceable_tree(tmp_path):
+    root = tmp_path / "home" / "owners" / "local" / "main"
+    _write(root / "a" / "b" / "visible.txt")
+    _write(root / "data" / "plugins" / "b" / "secret.txt")
+    tool = ListFilesTool(root, max_entries=50, access_options=FileSystemAccessOptions(owner_scope_root=str(root)))
+    assert tool.path_access_policy.is_host_managed_store_resolved(root.resolve() / "data" / "plugins")
+
+    def replace_ancestor():
+        # One namespace replacement: the queued path a/b now resolves inside the managed store.
+        if not (root / "a").is_symlink():
+            (root / "a").rename(root / "a-moved")
+            _link(root / "a", root / "data" / "plugins", directory=True)
+
+    return tool, root.resolve(), replace_ancestor
+
+
+def test_delayed_descent_rejects_directory_whose_identity_changed(replaceable_tree, monkeypatch):
+    tool, root, replace_ancestor = replaceable_tree
+    original_visible = tool._list_item_visible
+
+    def replace_after_queueing(item, **kwargs):
+        # a/b is checked for output after its descent was queued and before it is enumerated.
+        if item == root / "a" / "b":
+            replace_ancestor()
+        return original_visible(item, **kwargs)
+
+    monkeypatch.setattr(tool, "_list_item_visible", replace_after_queueing)
+    rows = _rows(tool.execute({"recursive": True}))
+    assert rows[:2] == ["a/", "a/b/"]
+    assert not [row for row in rows if row.startswith("a/b/") and row != "a/b/"]
+    assert (root / "a" / "b" / "secret.txt").is_file()
+
+
+def test_selection_discards_batch_when_directory_is_replaced_during_enumeration(replaceable_tree, monkeypatch):
+    tool, root, replace_ancestor = replaceable_tree
+    original = os.scandir
+
+    def replace_then_enumerate(path):
+        if isinstance(path, (str, Path)) and Path(path) == root / "a" / "b":
+            replace_ancestor()
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", replace_then_enumerate)
+    rows = _rows(tool.execute({"recursive": True}))
+    assert rows[:2] == ["a/", "a/b/"]
+    assert not [row for row in rows if row.startswith("a/b/") and row != "a/b/"]
+    assert (root / "a" / "b" / "secret.txt").is_file()
+
+
+@pytest.mark.parametrize(("listed", "params"), [
+    # The workspace root is itself a child of the listed directory and displays as ".".
+    ("parent", {"file_glob": "."}),
+    ("parent", {"recursive": True, "file_glob": "*w*/*"}),
+    # A nested extra root and its subtree display as absolute paths.
+    ("workspace", {"recursive": True, "file_glob": "/*"}),
+    ("workspace", {"recursive": True, "file_glob": "nested*"}),
+])
+def test_selection_display_matches_display_path_across_workspace_roots(tmp_path, listed, params):
+    base = tmp_path.resolve()
+    workspace = base / "w"
+    for path in ("w/a.txt", "w/nested/b.txt", "w/nested/deep/c.txt", "w-sibling/d.txt", "outside.txt"):
+        _write(base / path)
+    tool = ListFilesTool(workspace, max_entries=50, workspace_roots=[workspace, workspace / "nested"])
+    root = base if listed == "parent" else workspace
+    expected = _legacy_order(tool, root, params)
+    assert expected
+    assert _rows(tool.execute({**params, "path": str(root)})) == expected
