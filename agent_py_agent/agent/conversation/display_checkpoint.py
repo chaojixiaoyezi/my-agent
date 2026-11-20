@@ -11,6 +11,8 @@ import threading
 from collections.abc import Mapping
 from typing import TypedDict
 
+from .background_publication_gate import WITHHELD_TEXT, is_withheld_publication
+
 DISPLAY_CHECKPOINT_ROLE = "display"
 DISPLAY_CHECKPOINT_SCHEMA = "conversation_display_event.v1"
 _TERMINAL_KINDS = frozenset({
@@ -119,7 +121,12 @@ def display_checkpoint_event(row: object, *, live: bool = False) -> dict | None:
     checked = display_checkpoint_metadata(**{key: value[key] for key in (*fields, "payload")})
     if checked is None:
         return None
-    kind, phase, payload = value["kind"], value["phase"], copy.deepcopy(value["payload"])
+    kind, phase, payload = value["kind"], value["phase"], value["payload"]
+    if is_withheld_publication(metadata) or is_withheld_publication(payload):
+        kind, phase = "system_message", "completed"
+        payload = {"text": WITHHELD_TEXT, "publication_decision": "withheld"}
+    else:
+        payload = copy.deepcopy(payload)
     if kind in _START_KINDS:
         if live:
             if not gateway_display_recovery(value):

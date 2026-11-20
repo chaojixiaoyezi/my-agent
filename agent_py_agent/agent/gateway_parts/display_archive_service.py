@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+from ..conversation.background_publication_gate import WITHHELD_TEXT
 from ..conversation.display_archive import (
     DisplayArchiveError,
     read_display_archive_page,
@@ -33,7 +34,15 @@ def read_gateway_display_page(
         if (error is not None or metadata.get("thread_kind") != "agent"
                 or metadata.get("root_agent_thread_id") != thread.thread_id):
             raise DisplayArchiveError("DISPLAY_SCOPE_DENIED", "当前会话无权读取这份原文。")
-    return read_display_archive_page(store, reference, page_index)
+    page = read_display_archive_page(store, reference, page_index)
+    if any(row.get("kind") == "withheld" for row in page["rows"]):
+        page["rows"] = [
+            {"kind": "withheld", "text": WITHHELD_TEXT, "row_index": row["row_index"],
+             "part_index": row["part_index"], "part_count": row["part_count"]}
+            for row in page["rows"] if row.get("kind") == "withheld"
+        ]
+        page["publication_decision"] = "withheld"
+    return page
 
 
 # LLM: The endpoint requires existing authentication and structured conversation identity. Bodies

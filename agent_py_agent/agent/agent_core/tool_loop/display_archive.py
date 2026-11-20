@@ -18,7 +18,14 @@ def archive_tool_display(event: Any, raw_display: object) -> dict[str, object]:
         return {}
     from ...conversation.display_archive import archive_display_rows
     try:
-        return archive_display_rows(agent, thread_id=thread_id, rows=_safe_rows(event, raw_display))
+        rows = _safe_rows(event, raw_display)
+        writer = getattr(event.request.params, "on_chunk", None)
+        publish = getattr(type(writer), "archive_tool_rows", None)
+        if callable(publish):
+            if writer.thread_id != thread_id:
+                return {"schema": "display_archive_error.v1", "error_code": "DISPLAY_ARCHIVE_WRITE_FAILED"}
+            return publish(writer, rows)
+        return archive_display_rows(agent, thread_id=thread_id, rows=rows)
     except Exception:  # noqa: BLE001 显示归档失败不能使已执行工具重跑，错误不泄露宿主路径
         return {"schema": "display_archive_error.v1", "error_code": "DISPLAY_ARCHIVE_WRITE_FAILED"}
 

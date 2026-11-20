@@ -1139,7 +1139,7 @@ def test_withheld_delivery_keeps_real_sink_display_events_out_of_user_history(tm
         )
         sink.finish()
         snapshot = sink.display_history_snapshot()
-        assert snapshot["complete"] is True and marker in json.dumps(snapshot, ensure_ascii=False)
+        assert snapshot["complete"] is True and marker not in json.dumps(snapshot, ensure_ascii=False)
         return snapshot
 
     # 已有 operation 且无可核验绑定：无论计数如何都应扣留，这里不传计数。
@@ -1166,17 +1166,17 @@ def test_withheld_delivery_keeps_real_sink_display_events_out_of_user_history(tm
         rows = case.agent.conversation_store.messages.history_page_report(case.thread.thread_id, limit=20).rows
         return [row for row in rows if row.metadata.get("assistant_part_id") == "final"][-1]
 
-    # 1. Withheld (no exact binding): adapter message, canonical final row, its replay projection and the frozen
-    #    payload hold no marker. (Live display checkpoint rows are written by the sink itself, outside delivery.)
+    # 所有发布端口用同一回合的扣留回执，待决展示只在 sink 内暂存。
     withheld_request = _credential_request(case, "gwreq-sink-withheld-" + uuid.uuid4().hex[:8])
     withheld = deliver(withheld_request, "withheld", f"后台汇总 {marker}")
     assert "已安全扣留" in withheld.content
     assert case.adapter.finals and all(marker not in str(item) for item in case.adapter.finals)
     row = last_final_row()
     assert row.metadata["credential_delivery_withheld"] == _WITHHELD_DIAGNOSTICS["credential_delivery_withheld"]
-    assert "background_display_turn" not in row.metadata
     assert marker not in json.dumps({"content": row.content, "metadata": row.metadata}, ensure_ascii=False, default=str)
-    assert background_display_turn_from_row(row) is None
+    replay = background_display_turn_from_row(row)
+    assert replay is not None
+    assert any(event["payload"].get("publication_decision") == "withheld" for event in replay["events"])
     pending = case.agent.conversation_store.wakes.pending_one(withheld_request.wake_signal["wake_signal_id"])
     frozen = cached_owner_delivery(pending) if pending is not None else None
     assert frozen is None or marker not in json.dumps(frozen, ensure_ascii=False, default=str)

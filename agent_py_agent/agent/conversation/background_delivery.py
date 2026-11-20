@@ -6,6 +6,7 @@ import inspect
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
@@ -17,6 +18,14 @@ from ..common.credential_artifact_paths import (
     user_artifact_subpath_parts,
 )
 from ..scheduler.execution import scheduled_local_delivery
+from .background_publication_gate import (
+    WITHHELD_TEXT,
+    PublicationGate,
+    PublicationWrite,
+    attached_publication_sink,
+    has_publication_provenance,
+    is_withheld_publication,
+)
 from .background_receipt_contract import public_receipt_delivery_block
 from .channels import (
     PROACTIVE_PUSH_CHANNELS,
@@ -87,33 +96,39 @@ def record_background_response(
     tool_call_count: int | None = None,
     goal_slice_facts: dict[str, object] | None = None,
 ) -> BackgroundDeliveryCommit:
-    # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
-    # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
-    if (internal := _record_delegated_internal_response(
-        delivery, request, delivery_context, internal_content, delivery_artifacts=delivery_artifacts,
-        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot, frozen_retry=frozen_retry,
-        operation_verification=operation_verification, tool_call_count=tool_call_count,
-    )) is not None:
-        return internal
-    from ..scheduler.alert_delivery import record_alert_delivery
+    sink = attached_publication_sink(request)
+    try:
+        # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
+        # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
+        if (internal := _record_delegated_internal_response(
+            delivery, request, delivery_context, internal_content, delivery_artifacts=delivery_artifacts,
+            assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot, frozen_retry=frozen_retry,
+            operation_verification=operation_verification, tool_call_count=tool_call_count,
+        )) is not None:
+            return internal
+        from ..scheduler.alert_delivery import record_alert_delivery
 
-    options = dict(public_receipt=public_receipt, delivery_artifacts=delivery_artifacts,
-        operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
-        display_snapshot=display_snapshot, deliver=deliver, delivery_reason=delivery_reason,
-        route_supports_transcript=route_supports_transcript, frozen_retry=frozen_retry,
-        local_transcript_only=local_transcript_only, tool_call_count=tool_call_count,
-        goal_slice_facts=goal_slice_facts)
-    multi = record_alert_delivery(delivery, request, delivery_context, internal_content,
-        record_one=_record_background_owner_response, options=options)
-    if multi is not None:
-        return multi
-    return _record_background_owner_response(
-        delivery, request, delivery_context, internal_content, public_receipt=public_receipt,
-        delivery_artifacts=delivery_artifacts, operation_verification=operation_verification,
-        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot,
-        deliver=deliver, delivery_reason=delivery_reason, route_supports_transcript=route_supports_transcript,
-        frozen_retry=frozen_retry, local_transcript_only=local_transcript_only, tool_call_count=tool_call_count,
-        goal_slice_facts=goal_slice_facts)
+        options = dict(public_receipt=public_receipt, delivery_artifacts=delivery_artifacts,
+            operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
+            display_snapshot=display_snapshot, deliver=deliver, delivery_reason=delivery_reason,
+            route_supports_transcript=route_supports_transcript, frozen_retry=frozen_retry,
+            local_transcript_only=local_transcript_only, tool_call_count=tool_call_count,
+            goal_slice_facts=goal_slice_facts)
+        multi = record_alert_delivery(delivery, request, delivery_context, internal_content,
+            record_one=_record_background_owner_response, options=options)
+        if multi is not None:
+            return multi
+        return _record_background_owner_response(
+            delivery, request, delivery_context, internal_content, public_receipt=public_receipt,
+            delivery_artifacts=delivery_artifacts, operation_verification=operation_verification,
+            assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot,
+            deliver=deliver, delivery_reason=delivery_reason, route_supports_transcript=route_supports_transcript,
+            frozen_retry=frozen_retry, local_transcript_only=local_transcript_only, tool_call_count=tool_call_count,
+            goal_slice_facts=goal_slice_facts)
+    finally:
+        if sink is not None:
+            sink.abandon_publication()
+            object.__delattr__(request, "_background_publication_sink")
 
 
 # LLM: 原owner信封提交保留冻结回执、代次、渠道与canonical的完整顺序；仅由上层排除未外发委派内部结果。
@@ -161,6 +176,10 @@ def _record_background_owner_response(
         operation_verification=operation_verification,
         tool_call_count=tool_call_count,
     )
+    gate = _delivery_publication_gate(request, cred_diagnostics)
+    withheld = gate.decision == "withheld"
+    if withheld:
+        operation_verification = None
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
                                               has_attachments=bool(_channel_attachments(delivery_artifacts)), frozen_retry=frozen_retry):
         return _uncommitted_delivery("", block)
@@ -177,7 +196,7 @@ def _record_background_owner_response(
         return _uncommitted_delivery(projection.content if deliver else "", "suppressed")
     # 信封只携带用户投影，避免投递层把内部控制正文当作普通回复。
     attachments = _channel_attachments(delivery_artifacts, owner_root=str(getattr(getattr(delivery.agent, 'home_paths', None), 'owner_home_dir', '') or ''))
-    evidence_refs = _background_evidence_refs_for(delivery, request, frozen_retry)
+    evidence_refs = () if withheld else _background_evidence_refs_for(delivery, request, frozen_retry)
     # 重投路径由 redeliver_cached_wake 把冻结载荷的 delivery_artifacts 当作 delivery_artifacts
     # 传进来，因此附件与过程回复必须继续从参数推导；重投只额外接管 metadata 与"是否已外发"。
     envelope = ReplyEnvelope(
@@ -192,7 +211,7 @@ def _record_background_owner_response(
         delivery_artifacts=delivery_artifacts,
         evidence_refs=evidence_refs,
         operation_verification=operation_verification,
-        frozen_retry=frozen_retry,
+        frozen_retry=None if withheld else frozen_retry,
         public_receipt=public_receipt,
     )
     if frozen_retry is None:
@@ -208,6 +227,8 @@ def _record_background_owner_response(
         message_metadata["scheduler_delivery_event_key"] = delivery_event_key
     if cred_diagnostics:
         message_metadata.update(cred_diagnostics)
+    if withheld:
+        message_metadata["publication_decision"] = "withheld"
     if cred_verified:
         message_metadata["credential_redaction_verified"] = True
     route = _local_only_route(_background_delivery_route(
@@ -238,13 +259,13 @@ def _record_background_owner_response(
         ownership=route.ownership, canonical_record=bool(route.canonical_record and origin_valid or delivery_status == 'sent'),
         persisted=False, credential_redaction_verified=cred_verified,
         goal_slice_facts=frozen_retry.goal_slice_facts if frozen_retry is not None else goal_slice_facts)
+    persist_frozen = partial(_freeze_pending_owner_delivery, delivery.store)
     if delivery_observer is not None:
-        delivery_observer(freeze)
+        gate.write("frozen_retry", PublicationWrite(freeze, delivery_observer, withheld))
     if (delivery_status == 'sent' or freeze.canonical_record) and delivery_observer is None:
         # 本地 origin 同样欠 canonical；在 commentary/final 的任何可能失败写入前冻结整封。
-        # local/none 的内部转录仍由 _freeze_pending_owner_delivery 明确排除，不混成外发义务。
-        _freeze_pending_owner_delivery(delivery.store, freeze)
-    commit = _commit_background_response(
+        gate.write("frozen_retry", PublicationWrite(freeze, persist_frozen, withheld))
+    commit = gate.publish("final", PublicationWrite(None, lambda _: _commit_background_response(
         delivery,
         request,
         delivery_context,
@@ -258,9 +279,11 @@ def _record_background_owner_response(
         assistant_commentaries=assistant_commentaries,
         display_snapshot=display_snapshot,
         audit_refs_settled=bool(frozen_retry is not None and frozen_retry.external_sent),
-    )
-    # 多线observer已将完整目标回执和原结果写入同一outbox；共享账本错误由observer上抛，不伪装为单目标失败。
-    frozen_now = _freeze_pending_owner_delivery(delivery.store, replace(freeze, persisted=commit.persisted)) if delivery_observer is None else False
+    ), withheld))
+    # 多线 observer 接管该目标的冻结写入，单路线仍在 canonical 回执后结算。
+    frozen_now = delivery_observer is None and gate.publish("frozen_retry", PublicationWrite(
+        replace(freeze, persisted=commit.persisted), persist_frozen, withheld,
+    ))
     if background_owner_delivery_committed(request, target=delivery_context.target,
             ownership=route.ownership, canonical_record=route.canonical_record, commit=commit):
         from .guidance_reply_obligations import settle
@@ -303,13 +326,16 @@ def _record_delegated_internal_response(delivery, request, context, content, *,
         tool_call_count=tool_call_count,
     )
     internal_context = replace(context, channel="internal", target="", thread_id=request.thread_id)
-    return _commit_background_response(delivery, request, internal_context,
+    gate = _delivery_publication_gate(request, cred_diagnostics)
+    return gate.publish("final", PublicationWrite(None, lambda _: _commit_background_response(delivery, request, internal_context,
         receipt=SimpleNamespace(content=content), delivery_status="local_only",
         committed_content=project_user_reply(content).content,
         canonical_record=True, transcript_route=True, evidence_refs=(),
         message_metadata={"session_task_id": delegated.task_id, "delivery_reason": "delegated_internal_result",
-                          "delivery_artifacts": list(delivery_artifacts), **cred_diagnostics},
-        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot)
+                          "delivery_artifacts": list(delivery_artifacts),
+                          "credential_redaction_verified": _cred_verified, **cred_diagnostics},
+        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot),
+        gate.decision == "withheld"))
 
 
 # LLM: 已external_sent冻结事实只授权canonical收尾，未外发信封仍核当前代次且实际运输另走begin CAS；普通任务仅只读。
@@ -1256,11 +1282,7 @@ def _request_has_credential_provenance(
     request: BackgroundDeliveryRequest,
     frozen_retry: FrozenOwnerDelivery | None,
 ) -> bool:
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    meta = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
-    if str(meta.get("input_provider") or "").strip().lower() == "credential":
-        return True
-    if isinstance(meta.get("credential_result"), dict) or meta.get("credential_ref"):
+    if has_publication_provenance(request):
         return True
     if frozen_retry is not None and isinstance(frozen_retry.message_metadata, dict):
         fmeta = frozen_retry.message_metadata
@@ -1349,9 +1371,8 @@ def _unverified_credential_delivery_withheld() -> tuple[
     bool,
     dict[str, object],
 ]:
-    # 扣留时显示快照一并置空：canonical 行、历史回放与冻结载荷都不携带未核验事件、嵌套内容或归档引用。
     return (
-        "[内容因重启后凭据脱敏状态无法核验已安全扣留]",
+        WITHHELD_TEXT,
         None,
         (),
         (),
@@ -1387,6 +1408,15 @@ def _zero_tool_turn_exempt(
     if not isinstance(events, list):
         return False
     return not any(isinstance(ev, dict) and "tool" in str(ev.get("kind") or "") for ev in events)
+
+
+def _delivery_publication_gate(request: BackgroundDeliveryRequest, diagnostics: dict) -> PublicationGate:
+    sink = attached_publication_sink(request)
+    run_id = str(request.conversation_turn_id or "")
+    # 冷重投没有执行接收器，只使用本次核对过的冻结投递事实。
+    gate = sink.publication_gate if sink is not None else PublicationGate(run_id)
+    gate.resolve("withheld" if "credential_delivery_withheld" in diagnostics else "verified")
+    return gate
 
 
 def _prepare_credential_safe_background_inputs(
@@ -1436,44 +1466,40 @@ def _prepare_credential_safe_background_inputs(
         found.append(bound_tr)
     active = tuple(found)
 
-    if frozen_retry is not None:
-        if frozen_retry.credential_redaction_verified:
-            return (
-                internal_content,
-                public_receipt,
-                delivery_artifacts,
-                assistant_commentaries,
-                display_snapshot,
-                True,
-                {},
-            )
-        if has_cred_provenance and not active:
-            return _unverified_credential_delivery_withheld()
-        if not active:
-            return (
-                internal_content,
-                public_receipt,
-                delivery_artifacts,
-                assistant_commentaries,
-                display_snapshot,
-                True,
-                {},
-            )
-
-    if not active:
-        if has_cred_provenance and not _zero_tool_turn_exempt(
-            tool_call_count, operation_verification, display_snapshot, delivery_artifacts
-        ):
-            return _unverified_credential_delivery_withheld()
-        return (
-            internal_content,
-            public_receipt,
-            delivery_artifacts,
-            assistant_commentaries,
-            display_snapshot,
-            True,
-            {},
-        )
+    sink = attached_publication_sink(request)
+    frozen_verified = frozen_retry is not None and frozen_retry.credential_redaction_verified
+    frozen_withheld = frozen_retry is not None and is_withheld_publication(
+        frozen_retry.message_metadata, verified=frozen_verified,
+    )
+    zero_tool = frozen_retry is None and not (sink is not None and sink.saw_tool_display) and _zero_tool_turn_exempt(
+        tool_call_count, operation_verification, display_snapshot, delivery_artifacts,
+    )
+    withheld = (
+        frozen_withheld
+        or ((sink is not None or not frozen_verified) and any(tr.withheld for tr in active))
+        or (has_cred_provenance and (sink is not None or not frozen_verified) and not active and not zero_tool)
+    )
+    if sink is not None:
+        # 缓冲的正文必须先经过本次决策选中的脱敏映射，再进入第一个可见端口。
+        projections = () if withheld else tuple(tr.redaction for tr in active)
+        withheld = withheld or any(not tr.active or tr.withheld for tr in active)
+        sink.resolve_publication("withheld" if withheld else "verified", redactions=projections if not withheld else ())
+        withheld = sink.publication_gate.decision == "withheld"
+        # 执行收尾交接的只有结构化终态，发布后的快照从原 sink 重新读取。
+        ended = (display_snapshot or {}).get("turn_end_reason")
+        continuation = (display_snapshot or {}).get("goal_continuation_allowed")
+        display_snapshot = sink.display_history_snapshot()
+        if ended is not None:
+            display_snapshot["turn_end_reason"] = ended
+        if continuation is not None:
+            display_snapshot["goal_continuation_allowed"] = continuation
+        if not withheld and not assistant_commentaries and frozen_retry is None:
+            assistant_commentaries = sink.assistant_commentary_messages()
+    if withheld:
+        content, receipt, artifacts, commentaries, _, verified, diagnostics = _unverified_credential_delivery_withheld()
+        return content, receipt, artifacts, commentaries, display_snapshot if sink is not None else None, verified, diagnostics
+    if frozen_verified or not active:
+        return internal_content, public_receipt, delivery_artifacts, assistant_commentaries, display_snapshot, True, {}
 
     safe_content = str(internal_content or "")
     safe_commentaries = tuple(str(c or "") for c in assistant_commentaries)
