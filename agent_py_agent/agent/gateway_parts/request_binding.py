@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.fast_dataclass import fast_frozen
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
@@ -274,7 +275,8 @@ class GatewayTaskBindingWriter:
 # LLM: This callback is the Gateway adaptation of 会话运行时's active_turn mutex. It validates the
 # immutable execution attempt under T before runtime may reserve input or cross the provider edge.
 # 类用途: 将补充消息认领和模型提交与同一精确 Gateway 回合的结束、停止串行化。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayActiveTurnTransition:
     request_path: Path
     request_id: str

@@ -7,7 +7,7 @@
 # 模块用途: 在后台唤醒车道里记下每次领取尝试的结果，让反复同因失败的唤醒按上限结案、不再被无限领取。
 from __future__ import annotations
 
-import json
+import hashlib
 import threading
 import time
 from collections.abc import Iterator
@@ -15,7 +15,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..runtime_errors import DataCorruptionError
+from ..settings.model_provider_schema import ModelProfileError
 from .background_delivery import cached_owner_delivery
 from .models import WakeSignal
 from .store_wake_attempts import WakeAttemptStart, WakeAttemptStore
@@ -30,12 +33,15 @@ from .wake_poison import (
     WAKE_CLAIM_FINISHED,
     WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     WAKE_REASON_LEDGER_CORRUPT,
+    WAKE_REASON_MODEL_PROFILE_DISABLED,
     WAKE_VERDICT_FAILURE,
     WAKE_VERDICT_NEUTRAL,
     QuarantineDecision,
     WakeAttemptFacts,
     WakeAttemptVerdict,
+    WakePoisonState,
     WakeStallAlert,
+    is_disabled_model_profile,
     ledger_corrupt_decision,
     needs_isolation,
     verdict_for_attempt,
@@ -47,9 +53,6 @@ WAKE_ATTEMPT_LIMIT_ADMISSION = "wake_attempt_limit"
 WAKE_ATTEMPT_LEDGER_CORRUPT_ADMISSION = "wake_attempt_ledger_corrupt"
 # 结构化日志前缀，与 [gateway-supply-backoff] 同一格式族：一行 JSON，只有结构化字段，不含正文或错误文案。
 _LOG_PREFIX = "[background-wake-poison]"
-# 调度器上"会话 → 正在进行的尝试"的进程内映射；同一会话一次只有一条车道在跑。
-_TRACKERS_ATTR = "_wake_attempt_trackers"
-
 _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict[tuple[int, str], InflightWakeAttempt] = {}
 
@@ -57,7 +60,8 @@ _INFLIGHT: dict[tuple[int, str], InflightWakeAttempt] = {}
 # LLM: 只给优雅停机找账用：C6 在关执行池之前对每一项调 attempts.mark_stopping(wake_signal_id, claim_id, now=...)。
 #   不是持久事实，进程退出即消失；turn_id 同尝试账 in_flight 里持久化的那一份（进程死后 C6 从账里读，不靠这里）。
 # 类用途: 一条正在执行的唤醒领取尝试在进程内的登记。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class InflightWakeAttempt:
     attempts: WakeAttemptStore
     wake_signal_id: str
@@ -91,7 +95,7 @@ def _log_stopping_failure(item: InflightWakeAttempt, exc: BaseException) -> None
     payload = {"event": "wake_attempt_ledger_unwritable", "stage": "mark_stopping",
                "wake_signal_id": item.wake_signal_id, "error_type": type(exc).__name__}
     try:
-        print(f"{_LOG_PREFIX} {json.dumps(payload, ensure_ascii=False, sort_keys=True)}", flush=True)
+        print(f"{_LOG_PREFIX} {hot_json.dumps(payload, ensure_ascii=False, sort_keys=True)}", flush=True)
     except (OSError, ValueError, TypeError):
         pass
 
@@ -129,6 +133,7 @@ class WakeAttemptTracker:
         self.admission = ""
         self.report: object = None
         self.error: BaseException | None = None
+        self._environment_pause_fingerprint = ""
         self.claim_id = ""
         self.block_code = ""
         self._begun: set[str] = set()
@@ -184,6 +189,8 @@ class WakeAttemptTracker:
     def note_error(self, error: BaseException, *, quota: bool) -> None:
         if self.error is None:
             self.error = error
+            if self.members and is_disabled_model_profile(error):
+                self._environment_pause_fingerprint, _ = _model_profile_snapshot(self._scheduler, self.members[0].thread_id)
         if quota:
             self.path = WAKE_ATTEMPT_PATH_QUOTA_FALLBACK
 
@@ -191,7 +198,7 @@ class WakeAttemptTracker:
     # 函数用途: 记下这次尝试对每条唤醒的结果，到上限的结案。
     def finish(self, error: BaseException | None) -> None:
         if error is not None and self.error is None:
-            self.error = error
+            self.note_error(error, quota=False)
         attempts = _attempts(self._scheduler)
         now = self._clock()
         for member in self.members:
@@ -234,6 +241,8 @@ class WakeAttemptTracker:
     def _record_member(self, attempts: WakeAttemptStore, member: WakeSignal, facts: WakeAttemptFacts, now: float) -> None:
         try:
             verdict = verdict_for_batch(verdict_for_attempt(facts), len(self.members))
+            if verdict.reason_code == WAKE_REASON_MODEL_PROFILE_DISABLED:
+                verdict = fast_replace(verdict, environment_pause_fingerprint=self._environment_pause_fingerprint)
         except ValueError:
             _log("wake_attempt_facts_invalid", member, {"path": facts.path, "claim_status": facts.claim_status})
             verdict = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "attempt:facts_invalid")
@@ -303,7 +312,7 @@ def wake_attempt_deferred(scheduler: Any, signal: WakeSignal, now: float) -> boo
     if outcome.decision is not None:
         quarantine_wake(scheduler, signal, outcome.decision, now=now)
         return True
-    return now < outcome.state.next_attempt_at
+    return _wake_attempt_waits(scheduler, signal, outcome.state, now)
 
 
 # LLM: 规划线程用（只读、不取锁、不写盘）：与 wake_attempt_deferred 同一个"下次最早可试时间"判据，读不出账时放行，
@@ -314,7 +323,38 @@ def wake_attempt_waiting(scheduler: Any, signal: WakeSignal, now: float) -> bool
     if not attempts.has_ledger(signal.wake_signal_id):
         return False
     state, error = attempts.state_report(signal.wake_signal_id)
-    return error is None and now < state.next_attempt_at
+    return error is None and _wake_attempt_waits(scheduler, signal, state, now)
+
+
+def _wake_attempt_waits(scheduler: Any, signal: WakeSignal, state: WakePoisonState, now: float) -> bool:
+    if not state.environment_pause_reason:
+        return now < state.next_attempt_at
+    fingerprint, ready = _model_profile_snapshot(scheduler, signal.thread_id)
+    return not ready or fingerprint == state.environment_pause_fingerprint
+
+
+def _model_profile_snapshot(scheduler: Any, thread_id: str) -> tuple[str, bool]:
+    """只读原会话选择和真实可用性，摘要可跨进程核对，不含连接凭据。"""
+    from ..backends.factory import model_configuration_missing
+    from ..settings.model_profiles import selected_model_config
+
+    try:
+        thread = scheduler.store.threads.load(thread_id)
+        if thread is None:
+            return "", False
+        agent = scheduler.runtime.agent
+        try:
+            config = selected_model_config(agent, profile_id=thread.model_profile_id or None)
+        except ModelProfileError as exc:
+            status = exc.reason
+            ready = False
+        else:
+            ready = not model_configuration_missing(config.model_backend, config)
+            status = "configured" if ready else "not_configured"
+    except (AttributeError, OSError, DataCorruptionError):
+        return "", False
+    facts = [thread.model_profile_id, thread.model_selection_revision, status]
+    return hashlib.sha256(hot_json.dumps(facts).encode("utf-8")).hexdigest(), ready
 
 
 # LLM: 批次隔离：主唤醒上次批次失败过（batch_failures>0）就只跑它自己；需要隔离的兄弟唤醒不进别人的批。只读。
@@ -379,10 +419,10 @@ def _attempts(scheduler: Any) -> WakeAttemptStore:
 
 # 函数用途: 取（必要时建立）调度器上的会话 → 尝试映射。
 def _trackers(scheduler: Any) -> dict[str, WakeAttemptTracker]:
-    trackers = getattr(scheduler, _TRACKERS_ATTR, None)
+    trackers = getattr(scheduler, "_wake_attempt_trackers", None)
     if not isinstance(trackers, dict):
         trackers = {}
-        setattr(scheduler, _TRACKERS_ATTR, trackers)
+        scheduler._wake_attempt_trackers = trackers
     return trackers
 
 
@@ -401,7 +441,7 @@ def _log(event: str, signal: WakeSignal, fields: dict[str, object]) -> None:
     payload = {"event": event, "wake_signal_id": signal.wake_signal_id, "thread_id": signal.thread_id,
                "reason": signal.reason, **fields}
     try:
-        print(f"{_LOG_PREFIX} {json.dumps(payload, ensure_ascii=False, sort_keys=True)}", flush=True)
+        print(f"{_LOG_PREFIX} {hot_json.dumps(payload, ensure_ascii=False, sort_keys=True)}", flush=True)
     except (OSError, ValueError, TypeError):
         pass
 

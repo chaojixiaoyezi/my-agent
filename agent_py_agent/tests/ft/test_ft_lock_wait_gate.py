@@ -190,6 +190,17 @@ CASES: list[tuple[str, str]] = [
     ('agent_py_agent.tests.test_conveyor_m14_work_item_pools.g1_case_registered_model_work_item', 'registered_model_work_item'),
     ('agent_py_agent.tests.test_conveyor_m22_http_readiness.g1_case_lane_classification', 'm22_lane_classification'),
     ('agent_py_agent.tests.test_conveyor_m22_http_readiness.g1_case_http_server_params', 'm22_http_server_params'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_inflight_wake_attempt', 'm20_inflight_wake_attempt'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_wake_attempt_verdict', 'm20_wake_attempt_verdict'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_wake_poison_state', 'm20_wake_poison_state'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_quarantine_decision', 'm20_quarantine_decision'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_wake_stall_alert', 'm20_wake_stall_alert'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_wake_attempt_facts', 'm20_wake_attempt_facts'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_gateway_active_turn_transition', 'm20_gateway_active_turn_transition'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_claimed_gateway_request_context', 'm20_claimed_gateway_request_context'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_pending_gateway_request', 'm20_pending_gateway_request'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_admission_limits', 'm20_admission_limits'),
+    ('agent_py_agent.tests.test_conveyor_m20_profile_pause.g1_case_worker_route_check', 'm20_worker_route_check'),
 ]
 
 # C0 规则 9 的 GIL 探针：3.11/3.12 没有 sys._is_gil_enabled，按“GIL 开启”处理，收集阶段不会 AttributeError。

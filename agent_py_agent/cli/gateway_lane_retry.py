@@ -27,6 +27,7 @@ from ..agent.conversation.compact_guard import (
     is_compact_transient_provider_failure,
     is_provider_quota_failure,
 )
+from ..agent.conversation.wake_poison import is_disabled_model_profile
 from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.runtime_db.operations import RuntimeRecoveryRequiredError
 from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
@@ -243,6 +244,9 @@ def _next_failure(
     headless: bool = False,
 ) -> _LaneFailure:
     now = time.monotonic()
+    # 档案停用只等配置恢复，自动后台车道也不消耗连续失败次数。
+    if is_disabled_model_profile(exc):
+        return _LaneFailure(0.0, True)
     if isinstance(exc, BackgroundCompactPreflightDeferred) and exc.code == 'COMPACT_CIRCUIT_OPEN':
         remaining = exc.retry_after_seconds
         if type(remaining) in (int, float) and math.isfinite(remaining) and remaining >= 0:
@@ -277,7 +281,7 @@ def _next_failure(
         count = previous.wait_count + 1 if previous is not None and previous.waiting_for_storage else 1
         interval = min(30.0, 2.0 ** min(count - 1, 5))
         return _LaneFailure(now + interval, False, waiting_for_storage=True, wait_count=count)
-    # 尚未选模型等用户配置；原档案失效（ModelProfileError）必须按普通冷却重试，才能推进毒丸结案。
+    # 尚未选模型等用户配置；删除等其它档案错误仍按普通冷却处理。
     if isinstance(exc, ModelNotConfiguredError):
         return _LaneFailure(0.0, True)
     if not (is_provider_environment_fault(exc) or is_provider_quota_failure(exc)):

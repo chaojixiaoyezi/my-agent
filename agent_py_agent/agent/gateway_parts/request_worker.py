@@ -34,7 +34,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common import cache_capacity
+from ..common import cache_capacity, hot_json
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..concurrency.interrupt import register_interruptible
 from ..conversation.control_commands import (
     conversation_request_interrupt_name,
@@ -99,7 +100,8 @@ _PENDING_SCAN_CACHE_MAX_FILE_BYTES = 65536
 _WAIT_POLL_STEPS_SECONDS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2)
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class _ClaimedGatewayRequestContext:
     agent: SimpleAgent
     processing_path: Path
@@ -220,7 +222,8 @@ def _archive_epoch_fenced(paths, path, folder, request_id, response, store, bind
     return GatewayArchiveResult(GatewayArchiveDisposition.COMMITTED, terminal_path=archived)
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class _PendingGatewayRequest:
     path: Path
     payload: dict
@@ -435,7 +438,8 @@ _ADMISSION_WAIT_FIELDS = ("admission_wait_at", "admission_wait_reason", "admissi
 
 # LLM: 沿原公开配置读取Owner容量，手工构造时的零值保留旧组件兼容性，缺省用户容量为50。
 # 类用途: 保存当前扫描使用的准入上限，不新增用户配置键。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class AdmissionLimits:
     user_inflight: int
     global_inflight: int
@@ -820,7 +824,7 @@ def _cache_verified_pending_payload(request_path: Path, payload: dict[str, Any])
         return
     try:
         verified = json.loads(key[-1].decode("utf-8"))
-        if verified != payload or json.dumps(verified, sort_keys=True) != json.dumps(payload, sort_keys=True):
+        if verified != payload or hot_json.dumps(verified, sort_keys=True) != hot_json.dumps(payload, sort_keys=True):
             return
         saved = copy.deepcopy(payload)
     except (ValueError, RecursionError):
@@ -949,7 +953,8 @@ class OwnerScopeUnavailableError(RuntimeError):
 
 # LLM: 把同一次已读权威队列记录传给拒绝门，避免门内重读或另推队列根。
 # 类用途: 保存一次路由拒绝所需的调用上下文。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class _WorkerRouteCheck:
     agent: object
     paths: GatewayPaths
@@ -1262,11 +1267,11 @@ def _config_without_runtime_paths(agent):
     → 不隔离。清空它们,作用域 agent 才会按各自 owner 的 home 重新解析(真隔离)。my_agent_home 是输入
     不在解析字段里,不动。
     """
-    import dataclasses
-
     fields = getattr(getattr(agent, "runtime_path_resolution", None), "paths", {}) or {}
-    resets = {name: "" for name in fields if hasattr(agent.config, name)}
-    return dataclasses.replace(agent.config, **resets)
+    config = agent.config
+    declared = config.__dataclass_fields__
+    resets = {name: "" for name in fields if name in declared}
+    return fast_replace(config, **resets)
 
 
 def _owner_pool(agent):
