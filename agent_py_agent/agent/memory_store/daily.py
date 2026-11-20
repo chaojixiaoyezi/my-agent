@@ -441,31 +441,31 @@ class _NullAdmission:
         return None
 
 
+# LLM: 本地上下文只适配 admission 协议，不改变异常传播或写入顺序。
+# 类用途: 为未配置 owner quota 的 Daily 写入提供统一 with 接口。
+class _QuotaAdmissionContext:
+    # LLM: 进入时返回无状态 admission，不创建额外账本。
+    # 函数用途: 开始无 quota Daily 写入临界区。
+    def __enter__(self) -> _NullAdmission:
+        return _NullAdmission()
+
+    # LLM: 退出时不吞异常，使原子写失败可由 Curator 正确回滚。
+    # 函数用途: 结束无 quota Daily 写入临界区。
+    def __exit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> None:
+        return None
+
+
 # LLM: 不吞配额异常；这里只统一有无 quota 时的上下文协议。
 # 函数用途: 返回 daily 写入 admission。
 def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
     if enforcer is not None:
         return enforcer.admission()
-
-    # LLM: 本地上下文只适配 admission 协议，不改变异常传播或写入顺序。
-    # 类用途: 为未配置 owner quota 的 Daily 写入提供统一 with 接口。
-    class _Context:
-        # LLM: 进入时返回无状态 admission，不创建额外账本。
-        # 函数用途: 开始无 quota Daily 写入临界区。
-        def __enter__(self) -> _NullAdmission:
-            return _NullAdmission()
-
-        # LLM: 退出时不吞异常，使原子写失败可由 Curator 正确回滚。
-        # 函数用途: 结束无 quota Daily 写入临界区。
-        def __exit__(
-            self,
-            exc_type: object,
-            exc: object,
-            traceback: object,
-        ) -> None:
-            return None
-
-    return _Context()
+    return _QuotaAdmissionContext()
 
 
 # LLM: 所有缺省时间统一为带 UTC 偏移的 ISO 字符串。

@@ -1,6 +1,7 @@
 """原签名推送的窄订阅来源：唯一授权仍是原token，catalog只保存业务绑定。"""
 from __future__ import annotations
 
+import builtins
 import hashlib
 import os
 import time
@@ -114,6 +115,66 @@ def subscription_token_grant(call, *, subscription_id=None, space_id=None):
             'allowed_subscription_ids': [identifier]}
 
 
+class _PrepareNativeSubscriptionNativeSubscription(ManagedSubscriptionService):
+    def __init__(self, catalog, *, grant, route, background_service=None, source_resolver=None,
+                 source_authorizer=None, submit_actor_provider=None, policy_check=None):
+        # 显式指定类，保留继承顺序且避免编译器生成 __class__ 闭包。
+        builtins.super(_PrepareNativeSubscriptionNativeSubscription, self).__init__(
+            catalog, background_service=background_service, source_resolver=source_resolver,
+            source_authorizer=source_authorizer, submit_actor_provider=submit_actor_provider, policy_check=policy_check,
+        )
+        self._route_catalog = catalog
+        self._grant = grant
+        self._route = route
+
+    def prepare_event(self, subscription_id, event, *, actor, source_identity):
+        intent = builtins.super(_PrepareNativeSubscriptionNativeSubscription, self).prepare_event(
+            subscription_id, event, actor=actor, source_identity=source_identity,
+        )
+        selected = _route(self._route_catalog, self._grant['source_ref'], actor)
+        if selected != self._route:
+            raise _refusal('SOURCE_INTENT_CONFLICT', '本次事件准备后界面路由已变化')
+        return {**intent, 'route_snapshot': selected}
+
+
+class _PrepareNativeSubscriptionRoutedBackground:
+    def __init__(self, *, current, authorize, catalog, grant, route, source_actor, host, services,
+                 bind_context, background_factory):
+        self._current = current
+        self._authorize = authorize
+        self._catalog = catalog
+        self._grant = grant
+        self._route = route
+        self._source_actor = source_actor
+        self._host = host
+        self._services = services
+        self._bind_context = bind_context
+        self._background_factory = background_factory
+
+    def submit(self, request, *, actor, idempotency_key):
+        self._current()
+        grant = self._grant
+        route = self._route
+        if _route(self._catalog, grant['source_ref'], self._source_actor) != route:
+            raise _refusal('SOURCE_INTENT_CONFLICT', '执行前界面绑定已变化')
+        context = self._bind_context(self._host, authorize=self._authorize, subject_id=self._source_actor.subject_id)
+        background = self._background_factory(self._services, context, host=self._host, binding_id=grant['binding_id'])
+        context.check('tasks.assign' if route['controller']['mode'] == 'agent' else 'tasks.submit',
+            {'owner_id': grant['owner_id'], 'space_id': grant['space_id'], 'binding_id': grant['binding_id'],
+             **({'agent_id': route['controller']['agent_id']} if route['controller']['mode'] == 'agent' else {})})
+        if route['controller']['mode'] == 'agent':
+            from ..conversation.background_team_lifecycle import background_identity
+
+            target = background._thread(route['controller']['agent_id'], actor)
+            project = background_identity(target).project_ref
+            result = background.assign({**request, 'agent_id': target.thread_id,
+                **({'project_ref': project} if project is not None else {})},
+                actor=actor, idempotency_key=idempotency_key)
+            return {'task_id': result['task_id'], 'request_id': result['task_id'],
+                    'operation_id': result['task_id'], 'state': 'accepted'}
+        return background.submit(request, actor=actor, idempotency_key=idempotency_key)
+
+
 def prepare_native_subscription(server, authenticated_token, body, stack):
     """凭已鉴权token的显式授权选Owner；body不能签发Owner、主体、界面或权限。"""
     from ..conversation.host_actor import HostChannelActor
@@ -207,42 +268,15 @@ def prepare_native_subscription(server, authenticated_token, body, stack):
         return HostChannelActor(grant['owner_id'], thread_id, 'source-event:' + body['event_id'],
                                 'remote_push', '', 'source:' + token_id)
 
-    class NativeSubscription(ManagedSubscriptionService):
-        def prepare_event(self, subscription_id, event, *, actor, source_identity):
-            intent = super().prepare_event(subscription_id, event, actor=actor, source_identity=source_identity)
-            selected = _route(catalog, grant['source_ref'], actor)
-            if selected != route:
-                raise _refusal('SOURCE_INTENT_CONFLICT', '本次事件准备后界面路由已变化')
-            return {**intent, 'route_snapshot': selected}
-
-    class RoutedBackground:
-        def submit(self, request, *, actor, idempotency_key):
-            current()
-            if _route(catalog, grant['source_ref'], source_actor) != route:
-                raise _refusal('SOURCE_INTENT_CONFLICT', '执行前界面绑定已变化')
-            context = bind_business_context(host, authorize=authorize, subject_id=source_actor.subject_id)
-            background = _BusinessBackgroundService(services, context, host=host, binding_id=grant['binding_id'])
-            context.check('tasks.assign' if route['controller']['mode'] == 'agent' else 'tasks.submit',
-                {'owner_id': grant['owner_id'], 'space_id': grant['space_id'], 'binding_id': grant['binding_id'],
-                 **({'agent_id': route['controller']['agent_id']} if route['controller']['mode'] == 'agent' else {})})
-            if route['controller']['mode'] == 'agent':
-                from ..conversation.background_team_lifecycle import background_identity
-
-                target = background._thread(route['controller']['agent_id'], actor)
-                project = background_identity(target).project_ref
-                result = background.assign({**request, 'agent_id': target.thread_id,
-                    **({'project_ref': project} if project is not None else {})},
-                    actor=actor, idempotency_key=idempotency_key)
-                return {'task_id': result['task_id'], 'request_id': result['task_id'],
-                        'operation_id': result['task_id'], 'state': 'accepted'}
-            return background.submit(request, actor=actor, idempotency_key=idempotency_key)
-
-    source_actor = actor
     def connected_source(ref, current_actor):
         current()
         return {**source_service.source_resolver(ref, current_actor), 'connection_state': 'connected'}
 
-    service = NativeSubscription(catalog, background_service=RoutedBackground(),
+    background = _PrepareNativeSubscriptionRoutedBackground(
+        current=current, authorize=authorize, catalog=catalog, grant=grant, route=route, source_actor=actor,
+        host=host, services=services, bind_context=bind_business_context, background_factory=_BusinessBackgroundService,
+    )
+    service = _PrepareNativeSubscriptionNativeSubscription(catalog, grant=grant, route=route, background_service=background,
         source_resolver=connected_source, source_authorizer=source_authorizer,
         submit_actor_provider=submit_actor, policy_check=_policy_reader(catalog, services.workflows))
     return service, actor

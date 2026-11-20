@@ -191,6 +191,40 @@ def observe_evolution_trial(home, script_id, execution, *, commit=None, failure_
     return _commit(commit, update)
 
 
+# LLM: AST位置由解析器确定，拒绝修改嵌套函数或类的另一个词法作用域。
+# 类用途: 替换主函数内的完整字面量而非子串。
+class _LiftEvolutionLiteralsLift(ast.NodeTransformer):
+    def __init__(self, *, main, names, lifted):
+        self._main = main
+        self._names = names
+        self._lifted = lifted
+
+    # LLM: 原函数签名不变；嵌套定义整个保留。
+    # 函数用途: 仅访问当前main函数的语句。
+    def visit_FunctionDef(self, node):
+        return self.generic_visit(node) if node is self._main else node
+
+    # LLM: 类体和lambda的inputs绑定未知，不能隐式捕获调用参数。
+    # 函数用途: 保留嵌套类。
+    def visit_ClassDef(self, node):
+        return node
+
+    # LLM: lambda可能遮蔽inputs，保守不提升其中的字面量。
+    # 函数用途: 保留lambda局部作用域。
+    def visit_Lambda(self, node):
+        return node
+
+    # LLM: default仍是原常量，除调用方明确提供参数外行为不变。
+    # 函数用途: 用inputs.get替换完整常量。
+    def visit_Constant(self, node):
+        if type(node.value) is str and node.value in self._names:
+            key = self._names[node.value]
+            self._lifted[key] = node.value
+            return ast.copy_location(ast.Call(ast.Attribute(ast.Name('inputs', ast.Load()), 'get', ast.Load()),
+                                               [ast.Constant(key), ast.Constant(node.value)], []), node)
+        return node
+
+
 # LLM: 仅替换main(inputs)作用域中完整字符串常量；模块常量、docstring及局部遮蔽inputs的函数不动。
 # 函数用途: 将已验证的会话字面量确定性提升为带原默认值的输入。
 def lift_evolution_literals(code, literals):
@@ -211,34 +245,7 @@ def lift_evolution_literals(code, literals):
         names[value] = kind + '_' + hashlib.sha256(value.encode()).hexdigest()[:6]
     lifted = {}
 
-    # LLM: AST位置由解析器确定，拒绝修改嵌套函数或类的另一个词法作用域。
-    # 类用途: 替换主函数内的完整字面量而非子串。
-    class Lift(ast.NodeTransformer):
-        # LLM: 原函数签名不变；嵌套定义整个保留。
-        # 函数用途: 仅访问当前main函数的语句。
-        def visit_FunctionDef(self, node):
-            return self.generic_visit(node) if node is main else node
-
-        # LLM: 类体和lambda的inputs绑定未知，不能隐式捕获调用参数。
-        # 函数用途: 保留嵌套类。
-        def visit_ClassDef(self, node):
-            return node
-
-        # LLM: lambda可能遮蔽inputs，保守不提升其中的字面量。
-        # 函数用途: 保留lambda局部作用域。
-        def visit_Lambda(self, node):
-            return node
-
-        # LLM: default仍是原常量，除调用方明确提供参数外行为不变。
-        # 函数用途: 用inputs.get替换完整常量。
-        def visit_Constant(self, node):
-            if type(node.value) is str and node.value in names:
-                key = names[node.value]
-                lifted[key] = node.value
-                return ast.copy_location(ast.Call(ast.Attribute(ast.Name('inputs', ast.Load()), 'get', ast.Load()),
-                                                   [ast.Constant(key), ast.Constant(node.value)], []), node)
-            return node
-    Lift().visit(main)
+    _LiftEvolutionLiteralsLift(main=main, names=names, lifted=lifted).visit(main)
     ast.fix_missing_locations(tree)
     return (ast.unparse(tree) + '\n', lifted) if lifted else (code, {})
 

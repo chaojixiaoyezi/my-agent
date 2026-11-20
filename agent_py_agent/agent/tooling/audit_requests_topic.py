@@ -6,26 +6,36 @@
 # 模块用途: 让 my-agent 自己查出“哪些请求失败了、错误码是什么、属于哪个用户、该怎么处理”，不必由人去翻文件。
 from __future__ import annotations
 
+import builtins
+
 REQUEST_SOURCES = ("gateway_request_records", "error_taxonomy")
+
+
+# 只按候选线程点读归属，避免预先枚举线程或 owner。
+class _ScopeOwnersCandidateOwners(dict):
+    def __init__(self, *, agent, query, own_id):
+        self._agent = agent
+        self._query = query
+        self._own_id = own_id
+
+    def get(self, key, default=""):
+        if key in self:
+            # 显式指定类，保留继承顺序且避免编译器生成 __class__ 闭包。
+            return builtins.super(_ScopeOwnersCandidateOwners, self).get(key, default)
+        if self._query.scope == "all_owners":
+            return default
+        thread, error = self._agent.conversation_store.threads.load_report(key)
+        if thread is None or error is not None:
+            return default
+        self[key] = self._own_id
+        return self._own_id
 
 
 # LLM: 线程编号只来自各 owner 自己的会话库（只读打开）；读失败只计数。all_owners 最多覆盖 max_owners 个 owner。
 # 函数用途: 按范围算出允许的 owner 集合与旧记录归属用的线程映射。
 def _scope_owners(agent: object, query: object, max_owners: int) -> tuple[frozenset | None, dict, dict]:
     own_id = str(agent.home_paths.owner_id or "local/main")
-    # 仅实际候选线程做规范点读；未证归属不猜，不预列所有线程或 owner。
-    class CandidateOwners(dict):
-        def get(self, key, default=""):
-            if key in self:
-                return super().get(key, default)
-            if query.scope == "all_owners":
-                return default
-            thread, error = agent.conversation_store.threads.load_report(key)
-            if thread is None or error is not None:
-                return default
-            self[key] = own_id
-            return own_id
-    mapping = CandidateOwners()
+    mapping = _ScopeOwnersCandidateOwners(agent=agent, query=query, own_id=own_id)
     if query.thread_id:
         mapping[query.thread_id] = own_id
     return (None if query.scope == "all_owners" else frozenset({own_id}), mapping,

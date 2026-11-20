@@ -1457,6 +1457,18 @@ def _has_committed_lesson_proposals(lesson_provider: Callable[[], object] | None
         return False
 
 
+class _AdoptCommittedLessonsIsolatedCommittedProposalProxy:
+    def __init__(self, target: object, items: list[object]) -> None:
+        self._target = target
+        self._items = items
+        self.candidates_path = getattr(target, "candidates_path", None)
+
+    def list(self, status: str | None = None) -> list[object]:
+        if status is None:
+            return list(self._items)
+        return [item for item in self._items if getattr(item, "status", None) == status]
+
+
 # LLM: 按条隔离 SkillProposalError：单条损坏提案仅记录告警并跳过，不阻碍同目录其它已确认提案采纳或后续维护。
 # 函数用途: 容错采纳已确认的遗留经验 Skill 提案。
 def _adopt_committed_lessons_isolated(store: SkillLearningStore, proposal_service: object) -> None:
@@ -1486,19 +1498,8 @@ def _adopt_committed_lessons_isolated(store: SkillLearningStore, proposal_servic
     if not committed:
         return
 
-    class _CommittedProposalProxy:
-        def __init__(self, target: object, items: list[object]) -> None:
-            self._target = target
-            self._items = items
-            self.candidates_path = getattr(target, "candidates_path", None)
-
-        def list(self, status: str | None = None) -> list[object]:
-            if status is None:
-                return list(self._items)
-            return [item for item in self._items if getattr(item, "status", None) == status]
-
     with gateway_short_transaction("skill_learning_adopt_lessons"):
-        adopt_committed_lessons(store, _CommittedProposalProxy(proposal_service, committed))
+        adopt_committed_lessons(store, _AdoptCommittedLessonsIsolatedCommittedProposalProxy(proposal_service, committed))
 
 
 # LLM: 维护末尾有界清理 S3 陈旧提案与 S1 孤儿提案；单条损坏只记告警，绝不回滚或阻断主维护与 FIFO。

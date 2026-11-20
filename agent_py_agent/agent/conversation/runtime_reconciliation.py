@@ -76,32 +76,43 @@ def _segment(value):
     return isinstance(value, str) and bool(value) and value not in {'.', '..'} and not any(c in value for c in ('/', '\\', '\0'))
 
 
+class _SchedulerEffectReadonlyReadOnlyHistory:
+    def __init__(self, *, index, errors, history_snapshot):
+        self._index = index
+        self._errors = errors
+        self._history_snapshot = history_snapshot
+
+    def read(self, *, run_id):
+        index = self._index
+        if not index.source.exists():
+            return [], []
+        with _snapshot(index.path) as conn:
+            before = self._history_snapshot(index.source)
+            state = index._state(conn)
+            if (state.get('owner') != index.owner or any(state.get(key) != before[key] for key in ('stamp', 'head', 'tail'))
+                    or state.get('pending') or state.get('skipping') or state.get('errors')
+                    or state.get('cursor', 0) < (before['stamp'][2] if before['stamp'] else 0)):
+                self._errors.append('SCHEDULER_HISTORY_INDEX_INCOMPLETE')
+                return [], self._errors
+            rows = conn.execute('SELECT payload FROM history_effects WHERE generation=? AND run_id=?',
+                (state['generation'], run_id)).fetchall()
+            if self._history_snapshot(index.source) != before:
+                raise ValueError('scheduler history changed during proof')
+            return [json.loads(row[0]) for row in rows], []
+
+
 def _scheduler_effect_readonly(repository, run_id):
     """复用 effect_run 的解析/选择，不调用原 history.read 的建锁路径。"""
     from copy import copy
 
     from ..scheduler.history_index import _snapshot as history_snapshot
+
     index = repository._history_index
     errors = []
-    class ReadOnlyHistory:
-        def read(self, *, run_id):
-            if not index.source.exists():
-                return [], []
-            with _snapshot(index.path) as conn:
-                before = history_snapshot(index.source)
-                state = index._state(conn)
-                if (state.get('owner') != index.owner or any(state.get(key) != before[key] for key in ('stamp', 'head', 'tail'))
-                        or state.get('pending') or state.get('skipping') or state.get('errors')
-                        or state.get('cursor', 0) < (before['stamp'][2] if before['stamp'] else 0)):
-                    errors.append('SCHEDULER_HISTORY_INDEX_INCOMPLETE')
-                    return [], errors
-                rows = conn.execute('SELECT payload FROM history_effects WHERE generation=? AND run_id=?',
-                    (state['generation'], run_id)).fetchall()
-                if history_snapshot(index.source) != before:
-                    raise ValueError('scheduler history changed during proof')
-                return [json.loads(row[0]) for row in rows], []
     reader = copy(repository)
-    reader._history_index = ReadOnlyHistory()
+    reader._history_index = _SchedulerEffectReadonlyReadOnlyHistory(
+        index=index, errors=errors, history_snapshot=history_snapshot,
+    )
     result = reader.effect_run(run_id)
     if errors:
         raise ValueError('scheduler history proof incomplete')
