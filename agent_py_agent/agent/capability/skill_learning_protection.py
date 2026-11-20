@@ -3,10 +3,13 @@
 # 模块用途: 为自学维护有界收集活跃引用保护名单，确保耗时与会话历史总量解耦。
 from __future__ import annotations
 
+import bisect
 import hashlib
 import inspect
 import json
+import math
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -42,65 +45,332 @@ def _signature(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
+_PROGRESS_SCHEMA = 'skill-protection-progress.v2'
+_SOURCE_NAMES = ('tasks', 'scheduler', 'proposals', 'subagents')
+# 窗口签名只取保护判定用到的列：心跳类时间戳每次写库都会变，不能让它重置续点。
+_VOLATILE_RUNTIME_COLUMNS = frozenset({'task_updated_at', 'updated_at'})
+
+
+class _ProtectedIds(tuple):
+    """保护名单；随映射展开或单独传参时仍携带原快照，置换前据此复核来源。"""
+
+    snapshot = None
+
+
 class _ProtectionSnapshot(dict):
-    """源代次复核供发布事务消费，字典键继续兼容维护入口。"""
+    """按来源身份复核供置换事务消费，字典键继续兼容维护入口。"""
 
     def __init__(self, refs, complete, generation, recheck):
-        super().__init__(protected_ids=tuple(sorted(refs)), protection_complete=complete)
+        protected = _ProtectedIds(sorted(refs))
+        protected.snapshot = self
+        super().__init__(protected_ids=protected, protection_complete=complete)
         self.generation = generation
         self.recheck = recheck
 
 
-def _read_sources(agent, store):
-    scheduler = getattr(agent, 'scheduler_repository', None)
+def _digest_rows(hasher, rows, project):
+    """已读前缀的引用投影摘要：只看每行的引用视图，运行计数、时间戳等变化不改变来源身份。"""
+    for row in rows:
+        hasher.update(json.dumps(project(row), sort_keys=True, default=str).encode() + b'\n')
+    return hasher
+
+
+def _included_refs(include):
+    def project(row):
+        refs = set()
+        include(refs, row)
+        return sorted(refs)
+
+    return project
+
+
+def _plain(value):
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+_JOB_REFERENCE_FIELDS = ('skill_snapshot_refs', 'skill_refs', 'scheduler_skill_refs', 'allowed_skills')
+
+
+def _job_reference_projection(raw):
+    """账本只读快照里一条 job 的引用视图：状态与引用字段原样，开工计数、时间等运行字段不进入。"""
+    payload = raw.get('payload')
+    return [raw.get('status'), _plain({key: raw.get(key) for key in _JOB_REFERENCE_FIELDS}),
+            _plain({key: payload.get(key) for key in _JOB_REFERENCE_FIELDS}) if isinstance(payload, Mapping) else None]
+
+
+def _job_position(job_id, raw):
+    """job 在键集中的位置：创建时间（缺失或非法按 0）再按 job_id。job_id 是随机值，新建 job 只按创建时间落在续点之后。"""
+    created = raw.get('created_at') if isinstance(raw, Mapping) else None
+    if type(created) not in (int, float) or not math.isfinite(created) or created < 0:
+        created = 0.0
+    return float(created), job_id
+
+
+def _path_identity(path):
+    try:
+        info = Path(path).lstat()
+    except FileNotFoundError:
+        return None
+    return [info.st_dev, info.st_ino]
+
+
+def _rolling_refs(state):
+    return set(state.get('done') or ()) | set(state.get('refs') or ())
+
+
+class _ListingSource:
+    """一次返回全量的清单（宿主替身）：按下标续读，已读前缀的引用投影变了才重来，末尾追加直接续读。"""
+
+    def __init__(self, reader, include):
+        self.reader, self.include, self.project = reader, include, _included_refs(include)
+
+    def _rows(self):
+        rows, errors = self.reader()
+        if errors:
+            raise ValueError('protection_source_unreadable')
+        return list(rows)
+
+    def _resume(self, state, rows):
+        offset, hasher = state.get('after'), hashlib.sha256()
+        if (type(offset) is int and 0 <= offset <= len(rows)
+                and state.get('prefix') == _digest_rows(hasher, rows[:offset], self.project).hexdigest()):
+            return offset, hasher
+        return None, hashlib.sha256()
+
+    def advance(self, state, budget):
+        rows = self._rows()
+        offset, hasher = self._resume(state, rows)
+        refs = set(state.get('refs') or ()) if offset is not None else set()
+        offset = offset or 0
+        remaining = _page_rows(rows, [], offset, budget, self.include, refs)
+        end = len(rows) if remaining is None else remaining
+        _digest_rows(hasher, rows[offset:end], self.project)
+        state.update(after=end, prefix=hasher.hexdigest(), refs=sorted(refs))
+        return remaining is None
+
+    def refs(self, state):
+        return set(state.get('refs') or ())
+
+    def recheck(self, state, protected, budget):
+        rows = self._rows()
+        offset, _ = self._resume(state, rows)
+        if offset is None:
+            return False
+        appended = set()
+        for row in rows[offset:]:
+            self.include(appended, row)
+        return appended <= protected
+
+
+class _SchedulerStoreSource:
+    """监控账本：按 (created_at, job_id) 键集续读，新建 job 落在续点之后直接续读；账本身份或已读前缀的引用投影变了才重来。"""
+
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+    def _read(self):
+        store = self.scheduler._store_snapshot(readonly=True)
+        jobs = store['jobs']
+        keys = sorted(_job_position(job_id, raw) for job_id, raw in jobs.items())
+        return _plain([store.get('schema_version'), store.get('owner')]), jobs, keys
+
+    def _resume(self, state, identity, jobs, keys):
+        after, hasher = state.get('after'), hashlib.sha256()
+        if (state.get('identity') != identity or type(after) is not list or len(after) != 2
+                or type(after[0]) not in (int, float) or not math.isfinite(after[0]) or type(after[1]) is not str):
+            return None, hasher
+        position = bisect.bisect_right(keys, (float(after[0]), after[1]))
+        _digest_rows(hasher, (jobs[key[1]] for key in keys[:position]), _job_reference_projection)
+        return (position, hasher) if state.get('prefix') == hasher.hexdigest() else (None, hashlib.sha256())
+
+    def _refs(self, raw, refs):
+        job, error = self.scheduler._parse_job(raw)
+        if error or job is None:
+            raise ValueError('scheduler_protection_source_unreadable')
+        if job['status'] != 'deleted':
+            _include_job_refs(refs, job)
+        return job
+
+    def advance(self, state, budget):
+        identity, jobs, keys = self._read()
+        position, hasher = self._resume(state, identity, jobs, keys)
+        refs = set(state.get('refs') or ()) if position is not None else set()
+        after = state.get('after') if position is not None else [0, '']
+        position = position or 0
+        initial = position
+        while position < len(keys) and budget.entries < budget.max_entries and budget.size < budget.max_bytes:
+            if position != initial and budget.exhausted():
+                break
+            row_refs = set()
+            job = self._refs(jobs[keys[position][1]], row_refs)
+            size = _approx_bytes(job)
+            if budget.size + size > budget.max_bytes:
+                break
+            refs.update(row_refs)
+            budget.charge(entries=1, size=size)
+            _digest_rows(hasher, (jobs[keys[position][1]],), _job_reference_projection)
+            after, position = list(keys[position]), position + 1
+        state.update(identity=identity, after=after, prefix=hasher.hexdigest(), refs=sorted(refs))
+        return position == len(keys)
+
+    def refs(self, state):
+        return set(state.get('refs') or ())
+
+    def recheck(self, state, protected, budget):
+        identity, jobs, keys = self._read()
+        position, _ = self._resume(state, identity, jobs, keys)
+        if position is None:
+            return False
+        appended = set()
+        for key in keys[position:]:
+            self._refs(jobs[key[1]], appended)
+        return appended <= protected
+
+
+class _RollingSource:
+    """目录与恢复索引不保证新条目落在续点之后：整轮读完后从头再滚一轮，上一整轮的引用在新一轮完成前继续有效。
+
+    复核时在新预算内从头完整读一轮，新出现的引用必须已在保护名单内。
+    """
+
+    def __init__(self, identity, page, start, prepare=None):
+        self.identity, self.page, self.start, self.prepare = identity, page, start, prepare
+
+    def advance(self, state, budget):
+        if self.prepare is not None:
+            self.prepare()
+        identity = self.identity()
+        if state.get('identity') != identity:
+            state.clear()
+        refs = set(state.get('refs') or ())
+        cursor = self.page(state.get('after') or self.start, budget, refs)
+        if cursor is None:
+            state.update(done=sorted(refs), refs=[], after=self.start)
+        else:
+            state.update(after=cursor, refs=sorted(refs))
+        state['identity'] = identity
+        return state.get('done') is not None
+
+    def refs(self, state):
+        return _rolling_refs(state)
+
+    def recheck(self, state, protected, budget):
+        if self.prepare is not None:
+            self.prepare()
+        if state.get('identity') != self.identity():
+            return False
+        refs, cursor = set(), self.start
+        while True:
+            before = cursor
+            cursor = self.page(cursor, budget, refs)
+            if cursor is None:
+                return refs <= protected
+            if cursor == before or budget.exhausted():
+                return False
+
+
+class _RuntimeSource:
+    """运行库：库文件身份与 schema 代次决定重来；任务运行按 (created_at, task_run_id) 键集续读。"""
+
+    def __init__(self, agent, repo, tasks):
+        self.agent, self.repo, self.tasks = agent, repo, tasks
+
+    def advance(self, state, budget):
+        return _collect_runtime_task_refs(self.agent, self.repo, self.tasks, set(), budget, progress=state)
+
+    def refs(self, state):
+        return set(state.get('refs') or ())
+
+    def recheck(self, state, protected, budget):
+        # 证明跨了多个窗口时，更早窗口里已读任务运行的变化（新 attempt、元数据新增引用）不在最后窗口的逐组核对里，
+        # 而一片预算读不完全部窗口：此时按证明过期处理，只会少置换，不会多置换。
+        if state.get('after') not in (None, [0, '']):
+            return False
+        return _runtime_window_current(self.agent, self.repo, self.tasks, state)
+
+
+class _UnpagedTaskSource:
+    """无运行库与可分页清单的旧宿主：每片在预算内重读，复核时同样重读。"""
+
+    def __init__(self, agent):
+        self.agent = agent
+
+    def advance(self, state, budget):
+        refs = set()
+        complete = _collect_unsettled_tasks(self.agent, refs, budget)
+        state.clear()
+        state['refs'] = sorted(refs)
+        return complete
+
+    def refs(self, state):
+        return set(state.get('refs') or ())
+
+    def recheck(self, state, protected, budget):
+        refs = set()
+        return _collect_unsettled_tasks(self.agent, refs, budget) and refs <= protected
+
+
+def _protection_sources(agent, store):
+    """每个来源绑定自己的身份与续点；缺失的来源为 None，使保护证明不完整。"""
+    from ..runtime_db.repository import RuntimeRepository
+
     subagents = getattr(agent, 'subagents', None)
     persistence = getattr(subagents, 'persistence', None)
     index = getattr(persistence, 'run_index', None)
     tasks = getattr(getattr(agent, 'conversation_store', None), 'tasks', None)
     runtime = getattr(agent, 'runtime_db', None) or getattr(subagents, 'runtime_db', None)
+    scheduler = getattr(agent, 'scheduler_repository', None)
 
-    scheduler_path = getattr(scheduler, 'store_path', None)
-    jobs = scheduler.list_jobs(include_deleted=False) if scheduler is not None and scheduler_path is None else None
-    if index is not None:
-        index_state = persistence.prepare_run_index(tolerate_pending=True)
-    child_reader = getattr(subagents, 'list_recovery_runs_report', None) or getattr(subagents, 'list_runs_report', None)
-
-    def children():
-        if child_reader is None:
-            return [], []
-        report = child_reader()
-        rows = [{'status': child.status, 'attributes': child.attributes or {}} for child in report.runs]
-        return rows, report.load_errors
-
-    child_rows = children() if index is None else None
-    if index is not None and (not index_state['complete'] or index_state['pending']):
-        child_rows = [], ['subagent_index_incomplete']
-    paths = [scheduler_path, getattr(index, 'path', None), getattr(runtime, 'db_path', None)]
-    storage = getattr(tasks, 'storage', None)
-    paths.extend(getattr(storage, name, None) for name in ('tasks_dir', 'threads_dir'))
-    if store is not None:
-        paths.extend(store.directory / name for name in ('proposals', 'proposals_overflow', '.proposals-intent.json'))
-    files = tuple(Path(path) for path in paths if path is not None)
-    wal = tuple(Path(str(path) + '-wal') for path in files if path.suffix in ('.db', '.sqlite', '.sqlite3'))
     task_reader = next((getattr(tasks, name) for name in ('unsettled_report', 'active_report')
                         if _zero_arg_callable(getattr(tasks, name, None))), None)
-    task_rows = task_reader() if task_reader is not None else None
+    if task_reader is not None:
+        task_source = _ListingSource(task_reader, _include_task_refs)
+    elif isinstance(runtime, RuntimeRepository):
+        task_source = _RuntimeSource(agent, runtime, tasks)
+    else:
+        task_source = _UnpagedTaskSource(agent)
 
-    def generation(*, fresh=False):
-        return _signature((
-            [_path_stamp(path) for path in (*files, *wal)],
-            scheduler.list_jobs(include_deleted=False) if fresh and jobs is not None else jobs,
-            children() if fresh and index is None else child_rows,
-            (_task_listing_signature(task_reader()) if fresh else _task_listing_signature(task_rows))
-            if task_rows is not None else None,
-        ))
+    if scheduler is None:
+        scheduler_source = None
+    elif getattr(scheduler, 'store_path', None) is None:
+        scheduler_source = _ListingSource(lambda: scheduler.list_jobs(include_deleted=False), _include_job_refs)
+    else:
+        scheduler_source = _SchedulerStoreSource(scheduler)
 
-    return generation, scheduler, jobs, persistence, child_rows, task_rows
+    proposal_source = None if store is None else _RollingSource(
+        lambda: [_path_identity(store.directory / name) for name in ('proposals', 'proposals_overflow')],
+        lambda after, budget, refs: _proposal_refs_page(store, after, budget, refs), {},
+    )
 
+    if subagents is None:
+        child_source = None
+    elif index is not None:
+        def prepare():
+            state = persistence.prepare_run_index(tolerate_pending=True)
+            if not state['complete'] or state['pending']:
+                raise ValueError('subagent_index_incomplete')
 
-def _task_listing_signature(report):
-    rows, errors = report
-    return [row.to_dict() if hasattr(row, 'to_dict') else row for row in rows], errors
+        child_source = _RollingSource(
+            lambda: _path_identity(index.path),
+            lambda after, budget, refs: _child_refs_page(persistence, None, after, budget, refs), '', prepare,
+        )
+    else:
+        reader = getattr(subagents, 'list_recovery_runs_report', None) or getattr(subagents, 'list_runs_report', None)
+
+        def children():
+            if reader is None:
+                return [], []
+            report = reader()
+            return [{'status': child.status, 'attributes': child.attributes or {}} for child in report.runs], \
+                report.load_errors
+
+        child_source = _ListingSource(children, _include_child_refs)
+    return {'tasks': task_source, 'scheduler': scheduler_source, 'proposals': proposal_source,
+            'subagents': child_source}
 
 
 def _page_rows(rows, errors, offset, budget, include, refs):
@@ -120,34 +390,6 @@ def _page_rows(rows, errors, offset, budget, include, refs):
         budget.charge(entries=1, size=size)
         offset += 1
     return None if offset == len(rows) else offset
-
-
-def _scheduler_page(agent, scheduler, jobs, after, budget, refs, generation):
-    if jobs is not None:
-        return _page_rows(*jobs, after, budget, _include_job_refs, refs)
-    if scheduler is None:
-        return None
-    store = scheduler._store_snapshot(readonly=True)['jobs']
-    memo = getattr(agent, '_skill_protection_scheduler_keys', None)
-    if memo is None or memo[0] != generation:
-        memo = (generation, tuple(store))
-        agent._skill_protection_scheduler_keys = memo
-    keys = memo[1]
-    initial = after
-    while after < len(keys) and budget.entries < budget.max_entries and budget.size < budget.max_bytes:
-        if after != initial and budget.exhausted():
-            break
-        job, error = scheduler._parse_job(store[keys[after]])
-        if error or job is None:
-            raise ValueError('scheduler_protection_source_unreadable')
-        size = _approx_bytes(job)
-        if budget.size + size > budget.max_bytes:
-            break
-        if job['status'] != 'deleted':
-            _include_job_refs(refs, job)
-        budget.charge(entries=1, size=size)
-        after += 1
-    return None if after == len(keys) else after
 
 
 def _include_task_refs(refs, task):
@@ -209,74 +451,79 @@ def _include_child_refs(protected, child):
 
 
 # LLM: 四个 canonical 活跃索引来源共享有界配额与墙钟预算；严禁调用 threads.list_report(limit=0)。
+#   每个来源各自绑定库身份/代次与键集续点：普通写入（WAL、运行计数）不重置进度，只有身份变了的来源重来。
 # 函数用途: 汇集未结算任务、监控、待审提案及未结束子代理的保护名单。
 def learning_protection_for_agent(agent, *, scan_limit=1000):
     from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
 
-    budget = RetentionScanBudget.default(getattr(agent, "config", None))
-    if type(scan_limit) is int and scan_limit > 0:
-        budget.max_entries = min(budget.max_entries, scan_limit)
+    def slice_budget():
+        budget = RetentionScanBudget.default(getattr(agent, "config", None))
+        if type(scan_limit) is int and scan_limit > 0:
+            budget.max_entries = min(budget.max_entries, scan_limit)
+        return budget
+
+    failures = (OSError, ValueError, TypeError, KeyError, AttributeError, SkillLearningStoreError)
+    budget = slice_budget()
     home = getattr(agent, 'home_paths', None)
-    store = SkillLearningStore.for_home(home) if getattr(home, 'owner_skill_learning_dir', None) else None
-    protected = set()
     try:
-        generation_of, scheduler, jobs, persistence, children, tasks = _read_sources(agent, store)
-        generation = generation_of()
+        store = SkillLearningStore.for_home(home) if getattr(home, 'owner_skill_learning_dir', None) else None
+        sources = _protection_sources(agent, store)
         previous = _load_protection_scan(store) if store is not None else getattr(agent, '_skill_protection_scan', None)
-        saved = previous if isinstance(previous, dict) and previous.get('generation') == generation else {}
-        after = dict(saved.get('after') or {})
-        task_progress = dict(after.get('runtime') or {})
-        if not _active_stamps_current(agent, task_progress):
-            after, task_progress = {}, {}
-        # 引用来源共享配额，已结束页不再读其正文。无主机来源时只返回覆盖不完整。
-        protected.update(after.get('protected_ids', ()))
-        if tasks is None:
-            complete_tasks = _collect_unsettled_tasks(agent, protected, budget, progress=task_progress)
-            after['runtime'] = task_progress
-        else:
-            after['tasks'] = _page_rows(*tasks, after.get('tasks', 0), budget, _include_task_refs, protected) \
-                if after.get('tasks', 0) is not None else None
-            complete_tasks = after['tasks'] is None
-
-        if after.get('scheduler', 0) is not None:
-            after['scheduler'] = _scheduler_page(agent, scheduler, jobs, after.get('scheduler', 0), budget,
-                                                 protected, generation)
-        if budget.entries < budget.max_entries and budget.size < budget.max_bytes:
-            if after.get('proposals', {}) is not None:
-                after['proposals'] = _proposal_refs_page(store, after.get('proposals', {}), budget, protected)
-            if budget.entries < budget.max_entries and budget.size < budget.max_bytes \
-                    and after.get('subagents', '') is not None:
-                after['subagents'] = _child_refs_page(persistence, children, after.get('subagents', ''), budget, protected)
-        complete = (complete_tasks and scheduler is not None and getattr(agent, 'subagents', None) is not None
-                    and store is not None and all(key in after and after[key] is None
-                                                  for key in ('scheduler', 'proposals', 'subagents')))
-        after['protected_ids'] = sorted(protected)
-        current = {'generation': generation, 'after': after}
-
-        def recheck():
-            return generation_of(fresh=True) == generation and _active_stamps_current(agent, task_progress)
-
-        if not recheck():
+    except failures:
+        return _ProtectionSnapshot((), False, '', lambda: False)
+    saved = previous.get('sources') if isinstance(previous, dict) and previous.get('schema') == _PROGRESS_SCHEMA else None
+    states = {name: dict(saved[name]) if isinstance(saved, dict) and isinstance(saved.get(name), dict) else {}
+              for name in _SOURCE_NAMES}
+    protected, complete = set(), True
+    # 引用来源共享配额，已结束页不再读其正文。无主机来源时只返回覆盖不完整。
+    for name in _SOURCE_NAMES:
+        source, state = sources[name], states[name]
+        if source is None:
             complete = False
-        elif current != previous:
+            continue
+        if budget.entries >= budget.max_entries or budget.size >= budget.max_bytes:
+            complete = False  # 本片配额已用尽：该来源保留原续点，下一片接着读。
+        else:
+            kept = dict(state)
+            try:
+                complete = source.advance(state, budget) and complete
+            except failures:
+                # 单个来源不可读只让本片不完整，不丢它已提交的进度，也不影响其它来源。
+                state.clear()
+                state.update(kept)
+                complete = False
+        protected.update(source.refs(state))
+    current = {'schema': _PROGRESS_SCHEMA, 'sources': states}
+    generation = _signature({name: states[name].get('identity') for name in _SOURCE_NAMES})
+    proven = frozenset(protected)
+
+    def recheck():
+        # 置换前复核：各来源身份未变，且自快照以来新出现的引用都已在保护名单内；任何读取失败都按证明过期处理。
+        fresh = slice_budget()
+        try:
+            return all(sources[name] is not None and sources[name].recheck(states[name], proven, fresh)
+                       for name in _SOURCE_NAMES)
+        except Exception:  # noqa: BLE001 - 复核不可完成即不可置换
+            return False
+
+    try:
+        if current != previous:
             if store is None:
                 agent._skill_protection_scan = current
-            elif protected or _scan_has_progress(after) or store.registry_path.exists():
+            elif protected or _scan_has_progress(states) or store.registry_path.exists():
                 complete = _save_protection_scan(store, previous, current) and complete
-        return _ProtectionSnapshot(protected, complete, generation, recheck)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, SkillLearningStoreError):
-        return _ProtectionSnapshot(protected, False, '', lambda: False)
+    except failures:
+        complete = False
+    return _ProtectionSnapshot(protected, complete, generation, recheck)
 
 
 def _load_protection_scan(store):
     return store.load_registry().protection_scan
 
 
-def _scan_has_progress(after):
-    runtime = after.get('runtime') or {}
-    return any(after.get(source) for source in ('tasks', 'scheduler', 'proposals', 'subagents')) or bool(
-        runtime.get('cursor') or runtime.get('prefix_refs') or runtime.get('after', [0, ''])[1],
-    )
+def _scan_has_progress(states):
+    return any(state.get('after') not in (None, 0, '', {}, [0, '']) or state.get('cursor') or state.get('prefix_refs')
+               or state.get('refs') for state in states.values())
 
 
 def _save_protection_scan(store, previous, current):
@@ -433,8 +680,32 @@ def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes, after=(0, '')):
                                   if storage is not None and task_id else None)
         row['thread_stamp'] = (_path_stamp(storage.thread_path(thread_id))
                                if storage is not None and thread_id else None)
-    signature = hashlib.sha256(json.dumps(groups, sort_keys=True, default=str).encode()).hexdigest()
-    return groups, signature, complete
+    signatures = [_signature([{key: value for key, value in row.items() if key not in _VOLATILE_RUNTIME_COLUMNS}
+                              for row in group]) for group in groups.values()]
+    return groups, signatures, complete
+
+
+def _runtime_identity(repo):
+    """库文件身份加 schema 代次：重建或换库才变；WAL 大小、心跳与新行都不改变它。"""
+    from ..runtime_db.schema import runtime_db_identity
+
+    identity = runtime_db_identity(Path(repo.db_path))
+    with repo._runtime_connection() as conn:
+        present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone()
+        row = conn.execute("SELECT value FROM metadata WHERE key='schema_generation'").fetchone() if present else None
+    return None if identity is None else [*identity, None if row is None else row[0]]
+
+
+def _runtime_window_current(agent, repo, tasks, state):
+    """复核已完成的运行库证明：身份、在途链接文件与最后窗口逐组一致，窗口之后也没有新任务运行。"""
+    if (state.get('identity') != _runtime_identity(repo) or not _active_stamps_current(agent, state)
+            or type(state.get('limit')) is not int or type(state.get('max_bytes')) is not int):
+        return False
+    _, signatures, complete = _runtime_task_ref_snapshot(
+        repo, tasks, limit=state['limit'], max_bytes=state['max_bytes'], after=state.get('after') or [0, ''],
+    )
+    return complete and state.get('complete') and signatures == state.get('signatures') \
+        and state.get('cursor') == len(signatures)
 
 
 def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progress=None):
@@ -444,22 +715,23 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progres
     from ..runtime_db.repository import _QUIESCENT_ATTEMPT_STATUSES
 
     previous = getattr(agent, '_skill_task_protection_scan', {}) if progress is None else progress
-    db_path = Path(repo.db_path)
-    db_generation = _signature((_path_stamp(db_path), _path_stamp(str(db_path) + '-wal')))
-    if previous.get('database_generation') != db_generation or not _active_stamps_current(agent, previous):
+    identity = _runtime_identity(repo)
+    if previous.get('identity') != identity or not _active_stamps_current(agent, previous):
         previous = {}
     after = previous.get('after') or [0, '']
     limit = budget.max_entries
-    groups, signature, source_complete = _runtime_task_ref_snapshot(
+    groups, signatures, source_complete = _runtime_task_ref_snapshot(
         repo, tasks, limit=limit, max_bytes=budget.max_bytes, after=after,
     )
     storage = getattr(tasks, 'storage', None)
     active_stamps = dict(previous.get('active_stamps') or {})
     thread_stamps = dict(previous.get('thread_stamps') or {})
-    finished_failure = (not previous.get('complete', True)
-                        and int(previous.get('cursor') or 0) >= len(groups))
-    if previous.get('signature') == signature and not finished_failure:
-        cursor = int(previous.get('cursor') or 0)
+    cursor = previous.get('cursor') if type(previous.get('cursor')) is int else 0
+    processed = previous.get('signatures')
+    finished_failure = not previous.get('complete', True) and cursor >= len(groups)
+    if (not finished_failure and isinstance(processed, list) and cursor <= min(len(processed), len(signatures))
+            and processed[:cursor] == signatures[:cursor]):
+        # 已处理的组逐组未变：窗口内新追加的任务运行从续点接着处理，不重读整窗。
         refs = set(previous.get('refs') or ())
         complete = bool(previous.get('complete', True))
     else:
@@ -541,18 +813,23 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progres
         budget.charge(entries=1, size=_approx_bytes(group))
         cursor = index + 1
     protected.update(refs)
-    # 最后处理片只登记待复核；下一片开头的一次快照即可核验完整证明，避免同片双扫耗尽所有后续来源预算。
-    verified_complete = cursor == len(items) and cursor == initial_cursor and source_complete and complete
+    # 最后窗口处理完后再取一次快照核验：本片处理过的组逐组未变才算完整证明，期间的追加或改动留给下一片续处理。
+    verified_complete = cursor == len(items) and source_complete and complete
+    if verified_complete and cursor != initial_cursor:
+        _, confirmed, confirmed_complete = _runtime_task_ref_snapshot(
+            repo, tasks, limit=limit, max_bytes=budget.max_bytes, after=after,
+        )
+        verified_complete = confirmed_complete and confirmed == signatures
     # 未完成只暴露partial；每次继续都从真实来源指纹重核，不把跨新attempt的旧complete缓存成授权。
     prefix = previous.get('prefix_refs') or []
     if groups and cursor == len(items) and complete and not source_complete:
         last = items[-1][0]
-        after, cursor, signature = [last['task_created_at'], last['task_run_id']], 0, ''
+        after, cursor, signatures = [last['task_created_at'], last['task_run_id']], 0, []
         prefix = sorted(refs)
     updated = {
-        'signature': signature, 'cursor': cursor, 'refs': sorted(refs), 'complete': complete,
+        'signatures': signatures, 'cursor': cursor, 'refs': sorted(refs), 'complete': complete,
         'active_stamps': active_stamps, 'thread_stamps': thread_stamps, 'after': after, 'prefix_refs': prefix,
-        'database_generation': db_generation,
+        'identity': identity, 'limit': limit, 'max_bytes': budget.max_bytes,
     }
     if progress is None:
         agent._skill_task_protection_scan = updated

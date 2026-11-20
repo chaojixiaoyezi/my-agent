@@ -116,10 +116,10 @@ _CANDIDATE_NODE_MARKS = OrderedDict()
 
 @dataclass(frozen=True, slots=True)
 class _CandidateNodeProof:
-    """一轮完整回收在 observed_at 时刻证明的可达集合；reachable 为 None 表示尚未从检查点读回。"""
+    """一轮完整回收在 observed_at 时刻证明的可达集合；reachable 是按分片按需读回的已提交日志视图。"""
     observed_at: float
     file_clock_ns: int
-    reachable: frozenset[str] | set[str] | None
+    reachable: candidate_node_maintenance.ShardedMarks | None
     epoch: str = ""
     marked: int = 0
     digest: str = ""
@@ -130,6 +130,7 @@ class _CandidateNodeMark:
     """一个回收周期：标记集合覆盖周期内并入的每个头，清扫只在当前头已并入且前沿为空时进行。
 
     merged 表示周期内并入过不止一个头；只见过一个头的周期，其集合正是当前树，完成后可原样续用。
+    marks 是已提交标记的分片视图（含本片尚未落盘的 fresh 标记）；淘汰或重启后只按需读回用到的分片。
     """
     records: tuple
     epoch: str
@@ -137,17 +138,18 @@ class _CandidateNodeMark:
     merged: bool = False
     pending: list = field(default_factory=list)
     queued: set[str] = field(default_factory=set)
-    reachable: set[str] = field(default_factory=set)
     fresh: list = field(default_factory=list)
     marked: int = 0
-    hasher: Any = field(default_factory=hashlib.sha256)
     previous: _CandidateNodeProof | None = None
     root_page: dict = field(default_factory=dict)
     shard_prefix: str = ""
     shard_page: dict = field(default_factory=dict)
     committed: tuple | None = None
-    loading: Any = None
-    proof_loading: Any = None
+    marks: Any = None
+
+    def __post_init__(self):
+        if self.marks is None:
+            self.marks = candidate_node_maintenance.ShardedMarks(self.epoch)
 
 
 def _candidate_page(directory, page, budget):
@@ -258,7 +260,7 @@ def _push_candidate_reference(mark, reference):
     """前沿只收未标记、未排队的节点；引用形状按读取时的同一规则先核对，保证可无损写入游标。"""
     ref = reference["ref"]
     name = ref["ref"]
-    if name in mark.reachable or name in mark.queued:
+    if name in mark.queued or (isinstance(name, str) and name in mark.marks.shards.get(name[:2], ())):
         return
     if (not isinstance(name, str) or not candidate_node_name(name) or name != f"{ref['sha256']}.json"
             or type(ref["byte_length"]) is not int):
@@ -279,7 +281,7 @@ def _candidate_mark_cursor(mark):
     """游标快照只含已追加到日志的标记；前沿与清扫位置和该前缀一一对应。"""
     state = {
         "epoch": mark.epoch, "records": list(mark.records), "head": mark.head, "merged": mark.merged,
-        "marked": mark.marked, "digest": mark.hasher.hexdigest(),
+        "marked": mark.marked, "digest": mark.marks.digest,
         "pending": [f"{reference['ref']['sha256']}:{reference['ref']['byte_length']}" for reference in mark.pending],
         "root_page": deepcopy(mark.root_page), "shard_prefix": mark.shard_prefix, "shard_page": deepcopy(mark.shard_page),
     }
@@ -290,20 +292,17 @@ def _candidate_mark_cursor(mark):
     }
 
 
-def _valid_candidate_digest(value):
-    return type(value) is str and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
-
-
 def _resume_candidate_proof(entry):
     if not isinstance(entry, dict):
         return None
     epoch, marked, digest = entry.get("epoch"), entry.get("marked"), entry.get("digest")
     observed, clock = entry.get("observed_at"), entry.get("file_clock_ns")
     if not (candidate_node_maintenance.valid_epoch(epoch) and type(marked) is int and marked >= 0
-            and _valid_candidate_digest(digest) and type(observed) in (int, float) and math.isfinite(observed)
-            and type(clock) is int and clock >= 0):
+            and candidate_node_maintenance.valid_digest(digest) and type(observed) in (int, float)
+            and math.isfinite(observed) and type(clock) is int and clock >= 0):
         return None
-    return _CandidateNodeProof(float(observed), clock, None, epoch, marked, digest)
+    return _CandidateNodeProof(float(observed), clock, candidate_node_maintenance.ShardedMarks(epoch, digest),
+                               epoch, marked, digest)
 
 
 def _resume_candidate_mark(entry, proof, records):
@@ -315,8 +314,8 @@ def _resume_candidate_mark(entry, proof, records):
     epoch, marked, digest, head = entry.get("epoch"), entry.get("marked"), entry.get("digest"), entry.get("head")
     prefix, pending, merged = entry.get("shard_prefix"), entry.get("pending"), entry.get("merged")
     if not (candidate_node_maintenance.valid_epoch(epoch) and type(marked) is int and marked >= 0
-            and _valid_candidate_digest(digest) and (head is None or (type(head) is list and head
-                                                                     and all(type(value) is int for value in head)))
+            and candidate_node_maintenance.valid_digest(digest)
+            and (head is None or (type(head) is list and head and all(type(value) is int for value in head)))
             and type(merged) is bool and type(pending) is list and isinstance(entry.get("root_page"), dict)
             and isinstance(entry.get("shard_page"), dict) and type(prefix) is str
             and (prefix == "" or (len(prefix) == 2 and all(ch in "0123456789abcdef" for ch in prefix)))):
@@ -327,14 +326,14 @@ def _resume_candidate_mark(entry, proof, records):
         return fresh
     mark = _CandidateNodeMark(records, epoch, head=head, merged=merged, pending=references, marked=marked,
                               previous=previous, root_page=deepcopy(entry["root_page"]), shard_prefix=prefix,
-                              shard_page=deepcopy(entry["shard_page"]))
+                              shard_page=deepcopy(entry["shard_page"]),
+                              marks=candidate_node_maintenance.ShardedMarks(epoch, digest))
     mark.queued = {reference["ref"]["ref"] for reference in references}
-    mark.loading = candidate_node_maintenance.MarkLoad(epoch, marked, digest)
     return mark
 
 
-def _candidate_mark(home, path, generation, progress, budget):
-    """优先续用与已提交游标一致的驻留状态；淘汰或重启后从游标与日志前缀重建，日志不可信时从当前头重来。"""
+def _candidate_mark(path, generation, progress):
+    """优先续用与已提交游标一致的驻留状态；淘汰或重启后从游标重建分片视图，分片在用到时才读回核对。"""
     records = generation[0]
     committed = (progress.get("mark"), progress.get("proof"))
     with _PIN_BUILDS_LOCK:
@@ -345,18 +344,6 @@ def _candidate_mark(home, path, generation, progress, budget):
         mark = _resume_candidate_mark(committed[0], committed[1], records)
         mark.committed = deepcopy(committed)
     _remember_candidate_mark(path, mark)
-    if mark.loading is not None:
-        loaded = mark.loading.advance(home, budget)
-        if loaded is False:
-            return mark
-        if loaded:
-            mark.reachable, mark.hasher, mark.loading = mark.loading.names, mark.loading.hasher, None
-        else:
-            # 日志缺失、截短或前缀不符：只丢弃本周期进度，不能用不完整集合授权删除。
-            replacement = _CandidateNodeMark(records, secrets.token_hex(16), previous=mark.previous)
-            replacement.committed = mark.committed
-            mark = replacement
-            _remember_candidate_mark(path, mark)
     return mark
 
 
@@ -376,11 +363,15 @@ def _incorporate_candidate_head(path, generation, mark):
     return True
 
 
-def _mark_candidate_references(index, mark, budget):
+def _mark_candidate_references(home, index, mark, budget):
+    """每个引用先读回其分片再判重；分片读不下本片剩余字节时停在原引用，下一片片首必定读回。"""
     while mark.pending and not budget.exhausted():
         reference = mark.pending[-1]
         name, size = reference["ref"]["ref"], reference["ref"]["byte_length"]
-        if name in mark.reachable:
+        if not mark.marks.ensure(home, name[:2], budget):
+            return
+        marked = mark.marks.shards[name[:2]]
+        if name in marked:
             budget.charge(entries=1)
             mark.pending.pop()
             mark.queued.discard(name)
@@ -393,30 +384,49 @@ def _mark_candidate_references(index, mark, budget):
         budget.charge(entries=1, size=size)
         mark.pending.pop()
         mark.queued.discard(name)
-        mark.reachable.add(name)
+        marked.add(name)
         mark.fresh.append(name)
         for child in candidate_node_children(node):
             _push_candidate_reference(mark, child)
 
 
+def _replacement_candidate_mark(mark):
+    # 日志缺失、截短或摘要不符：只丢弃本周期进度，不能用不完整集合授权删除；旧证明照常保留。
+    replacement = _CandidateNodeMark(mark.records, secrets.token_hex(16), previous=mark.previous)
+    replacement.committed = mark.committed
+    return replacement
+
+
 def _commit_candidate_mark(home, path, mark, progress, errors):
-    """先把本片新标记追加到日志，再把对应快照放进游标；写入失败时游标保持上次已提交状态。"""
+    """先把本片新标记按分片追加，再写出内容寻址的分片索引，最后把对应快照放进游标；任一写入失败时游标保持上次已提交状态。"""
     if mark.fresh:
-        payload = candidate_node_maintenance.encode_marks(mark.fresh)
+        grouped = {}
+        for name in mark.fresh:
+            grouped.setdefault(name[:2], []).append(name)
+        marks = mark.marks
+        appends = {shard: (marks.index[int(shard, 16)][0], candidate_node_maintenance.encode_marks(names))
+                   for shard, names in grouped.items()}
         try:
-            appended = candidate_node_maintenance.append_marks(home, mark.epoch, mark.marked, payload)
+            missing = candidate_node_maintenance.append_marks(home, mark.epoch, appends)
+            if not missing:
+                index, hashers = list(marks.index), {}
+                for shard, (count, payload) in appends.items():
+                    hasher = hashers[shard] = marks.hashers[shard].copy()
+                    hasher.update(payload)
+                    index[int(shard, 16)] = (count + len(grouped[shard]), hasher.digest())
+                digest = candidate_node_maintenance.write_index(home, mark.epoch, index)
         except OSError as exc:
             errors.append(_candidate_node_issue("保存检查点", candidate_node_maintenance.workspace(home), exc))
             _remember_candidate_mark(path, mark)
             return
-        if appended:
-            mark.hasher.update(payload)
+        if missing:
+            # 已提交前缀被移除：内存集合仍正确但无法再续写，改从当前头开始新周期。
+            mark = _replacement_candidate_mark(mark)
+        else:
+            marks.index, marks.digest = index, digest
+            marks.hashers.update(hashers)
             mark.marked += len(mark.fresh)
             mark.fresh.clear()
-        else:
-            # 已提交前缀被移除：内存集合仍正确但无法再续写，改从当前头开始新周期。
-            replacement = _CandidateNodeMark(mark.records, secrets.token_hex(16), previous=mark.previous)
-            mark = replacement
     mark.committed = _candidate_mark_cursor(mark)
     progress["mark"], proof = deepcopy(mark.committed)
     if proof is None:
@@ -426,30 +436,34 @@ def _commit_candidate_mark(home, path, mark, progress, errors):
     _remember_candidate_mark(path, mark)
 
 
-def _candidate_proof_ready(home, mark, now, budget):
-    """只在旧证明已满宽限、可能授权回收时读回其集合；读回失败则放弃该证明，只剩按时间判定。"""
-    proof = mark.previous
-    if proof is None or proof.reachable is not None or proof.observed_at > now - _CANDIDATE_NODE_GRACE_SECONDS:
-        return True
-    load = mark.proof_loading
-    if load is None or load.epoch != proof.epoch:
-        load = mark.proof_loading = candidate_node_maintenance.MarkLoad(proof.epoch, proof.marked, proof.digest)
-    loaded = load.advance(home, budget)
-    if loaded is False:
+def _candidate_shards_ready(home, mark, shard, now, budget):
+    """清扫一个前缀前读回本周期该分片；旧证明已满宽限、可能授权回收时再读回其同一分片，失败则放弃该证明。"""
+    force = budget.size == 0  # 片首两份分片一起读回：每片都从游标重建时清扫仍能前进。
+    if not mark.marks.ensure(home, shard, budget, force=force):
         return False
-    mark.proof_loading = None
-    mark.previous = replace(proof, reachable=load.names) if loaded else None
-    return True
+    proof = mark.previous
+    if proof is None or proof.reachable is None or proof.observed_at > now - _CANDIDATE_NODE_GRACE_SECONDS:
+        return True
+    try:
+        return proof.reachable.ensure(home, shard, budget, force=force)
+    except candidate_node_maintenance.MarkCheckpointUnavailable:
+        mark.previous = None
+        return True
 
 
 def _retire_candidate_checkpoints(home, path, progress, budget, errors):
-    """保留已提交游标与驻留状态引用的日志，其余是被取代的周期或未发表的尝试。"""
-    keep = {progress[key]["epoch"] for key in ("mark", "proof")
-            if isinstance(progress.get(key), dict) and isinstance(progress[key].get("epoch"), str)}
+    """保留已提交游标与驻留状态引用的周期分片及其索引，其余是被取代的周期或未发表的尝试。"""
+    keep = set()
+    for key in ("mark", "proof"):
+        item = progress.get(key)
+        if isinstance(item, dict) and isinstance(item.get("epoch"), str):
+            keep.update((item["epoch"], f"{item['epoch']}.{item.get('digest')}"))
     with _PIN_BUILDS_LOCK:
         resident = _CANDIDATE_NODE_MARKS.get(path)
     if resident is not None:
-        keep.update(item.epoch for item in (resident, resident.previous) if item is not None)
+        keep.update((resident.epoch, f"{resident.epoch}.{resident.marks.digest}"))
+        if resident.previous is not None:
+            keep.update((resident.previous.epoch, f"{resident.previous.epoch}.{resident.previous.digest}"))
     try:
         candidate_node_maintenance.retire_marks(home, keep, budget)
     except OSError as exc:
@@ -457,7 +471,7 @@ def _retire_candidate_checkpoints(home, path, progress, budget, errors):
 
 
 def _sweep_candidate_node(directory, name, mark, now, authority_ns):
-    if name in mark.reachable:
+    if name in mark.marks:
         return False
     with _Directory(directory) as source:
         try:
@@ -491,15 +505,20 @@ def _candidate_node_issue(stage, path, exc):
     )
 
 
-def _sweep_candidate_nodes(directory, mark, budget, now, authority_ns, progress, errors):
+def _sweep_candidate_nodes(home, directory, mark, budget, now, authority_ns, progress, errors):
     while not budget.exhausted():
         prefix = mark.shard_prefix
+        if prefix and not _candidate_shards_ready(home, mark, prefix, now, budget):
+            return False
         current = directory / prefix
         page = mark.shard_page if prefix else mark.root_page
         try:
             with closing(_candidate_page(current, page, budget)) as names:
                 for name in names:
                     if candidate_node_name(name) and name.startswith(prefix):
+                        if not prefix and not _candidate_shards_ready(home, mark, name[:2], now, budget):
+                            page["names"].append(name)  # 根层旧节点：下一片先读回其分片再判定。
+                            return False
                         try:
                             progress["removed"] += _sweep_candidate_node(current, name, mark, now, authority_ns)
                         except OSError as exc:
@@ -543,17 +562,20 @@ def _advance_candidate_nodes(home, path, directory, now, budget, progress, error
                     progress["migrated"] += moved
     if budget.exhausted():
         return True
-    mark = _candidate_mark(home, path, generation, progress, budget)
-    if mark.loading is not None:
-        return True
+    mark = _candidate_mark(path, generation, progress)
     if not _incorporate_candidate_head(path, generation, mark):
         progress["status"] = "legacy_head"
         return False
     index = ImmutableJsonIndex(path.parent, (directory.name,))
-    _mark_candidate_references(index, mark, budget)
-    # 删除前当前头必须已并入且前沿为空；同一提交锁保证本片内头不会再变。
-    if (mark.pending or not _candidate_proof_ready(home, mark, now, budget)
-            or not _sweep_candidate_nodes(directory, mark, budget, now, changed_ns, progress, errors)):
+    try:
+        _mark_candidate_references(home, index, mark, budget)
+        # 删除前当前头必须已并入且前沿为空；同一提交锁保证本片内头不会再变。
+        swept = not mark.pending and _sweep_candidate_nodes(
+            home, directory, mark, budget, now, changed_ns, progress, errors)
+    except candidate_node_maintenance.MarkCheckpointUnavailable:
+        mark = _replacement_candidate_mark(mark)
+        swept = False
+    if not swept:
         _commit_candidate_mark(home, path, mark, progress, errors)
         return True
     _commit_candidate_mark(home, path, mark, progress, errors)
@@ -562,8 +584,8 @@ def _advance_candidate_nodes(home, path, directory, now, budget, progress, error
     if mark.previous is None or now - mark.previous.observed_at >= _CANDIDATE_NODE_GRACE_SECONDS:
         # 证明的文件时钟取本片权威变更时间（文件系统时钟）：其后的重新采用必然不早于它。
         # 集合取冻结副本：续用的周期以后并入新头时不能改变证明时刻的集合。
-        mark.previous = _CandidateNodeProof(now, changed_ns, frozenset(mark.reachable), mark.epoch, mark.marked,
-                                            mark.hasher.hexdigest())
+        mark.previous = _CandidateNodeProof(now, changed_ns, mark.marks.frozen(), mark.epoch, mark.marked,
+                                            mark.marks.digest)
     if mark.merged:
         # 并集含被取代的旧节点，下一周期须从当前头重新标记，它们才能被回收。
         following = _CandidateNodeMark(mark.records, secrets.token_hex(16), previous=mark.previous)

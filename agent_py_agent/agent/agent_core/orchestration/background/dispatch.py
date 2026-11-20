@@ -364,6 +364,19 @@ class _BackgroundProcessWaitOwner:
             self._run_attempts = None
 
 
+# LLM: 两处派工日志留存入口都用已加载 owner 配置的留存切片条目与墙钟预算（经 RetentionScanBudget 同一校验），
+#   不再依赖字面默认值；非法配置按原留存失败语义抛 ValueError。
+# 函数用途: 以已加载配置的留存切片预算推进一片派工日志留存。
+def _retire_dispatch_logs_with_loaded_budget(agent, folder):
+    from ....memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_MS, RetentionScanBudget
+    from .log_retention import retire_dispatch_logs_slice
+
+    config = getattr(agent, 'config', None)
+    budget = RetentionScanBudget.default(config)
+    return retire_dispatch_logs_slice(folder, max_entries=budget.max_entries,
+                                      max_ms=getattr(config, 'retention_scan_slice_ms', RETENTION_SCAN_SLICE_MS))
+
+
 def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchRequest, *,
                                        wait_owner: _BackgroundProcessWaitOwner) -> subprocess.Popen:
     if (type(wait_owner) is not _BackgroundProcessWaitOwner
@@ -371,10 +384,10 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
             or not wait_owner.thread.is_alive() or wait_owner._setup_done.is_set()
             or wait_owner._process is not None):
         raise ValueError('background_wait_owner_scope_changed')
-    from .log_retention import pin_dispatch_log, retire_dispatch_logs_slice
+    from .log_retention import pin_dispatch_log
 
     log_path = Path(_background_log_path(agent, request.launch_id))
-    retire_dispatch_logs_slice(log_path.parent.parent)
+    _retire_dispatch_logs_with_loaded_budget(agent, log_path.parent.parent)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = _background_dispatch_command(agent, request)
     # 标记后台派工子进程:子进程里记录的 runner 会话据此标 in_process=False,宿主已死回收对它
@@ -438,7 +451,7 @@ def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchReques
     identity = getattr(process, '_my_agent_background_log_identity', None)
     if type(returncode) is int and run_attempts and isinstance(identity, tuple) and len(identity) == 2:
         from ....user_space.runtime_paths import runtime_owner_root
-        from .log_retention import record_dispatch_log_exit, retire_dispatch_logs_slice
+        from .log_retention import record_dispatch_log_exit
 
         try:
             log_path = Path(_process_background_log_path(agent, request.launch_id, process))
@@ -448,7 +461,7 @@ def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchReques
                 expected_identity=identity,
                 capture_expected=bool(getattr(process, '_my_agent_bounded_capture_expected', False)),
                 owner_home=runtime_owner_root(agent))
-            retire_dispatch_logs_slice(log_path.parent.parent)
+            _retire_dispatch_logs_with_loaded_budget(agent, log_path.parent.parent)
         except (OSError, ValueError, TypeError):
             pass  # 留存失败保持未知日志；不影响原进程回收及任务收口。
     getter = getattr(getattr(getattr(agent, "subagents", None), "runtime_db", None), "get_attempt", None)

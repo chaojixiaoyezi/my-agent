@@ -1,26 +1,27 @@
 """派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。"""
 from __future__ import annotations
 
-import bisect
 import json
 import os
 import re
 import sqlite3
 import stat
-import threading
 import time
-from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
 
 from ....common import json_io
 from ....common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+from ....memory_store.retention_scan_budget import (
+    RETENTION_SCAN_SLICE_ENTRIES,
+    RETENTION_SCAN_SLICE_MS,
+)
+from ....user_space.directory_paging import directory_page
 
-_SCANS = OrderedDict()
-_LOCK = threading.RLock()
 _DAY_SHARD = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
 _PROGRESS_NAME = '.retention_progress.json'
-_PROGRESS_SCHEMA = 'background_dispatch_log_retention_progress.v1'
+_PROGRESS_SCHEMA = 'background_dispatch_log_retention_progress.v2'
+_MARKER_SUFFIX = '.exit.json'
 
 
 def pin_dispatch_log(handle):
@@ -148,24 +149,21 @@ def _directory_identity(descriptor):
     return info.st_dev, info.st_ino
 
 
-class _ScanProgress:
-    """单根续扫位置：按名有序游标（day, after），不持有任何目录句柄。
-
-    day 为空串表示旧平铺层；after 是该层最后处理过的回执名。名单只是可重建的读取侧缓存，
-    缓存淘汰或进程重启后从同目录的轻量进度文件恢复游标，重新列目录并沿原位置向前推进。
-    """
-
-    __slots__ = ('identity', 'day', 'after', 'days', 'names', 'names_identity')
-
-    def __init__(self, identity, day='', after=''):
-        self.identity = identity
-        self.day = day
-        self.after = after
-        self.days = None
-        self.names = None
-        self.names_identity = None
+def _marker_names(value):
+    return type(value) is list and all(
+        type(name) is str and name.endswith(_MARKER_SUFFIX) and '/' not in name and '\\' not in name
+        for name in value)
 
 
+def _fresh_progress(identity):
+    """一轮从旧平铺层开始：phase=flat 分页根目录，phase=days 按日名升序分页各日目录。"""
+    return {'schema': _PROGRESS_SCHEMA, 'identity': list(identity), 'phase': 'flat', 'day': '',
+            'page': {}, 'listed': False, 'names': [], 'days': []}
+
+
+# LLM: 进度记录是唯一续点（阶段、当前日、目录分页游标、本页未处理回执与旧平铺层收集到的日名）；
+#   形状不符、根目录身份变化或旧版记录一律从头开始一轮，不沿可疑游标跳过任何回执。
+# 函数用途: 读取并校验根目录下的派工日志留存续点。
 def _load_progress(folder, identity):
     try:
         raw = read_bytes_beneath(folder, (_PROGRESS_NAME,), max_bytes=65536, require_dir_fd=True)
@@ -173,10 +171,13 @@ def _load_progress(folder, identity):
     except (OSError, ValueError):
         row = None
     if (isinstance(row, dict) and row.get('schema') == _PROGRESS_SCHEMA and row.get('identity') == list(identity)
-            and type(row.get('day')) is str and type(row.get('after')) is str
-            and (row['day'] == '' or _DAY_SHARD.fullmatch(row['day']))):
-        return _ScanProgress(identity, row['day'], row['after'])
-    return _ScanProgress(identity)
+            and row.get('phase') in ('flat', 'days') and type(row.get('day')) is str
+            and (row['day'] == '' or (row['phase'] == 'days' and _DAY_SHARD.fullmatch(row['day'])))
+            and isinstance(row.get('page'), dict) and type(row.get('listed')) is bool
+            and _marker_names(row.get('names')) and type(row.get('days')) is list
+            and all(type(day) is str and _DAY_SHARD.fullmatch(day) for day in row['days'])):
+        return row
+    return _fresh_progress(identity)
 
 
 def _store_progress(folder, progress, complete):
@@ -186,83 +187,50 @@ def _store_progress(folder, progress, complete):
             path.unlink(missing_ok=True)
         else:
             # 进度只是加速事实：丢失只会让下一轮从头复扫，不影响任何退役判定，故不 fsync。
-            json_io.write_private_json_file_atomic_unlocked(path, {
-                'schema': _PROGRESS_SCHEMA, 'identity': list(progress.identity),
-                'day': progress.day, 'after': progress.after,
-            }, durable=False)
+            json_io.write_private_json_file_atomic_unlocked(path, progress, durable=False)
     except OSError:
         pass
 
 
-def _list_top_level(descriptor):
-    flat, days = [], []
-    with os.scandir(descriptor) as entries:
-        for entry in entries:
-            if _DAY_SHARD.fullmatch(entry.name):
-                days.append(entry.name)
-            elif entry.name.endswith('.exit.json'):
-                flat.append(entry.name)
-    flat.sort(reverse=True)
-    days.sort()
-    return flat, days
-
-
-def _list_markers(descriptor):
-    with os.scandir(descriptor) as entries:
-        return sorted((entry.name for entry in entries if entry.name.endswith('.exit.json')), reverse=True)
-
-
-def _drain(folder, descriptor, progress, result, *, owner_home, cutoff, max_entries, deadline):
-    """按名升序处理游标之后的回执；names 逆序存放以便 pop() 取最小名。"""
-    while progress.names:
-        if result['scanned'] >= max_entries or time.monotonic() >= deadline:
-            return False
-        name = progress.names.pop()
-        result['scanned'] += 1
-        result['deleted'] += _retire_exit_marker(folder, descriptor, name, owner_home, cutoff)
-        progress.after = name
-    return True
-
-
-def _retire_day(folder, descriptor, progress, result, *, owner_home, cutoff, cutoff_day, max_entries, deadline):
-    day = progress.day
+def _list_page(folder, progress, limit):
+    """沿持久游标读取当前目录一页；续点失效时只让本目录从头重列，不跳过任何回执。"""
+    parts = (folder.name,) if progress['phase'] == 'flat' else (folder.name, progress['day'])
     try:
-        child = os.open(day, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-    except OSError:
-        return True
-    try:
-        identity = _directory_identity(child)
-        if progress.names is None or progress.names_identity != identity:
-            progress.names = [name for name in _list_markers(child) if name > progress.after]
-            progress.names_identity = identity
-        if not _drain(folder / day, child, progress, result, owner_home=owner_home, cutoff=cutoff,
-                      max_entries=max_entries, deadline=deadline):
-            return False
-        # 保留仍可能接收新启动日志的近期目录。旧目录仅在原 inode 且为空时退役。
-        if day < cutoff_day:
-            try:
-                info = os.stat(day, dir_fd=descriptor, follow_symlinks=False)
-                if os.path.samestat(info, os.fstat(child)):
-                    os.rmdir(day, dir_fd=descriptor)
-            except OSError:
-                pass
-        return True
-    finally:
-        os.close(child)
+        return directory_page(folder.parent, parts, progress['page'], limit)
+    except (OSError, ValueError):
+        if not progress['page']:
+            raise
+        progress['page'] = {}
+        return directory_page(folder.parent, parts, {}, limit)
 
 
-def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries=128, max_ms=25):
-    """先扫旧平铺日志，再按 UTC 日由旧到新。每片沿持久名游标续扫，与句柄缓存无关。"""
+def _retire_old_day(descriptor, progress, cutoff_day):
+    # 保留仍可能接收新启动日志的近期目录。旧目录仅在仍是刚列完的原 inode 且为空时退役。
+    day = progress['day']
+    if day < cutoff_day:
+        try:
+            info = os.stat(day, dir_fd=descriptor, follow_symlinks=False)
+            if [info.st_dev, info.st_ino] == progress['page'].get('directory_identity'):
+                os.rmdir(day, dir_fd=descriptor)
+        except OSError:
+            pass
+
+
+# LLM: 物理枚举只经共享 directory_page 有界分页（每页不超过剩余条目预算），根目录与每个日目录的游标每片落盘；
+#   每片至少推进一个单元（一页、一个回执或一次换日），30 天截止、身份与退出证明核验、活跃日志租约不变。
+# 函数用途: 先扫旧平铺日志，再按 UTC 日由旧到新，沿持久分页续点退役已收口的过期派工日志。
+def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries=None, max_ms=None):
     folder = Path(folder).absolute()
     if owner_home is not None:
         owner_home = Path(owner_home)
     result = {'scanned': 0, 'deleted': 0, 'complete': False}
     if json_io.fcntl is None or not folder.exists():
         return {**result, 'complete': True}
+    max_entries = RETENTION_SCAN_SLICE_ENTRIES if max_entries is None else max_entries
+    max_ms = RETENTION_SCAN_SLICE_MS if max_ms is None else max_ms
     cutoff = (time.time() if now is None else now) - 30 * 86400
     cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(cutoff))
     deadline = time.monotonic() + max_ms / 1000
-    key = (folder, owner_home)
     handle = json_io.path_thread_lock(folder)
     if not handle.lock.acquire(blocking=False):
         return result
@@ -271,42 +239,68 @@ def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries
             descriptor = open_directory_beneath(folder.parent, (folder.name,), require_dir_fd=True)
         except FileNotFoundError:
             return {**result, 'complete': True}
+        day_fd = None
         try:
-            identity = _directory_identity(descriptor)
-            with _LOCK:
-                progress = _SCANS.pop(key, None)
-            if progress is None or progress.identity != identity:
-                progress = _load_progress(folder, identity)
-            position = (progress.day, progress.after)
-            options = {'owner_home': owner_home, 'cutoff': cutoff, 'max_entries': max_entries, 'deadline': deadline}
-            while result['scanned'] < max_entries and time.monotonic() < deadline:
-                if progress.day == '':
-                    if progress.names is None or progress.names_identity != identity:
-                        flat, progress.days = _list_top_level(descriptor)
-                        progress.names = [name for name in flat if name > progress.after]
-                        progress.names_identity = identity
-                    if not _drain(folder, descriptor, progress, result, **options):
+            progress = _load_progress(folder, _directory_identity(descriptor))
+            progressed = False
+            while True:
+                if progress['names']:
+                    if progressed and time.monotonic() >= deadline:
                         break
-                elif not _retire_day(folder, descriptor, progress, result, cutoff_day=cutoff_day, **options):
+                    progressed = True
+                    if progress['phase'] == 'flat':
+                        directory, fd = folder, descriptor
+                    else:
+                        if day_fd is None:
+                            try:
+                                day_fd = os.open(progress['day'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                                 dir_fd=descriptor)
+                            except OSError:
+                                progress['names'] = []  # 日目录在列名后消失或被替换：放弃该日剩余名单。
+                                continue
+                        directory, fd = folder / progress['day'], day_fd
+                    result['deleted'] += _retire_exit_marker(directory, fd, progress['names'].pop(0), owner_home, cutoff)
+                    continue
+                if progressed and (result['scanned'] >= max_entries or time.monotonic() >= deadline):
                     break
-                if progress.days is None:
-                    progress.days = _list_top_level(descriptor)[1]
-                following = progress.days[bisect.bisect_right(progress.days, progress.day):]
-                if not following:
+                if not progress['listed']:
+                    try:
+                        names, progress['page'], progress['listed'] = _list_page(
+                            folder, progress, max(1, max_entries - result['scanned']))
+                    except OSError:
+                        if progress['phase'] == 'flat':
+                            raise
+                        names, progress['page'], progress['listed'] = [], {}, True  # 日目录不可读：跳过该日。
+                    result['scanned'] += len(names)
+                    progressed = True
+                    if progress['phase'] == 'flat':
+                        progress['days'].extend(name for name in names
+                                                if _DAY_SHARD.fullmatch(name) and name not in progress['days'])
+                    progress['names'] = [name for name in names if name.endswith(_MARKER_SUFFIX)]
+                    continue
+                # 当前目录已列完且其回执均已处理。
+                if progress['phase'] == 'flat':
+                    progress.update(phase='days', day='', days=sorted(progress['days']))
+                    continue
+                if progress['day']:
+                    if day_fd is not None:
+                        os.close(day_fd)
+                        day_fd = None
+                    _retire_old_day(descriptor, progress, cutoff_day)
+                    progress['day'] = ''
+                    continue
+                if not progress['days']:
                     result['complete'] = True
                     break
-                # 换日计入预算：大量空旧目录也按片推进，且每片至少前进一个回执或一个日目录。
+                # 换日计入预算：大量空旧目录也按片推进。
                 result['scanned'] += 1
-                progress.day, progress.after, progress.names = following[0], '', None
-            if result['complete'] or (progress.day, progress.after) != position:
-                _store_progress(folder, progress, result['complete'])
-            if not result['complete']:
-                with _LOCK:
-                    _SCANS[key] = progress
-                    while len(_SCANS) > 32:
-                        _SCANS.popitem(last=False)
+                progressed = True
+                progress.update(day=progress['days'].pop(0), page={}, listed=False)
+            _store_progress(folder, progress, result['complete'])
             return result
         finally:
+            if day_fd is not None:
+                os.close(day_fd)
             os.close(descriptor)
     finally:
         handle.lock.release()
