@@ -116,6 +116,10 @@ class SubAgentListRunsReport:
 
     runs: list[SubAgentTask] = field(default_factory=list)
     load_errors: list[dict[str, Any]] = field(default_factory=list)
+    pending_ids: list[str] = field(default_factory=list)
+    coverage: str = "unknown"
+    generation: str = "unknown"
+    complete: bool = False
 
 
 # LLM: 摘要仅包含持久任务原有标量，frozen不借用任何可变字段，身份不能由路径或文案推断。
@@ -306,10 +310,10 @@ class SubAgentPersistenceService:
 
     # LLM: 热入口只点修一批 pending 并异步请求库存维护；当前仍 partial 时索引读继续 fail closed。
     # 函数用途: 为正常容量/请求/派工读准备索引，限定同步恢复为固定一批且绝不全扫。
-    def prepare_run_index(self):
+    def prepare_run_index(self, *, tolerate_pending: bool = False):
         state = self.run_index.readiness()
         if self.read_only:
-            if not state["complete"] or state["pending"]:
+            if not state["complete"] or (state["pending"] and not tolerate_pending):
                 raise SubagentRunIndexUnavailable("subagent run index coverage unavailable")
             return state
         recovery = self.recover_pending_run_index(batch_size=64) if state["pending"] else {"errors": [], "recovered": 0, "discarded": 0}
@@ -520,23 +524,37 @@ class SubAgentPersistenceService:
 
     def list_current_runs_report(self, *, statuses: tuple[str, ...] = (), thread_id: str = "",
                                  include_unbound_thread: bool = False,
-                                 include_open_capabilities: bool = False) -> SubAgentListRunsReport:
+                                 include_open_capabilities: bool = False,
+                                 tolerate_pending: bool = False) -> SubAgentListRunsReport:
         """按现有索引分页选当前义务，精确重读 canonical 并保留变化/缺失的错误事实。"""
         selection = dict(statuses=statuses, thread_id=str(thread_id or "").strip(),
                          include_unbound_thread=include_unbound_thread,
                          include_open_capabilities=include_open_capabilities)
         try:
             identity = self._run_index_identity()
-            self.prepare_run_index()
-            run_ids, after = [], ""
+            self.prepare_run_index(tolerate_pending=tolerate_pending)
+            run_ids, pending_ids, after = [], [], ""
+            generation, complete = "unknown", False
             while True:
-                page, after = self.run_index.candidate_ids(**selection, after=after, limit=RETENTION_SCAN_SLICE_ENTRIES)
-                run_ids.extend(page)
+                if tolerate_pending:
+                    page = self.run_index.candidate_page(**selection, after=after, limit=RETENTION_SCAN_SLICE_ENTRIES,
+                                                         tolerate_pending=True)
+                    run_ids.extend(page.run_ids)
+                    pending_ids.extend(page.pending_ids)
+                    # 每页独立取快照，汇总代次表示最后观察到的页。
+                    after, generation, complete = page.after, str(page.generation), page.complete
+                else:
+                    ids, after = self.run_index.candidate_ids(**selection, after=after, limit=RETENTION_SCAN_SLICE_ENTRIES)
+                    run_ids.extend(ids)
+                    complete = True
                 if not after:
                     break
             self._require_run_index_identity(identity)
         except Exception as exc:
-            return SubAgentListRunsReport(load_errors=[runtime_error_report(exc, context="subagents.current_index")])
+            error = runtime_error_report(exc, context="subagents.current_index")
+            if isinstance(exc, SubagentRunIndexUnavailable):
+                error["error_code"] = exc.error_code
+            return SubAgentListRunsReport(load_errors=[error])
         report = self.list_runs_by_ids_report(run_ids)
         runs, errors = [], list(report.load_errors)
         for task in report.runs:
@@ -548,7 +566,9 @@ class SubAgentPersistenceService:
                 error = runtime_error_report(exc, context="subagents.current_index")
                 error["run_id"] = task.id
                 errors.append(error)
-        return SubAgentListRunsReport(runs, errors)
+        return SubAgentListRunsReport(runs, errors, pending_ids=pending_ids,
+                                      coverage="complete" if complete else "partial", generation=generation,
+                                      complete=complete)
 
     # LLM: 托管与本地 manager 共用 run_index 的根候选，再逐 ID 复核 canonical；不回退全历史。
     # 函数用途: 按一个根任务读取其子代理树，避免后台调度每秒复制全部历史 run。
