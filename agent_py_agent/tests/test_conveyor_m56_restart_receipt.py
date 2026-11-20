@@ -22,7 +22,7 @@ from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_fil
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.gateway_parts.restart_control import execute_restart_control
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.cli import gateway_process, gateway_restart_handover
+from agent_py_agent.cli import gateway_loops, gateway_process, gateway_restart_handover
 from agent_py_agent.cli.parser import build_parser
 
 
@@ -179,13 +179,22 @@ def test_private_gateway_startup_records_independent_phase_times(tmp_path, monke
         cleanup_result={"status": "clean_drain", "handover_allowed": True},
     )
     paths.processing.mkdir(parents=True, exist_ok=True)
-    write_json_file_atomic(paths.processing / "gwreq-inflight.json", {
-        "id": "gwreq-inflight", "kind": "ask", "prompt": "Private smoke fixture", "attempts": 1,
+    request_id = "gwreq-inflight"
+    write_json_file_atomic(paths.processing / f"{request_id}.json", {
+        "id": request_id, "kind": "ask", "prompt": "Private smoke fixture", "attempts": 1,
         "status": "processing", "turn_phase": "open", "created_at": time.time() - 5,
         "lease_started_at": time.time() - 10, "save": False,
     })
     listener = {}
     observed = {}
+    request_settled = Event()
+    execute = gateway_loops._RequestDispatcher._execute
+
+    def observe_request_completion(dispatcher, claim, user_key, conversation_key):
+        execute(dispatcher, claim, user_key, conversation_key)
+        if claim.request_id == request_id:
+            # 原执行器返回时已经释放准入，烟测可安全发出停止请求。
+            request_settled.set()
 
     def bind_ephemeral(agent, actual_paths, port):
         assert port == 0 and actual_paths.root == paths.root
@@ -202,6 +211,8 @@ def test_private_gateway_startup_records_independent_phase_times(tmp_path, monke
             assert connection.getresponse().status < 500
         finally:
             connection.close()
+        assert request_settled.wait(timeout=10), f"{request_id} did not settle within 10 seconds"
+        assert (context.paths.terminal / f"{request_id}.json").is_file(), f"{request_id} has no terminal record"
         stop = gateway_process._write_gateway_stop_request(context.paths, reason="private smoke complete",
                                                            target_pid=os.getpid())
         assert stop is not None
@@ -209,6 +220,7 @@ def test_private_gateway_startup_records_independent_phase_times(tmp_path, monke
 
     monkeypatch.setattr(gateway_process, "_start_gateway_http", bind_ephemeral)
     monkeypatch.setattr(gateway_process, "_run_gateway_service_loop", observe_ready)
+    monkeypatch.setattr(gateway_loops._RequestDispatcher, "_execute", observe_request_completion)
     started_ns = time.perf_counter_ns()
     assert gateway_process.cmd_gateway_run(args) == 0
     receipt = observed["state"]["restart_receipt"]
