@@ -7,9 +7,13 @@ import json
 import math
 import re
 from dataclasses import MISSING, asdict, dataclass, field, fields
+from functools import lru_cache
+from operator import attrgetter
+from sys import intern
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
+from ..common.fast_dataclass import fast_frozen, slot_setter
 from ..common.log_redaction import (
     _field_is_sensitive,
     redact_sensitive_text,
@@ -26,6 +30,11 @@ _TOKEN_METRICS = frozenset(('tokens', 'max_tokens', 'input_tokens', 'output_toke
 _RAW_SECRET = re.compile(r'(?i)(?:\bbearer\s+|(?:api_?key|token)\s*=|<redacted[^>]*>|\[redacted\])')
 _URL_CREDENTIAL = re.compile(r'(?i)://[^/?#\s]*:[^/?#\s]*@|[?&](?:api_?key|access_token|password|secret|token)=')
 _BEARER_VALUE = re.compile(r'''(?i)(\bbearer\s+)[^\s,;"'<>]+''')
+
+
+def _redacted_bearer_value(match: re.Match[str]) -> str:
+    # 保留头部原样，直接生成替换值，避免每次查询正则模板缓存。
+    return match.group(1) + "<redacted>"
 
 
 # LLM: 字段秘密判定沿统一脱敏口；camelCase只规范用于判定，不改公开键名，安全计数不丢失。
@@ -47,7 +56,7 @@ def clean_json(value):
     if isinstance(value, (list, tuple)):
         return [clean_json(item) for item in value]
     if type(value) is str:
-        return _BEARER_VALUE.sub(r'\1<redacted>', redact_sensitive_text(value))
+        return _BEARER_VALUE.sub(_redacted_bearer_value, redact_sensitive_text(value))
     if value is None or type(value) in (int, bool):
         # 字段敏感性已在字典分支裁决；这些精确JSON标量没有文本，不再遍历通用容器净化口。
         return value
@@ -64,8 +73,8 @@ class AssetDescriptorValidationError(ValueError):
         self.expected = expected
         self.actual_type = actual_type
         self.example = example
-        super().__init__(f'ASSET_DESCRIPTOR_INVALID: {path} 期望 {expected}，实际 {actual_type}；'
-                         f'示例 {example}；此校验不写入资产，请修正此字段后重新调用')
+        ValueError.__init__(self, f'ASSET_DESCRIPTOR_INVALID: {path} 期望 {expected}，实际 {actual_type}；'
+                            f'示例 {example}；此校验不写入资产，请修正此字段后重新调用')
 
 
 def _annotation_description(annotation):
@@ -89,58 +98,92 @@ def _descriptor_type_error(path, annotation, value):
     return AssetDescriptorValidationError(path, expected, type(value).__name__, example)
 
 
-# LLM: dataclass注解是类型权威，不接受bool冒充计数或字符串冒充列表；嵌套对象复制后归一。
-# 函数用途: 把JSON列表和嵌套对象恢复为严格契约值。
-def _convert(value, annotation, path="descriptor"):
+def _bind_record_value(annotation):
+    """绑定声明的值类型，构造时保留原字段路径与首个校验错误。"""
     origin, args = get_origin(annotation), get_args(annotation)
     if origin is UnionType:
-        for option in args:
-            try:
-                return _convert(value, option, path)
-            except (ValueError, TypeError):
-                continue
-        raise _descriptor_type_error(path, annotation, value)
-    if origin is tuple and isinstance(value, (list, tuple)):
-        return tuple(_convert(item, args[0], f"{path}[{index}]") for index, item in enumerate(value))
-    if origin is dict and isinstance(value, dict) or annotation is object:
-        return clean_json(value)
+        options = tuple(_bind_record_value(option) for option in args)
+
+        def convert_union(value, path):
+            for convert in options:
+                try:
+                    return convert(value, path)
+                except (ValueError, TypeError):
+                    continue
+            raise _descriptor_type_error(path, annotation, value)
+
+        return convert_union
+    if origin is tuple:
+        converters = tuple(_bind_record_value(item) for item in args[:1])
+
+        def convert_tuple(value, path):
+            if not isinstance(value, (list, tuple)):
+                raise _descriptor_type_error(path, annotation, value)
+            return tuple(converters[0](item, f"{path}[{index}]") for index, item in enumerate(value))
+
+        return convert_tuple
+    if annotation is object or origin is dict:
+        def convert_json(value, path):
+            if origin is dict and not isinstance(value, dict):
+                raise _descriptor_type_error(path, annotation, value)
+            return clean_json(value)
+
+        return convert_json
     if isinstance(annotation, type) and issubclass(annotation, _Record):
-        try:
-            return annotation.from_dict(value.to_dict() if isinstance(value, annotation) else value)
-        except AssetDescriptorValidationError as error:
-            raise AssetDescriptorValidationError(path + error.field.removeprefix('descriptor'),
-                error.expected, error.actual_type, error.example) from None
-    if type(value) is annotation or annotation is float and type(value) in (int, float):
-        return clean_json(value)
-    raise _descriptor_type_error(path, annotation, value)
+        def convert_record(value, path):
+            try:
+                return annotation.from_dict(value.to_dict() if isinstance(value, annotation) else value)
+            except AssetDescriptorValidationError as error:
+                raise AssetDescriptorValidationError(path + error.field.removeprefix('descriptor'),
+                    error.expected, error.actual_type, error.example) from None
+
+        return convert_record
+
+    def convert_scalar(value, path):
+        if type(value) is annotation or annotation is float and type(value) in (int, float):
+            return clean_json(value)
+        raise _descriptor_type_error(path, annotation, value)
+
+    return convert_scalar
+
+
+@lru_cache
+def _record_field_readers(record_fields):
+    return tuple((item.name, attrgetter(intern(item.name))) for item in record_fields)
 
 
 # LLM: 字段表、类型与枚举统一在构造和from_dict执行；实例只携带脱敏副本，不进行IO。
 # 类用途: 给所有资产值对象提供严格序列化和恢复，避免各存储自行宽松解析。
 class _Record:
+    __slots__ = ()
+
     # LLM: dataclass生成构造器调用本钩子；冻结实例只在初始化时归一字段。
     # 函数用途: 校验并复制类型，拒绝负计数、空标识符和未知种类/评估决定。
     def __post_init__(self):
         record_type = type(self)
-        hints = _BUILTIN_FIELD_TYPES.get(record_type)
-        if hints is None:
-            hints = get_type_hints(record_type)
-        for item in fields(self):
-            value = _convert(getattr(self, item.name), hints[item.name], "descriptor." + item.name)
-            if item.name in {"id", "source_id", "target_id", "candidate_id", "step_id"}:
+        layout = _BUILTIN_FIELD_LAYOUTS.get(record_type)
+        readers, normalizers = _record_field_layout(record_type) if layout is None else layout
+        for name, read, normalize, path, write in normalizers:
+            original = read(self)
+            value = normalize(original, path)
+            if name in {"id", "source_id", "target_id", "candidate_id", "step_id"}:
                 safe_asset_id(value)
-            if item.name in {"name", "credential_ref"} and not value.strip():
+            if name in {"name", "credential_ref"} and not value.strip():
                 raise ValueError("资产名称或凭据引用不能为空")
-            if item.name in {"sample_count", "run_count", "consecutive_failures", "last_duration_ms"} and value is not None and value < 0:
+            if name in {"sample_count", "run_count", "consecutive_failures", "last_duration_ms"} and value is not None and value < 0:
                 raise ValueError("运行计数和耗时不能为负")
-            object.__setattr__(self, item.name, value)
-        if isinstance(self, AssetDescriptor) and self.kind not in ASSET_KINDS:
-            raise ValueError("未知资产kind")
-        if isinstance(self, EvaluatedCandidate) and self.decision not in {"active", "ignored", "pending"}:
-            raise ValueError("未知候选评估decision")
+            if write is None:
+                object.__setattr__(self, name, value)
+            elif value is not original:
+                write(self, value)
+        if record_type is not AssetRefs:
+            if isinstance(self, AssetDescriptor) and self.kind not in ASSET_KINDS:
+                raise ValueError("未知资产kind")
+            if isinstance(self, EvaluatedCandidate) and self.decision not in {"active", "ignored", "pending"}:
+                raise ValueError("未知候选评估decision")
         if isinstance(self, AssetRefs):
-            for item in fields(self):
-                for value in (() if item.name == 'skill_dir' else getattr(self, item.name)):
+            for name, read in readers:
+                for value in (() if name == 'skill_dir' else read(self)):
                     safe_asset_id(value)
 
     # LLM: 每次投影再次脱敏，以免调用方修改可变metadata后把秘密字段带出。
@@ -243,8 +286,10 @@ class CredentialBindingRef(_Record):
     # LLM: 适配现行credential_ref/alias/authentication/status，不发明credential_id或target别名；无IO。
     # 函数用途: 拒绝把密钥、授权串或含秘密URL冒充凭据引用和说明。
     def __post_init__(self):
-        for item in fields(self):
-            value = getattr(self, item.name)
+        layout = _BUILTIN_FIELD_LAYOUTS.get(type(self))
+        readers = layout[0] if layout is not None else _record_field_readers(fields(self))
+        for _, read in readers:
+            value = read(self)
             if isinstance(value, str) and (_RAW_SECRET.search(value) or _URL_CREDENTIAL.search(value)
                     or redact_sensitive_value(value) != value):
                 raise ValueError('CredentialBindingRef must not contain raw secret values')
@@ -327,14 +372,14 @@ def execution_definition_ref(value, *, kind=None):
 
 # LLM: 依赖引用仅为各kind安全ID；可选skill_dir只保存原目录名作展示，不能授路径权限，空值不输出。
 # 类用途: 按四类资产组织正向或反向引用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class AssetRefs(_Record):
     workflows: tuple[str, ...] = ()
     scripts: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
     monitors: tuple[str, ...] = ()
     skill_dir: str = ''
-
 
 # LLM: 摘要只表示累计观察，不替代运行账本；计数和耗时非负，错误自动脱敏，旧JSON缺省空错误。
 # 类用途: 显示资产最近运行、连续失败和安全错误摘要。
@@ -429,7 +474,24 @@ def asset_descriptor_from_definition(data, asset_id, kind) -> AssetDescriptor:
     return AssetDescriptor.from_dict(data)
 
 
-# 内置记录的字段合同由模块定义。每个类型只解析一次注解，插件子类仍按自身定义校验。
-_BUILTIN_FIELD_TYPES = {
-    cls: get_type_hints(cls) for cls in _Record.__subclasses__() if cls.__module__ == __name__
+
+def _record_field_layout(cls):
+    hints = get_type_hints(cls)
+    if cls is AssetRefs:
+        readers = tuple((item.name, cls.__dict__[item.name].__get__) for item in fields(cls))
+    else:
+        readers = _record_field_readers(fields(cls))
+    normalizers = tuple(
+        (name, read, _bind_record_value(hints[name]), "descriptor." + name,
+         slot_setter(cls, name) if cls is AssetRefs else None)
+        for name, read in readers
+    )
+    return readers, normalizers
+
+
+# 内置记录的校验和读取器在导入时一次绑定，插件子类仍按自身字段定义校验。
+_BUILTIN_FIELD_LAYOUTS = {
+    cls: _record_field_layout(cls)
+    for cls in _Record.__subclasses__()
+    if cls.__module__ == __name__ and globals().get(cls.__name__) is cls
 }

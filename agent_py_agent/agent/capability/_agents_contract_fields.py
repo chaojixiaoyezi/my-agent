@@ -3,6 +3,9 @@
 
 import math
 from dataclasses import fields
+from functools import lru_cache
+from operator import attrgetter
+from sys import intern
 from types import UnionType
 from typing import get_args, get_origin
 
@@ -15,7 +18,7 @@ class AgentsContractError(ValueError):
     def __init__(self, code: str, field: str):
         self.code = code
         self.field = field
-        super().__init__(f"{code}:{field}")
+        ValueError.__init__(self, f"{code}:{field}")
 
 
 # LLM: 只接受完整对象与已声明字段；不补旧记录，不将模型附带字段变成权限。
@@ -66,11 +69,16 @@ def _finite_number(value) -> bool:
         return False
 
 
+@lru_cache
+def _scalar_field_readers(record_fields):
+    return tuple((field, attrgetter(intern(field.name))) for field in record_fields)
+
+
 # LLM: 每个合同有独立的 v1 完整 JSON；未知版本拒绝，不隐式升级。
 # 函数用途: 核对标量类型和协议版本，错误只报告声明字段。
 def validate_scalars(record) -> None:
-    for field in fields(record):
-        if not scalar_matches(getattr(record, field.name), field.type):
+    for field, read in _scalar_field_readers(fields(record)):
+        if not scalar_matches(read(record), field.type):
             raise AgentsContractError("AGENTS_CONTRACT_FIELD_INVALID", field.name)
     if record.schema_version != 1:
         raise AgentsContractError("AGENTS_CONTRACT_SCHEMA_UNSUPPORTED", "schema_version")

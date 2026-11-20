@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..backends.reasoning_control import normalize_reasoning_level
+from ..common.fast_dataclass import fast_frozen, slot_setter
 from ..settings.decision_settings_schema import empty_decision_settings
 from .business_contracts import BusinessExecutionContext
 from .capability_selection_state import (
@@ -515,7 +516,8 @@ def _thread_provider_fields(data):
 # LLM: ConversationThread 是历史、压缩点、模型引用与选择版本、决策覆盖及上下文投影的唯一持久权威；
 # 选择版本不能代替连接版本或授权；方法账本只经 capability.method_carry 使用，不进入摘要与模型线程投影。
 # 类用途: 保存模型设置、压缩点、目录与分叉来源；工作区修订只约束目录切换，不替代授权。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ConversationThread:
     thread_id: str
     canonical_user_id: str
@@ -622,7 +624,7 @@ class ConversationThread:
         if self.business_context is not None and not isinstance(self.business_context, BusinessExecutionContext):
             raise TypeError("business_context 必须是宿主 BusinessExecutionContext 或 None")
         if not self.workspace_root and self.cwd:
-            object.__setattr__(self, "workspace_root", self.cwd)
+            _set_thread_workspace_root(self, self.cwd)
         if type(self.revision) is not int or self.revision < 1:
             raise ValueError("会话工作区修订无效")
         if type(self.fork_lineage_depth) is not int or self.fork_lineage_depth < 0:
@@ -651,11 +653,14 @@ class ConversationThread:
             summary_bytes = self.summary.encode("utf-8")
             if len(summary_bytes) > 1024:
                 evidence["summary"] = {"$thread_summary_sha256": hashlib.sha256(summary_bytes).hexdigest()}
-        for key in ("conversation_methods", "loaded_tool_names", "learning_source"):
-            if not getattr(self, key):
-                payload.pop(key, None)
-        for key in ("last_user_message_id", "last_user_request_id"):
-            if not getattr(self, key):
+        for key, value in (
+            ("conversation_methods", self.conversation_methods),
+            ("loaded_tool_names", self.loaded_tool_names),
+            ("learning_source", self.learning_source),
+            ("last_user_message_id", self.last_user_message_id),
+            ("last_user_request_id", self.last_user_request_id),
+        ):
+            if not value:
                 payload.pop(key, None)
         return payload
 
@@ -799,6 +804,9 @@ def _verbose_level(value: object) -> str:
 def _runtime_workspace_roots(value: object) -> tuple[str, ...]:
     items = value if isinstance(value, (list, tuple)) else ()
     return tuple(str(item) for item in items if str(item or "").strip())
+
+
+_set_thread_workspace_root = slot_setter(ConversationThread, "workspace_root")
 
 
 # LLM: 一次后台答复的权威落账事实。canonical 记录 (persisted) 与外部送达 (delivery_status)
@@ -976,7 +984,8 @@ class ObservationEvent:
         )
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class WakeSignal:
     wake_signal_id: str
     thread_id: str

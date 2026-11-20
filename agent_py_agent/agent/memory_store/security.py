@@ -13,6 +13,8 @@ file writes must all apply the same rule set.
 import re
 from dataclasses import dataclass
 
+from ..common.fast_dataclass import fast_frozen
+
 _CREDENTIAL_TOKEN_PATTERN: re.Pattern[str] = re.compile(
     r"\bghp_[A-Za-z0-9]{36}\b"
     r"|\bgithub_pat_[A-Za-z0-9_]{60,}\b"
@@ -138,7 +140,8 @@ _MEMORY_THREAT_PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
 
 # LLM: finding 只携带有界命中片段，不能把完整敏感载荷带入错误出口。
 # 类用途: 表示一条持久内容安全命中，供工具和 repository 生成结构化诊断。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class MemoryThreatFinding:
     pattern_id: str
     category: str
@@ -148,7 +151,8 @@ class MemoryThreatFinding:
 
 # LLM: 扫描结果是纯数据，不拥有写入或权限决定；调用方只按 safe/findings 消费。
 # 类用途: 汇总一次安全扫描是否可持久化以及命中的规则。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class MemoryThreatScanResult:
     safe: bool
     findings: tuple[MemoryThreatFinding, ...] = ()

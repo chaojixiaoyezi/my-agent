@@ -13,10 +13,13 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
+
 
 # LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
 # 类用途: 承载一层配置值、来源及优先级，不自带写入授权。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ConfigLayer:
     source: str
     priority: int
@@ -31,7 +34,8 @@ class ConfigLayer:
 
 # LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
 # 类用途: 保存合并后的配置值及逐键来源，供运行时统一读取。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class EffectiveConfig:
     values: dict[str, Any]
     sources: dict[str, dict[str, object]]
@@ -151,8 +155,17 @@ def compact_idle_parameters(config: object) -> tuple[int, int]:
 # LLM: 三个显式管理员开关名共用严格bool并集；调用方须已选可信配置，用户覆盖层不能提供这些键。
 # 函数用途: 识别管理员强制压缩开关，不让别名被默认false遮住。
 def compact_admin_forced(config: object) -> bool:
-    keys = ("force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced")
-    return any((config.get(key) if isinstance(config, Mapping) else getattr(config, key, False)) is True for key in keys)
+    if isinstance(config, Mapping):
+        return (
+            config.get("force_compact_trigger_percent") is True
+            or config.get("admin_force_compact_trigger_percent") is True
+            or config.get("memory_compact_admin_forced") is True
+        )
+    return (
+        getattr(config, "force_compact_trigger_percent", False) is True
+        or getattr(config, "admin_force_compact_trigger_percent", False) is True
+        or getattr(config, "memory_compact_admin_forced", False) is True
+    )
 
 
 __all__ = ["ConfigLayer", "EffectiveConfig", "merge_config_layers", "resolve_compact_trigger_policy", "compact_idle_parameters"]

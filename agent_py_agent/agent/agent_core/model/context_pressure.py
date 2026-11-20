@@ -7,12 +7,16 @@ import json
 import sys
 import time
 from copy import copy
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass
+from functools import lru_cache
+from operator import attrgetter
 
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...backends.request_budget import RequestBudgetExceeded, RequestTokenBudget
 from ...backends.request_content import classify_nontext_content
 from ...backends.tool_protocol_adapter import tools_for_choice
+from ...common import hot_json
+from ...common.fast_dataclass import fast_frozen, fast_replace
 from ...conversation.compact_calibration import (
     CALIBRATION_SCOPE_CURRENT_RUN,
     CALIBRATION_SCOPE_DURABLE_THREAD,
@@ -58,7 +62,8 @@ _COMPACT_CANDIDATE_OBSERVATION_BASIS = "compact_candidate"
 _MEMO_ESTIMATE_TOKENS = estimate_tokens
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ModelVisibleContextBudget:
     """One runtime-owned snapshot of the provider-visible context budget."""
 
@@ -70,7 +75,8 @@ class ModelVisibleContextBudget:
 
 # LLM: 同次preflight保留原始估算、实际校准是否生效及CAS绑定；公开来源仅数值/枚举，组成之和仍等于current，绑定不公开。
 # 类用途: 保存一次真实模型调用前的上下文总量、窗口、压缩线和各组成部分，供 TUI 实时展示。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ModelVisibleContextSnapshot:
     context_window_tokens: int
     compact_trigger_tokens: int
@@ -783,7 +789,7 @@ def _estimate_visible_components(params, prepared, fingerprint):
             history, prior_messages=getattr(params, "provider_history_messages", None),
             tool_context=getattr(params, "tool_context", None), forwarded_guidance=already_forwarded, copy_prior=False,
         )
-        projection = replace(projection, messages=messages)
+        projection = fast_replace(projection, messages=messages)
     current, components = projected_model_context_components(
         projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve() if native else 0,
     )
@@ -854,10 +860,15 @@ def project_request_prompt_history(params, prompt):
             return cached[2], list(cached[3])
     projection_params = params
     if memo is not None and key is not None:
+        from ..runtime.loop_models import RunParams
+
         try:
             projection_params = copy(params)
             snapshot = deepcopy(history)
-            object.__setattr__(projection_params, "tool_ir_history", snapshot)
+            if type(projection_params) is RunParams:
+                projection_params.tool_ir_history = snapshot
+            else:
+                object.__setattr__(projection_params, "tool_ir_history", snapshot)
             if key != _prompt_history_projection_key(params, prompt, snapshot, conversation, project_native_prompt_history):
                 key, projection_params = None, params
         except (AttributeError, TypeError, ValueError, RecursionError):
@@ -874,6 +885,14 @@ def project_request_prompt_history(params, prompt):
     return projected, result
 
 
+def _context_memo_scope(params):
+    return (
+        str(getattr(params, "session_id", "") or ""),
+        str(getattr(params, "run_id", "") or ""),
+        str(getattr(params, "request_id", "") or ""),
+    )
+
+
 # LLM: 内容键含本轮降级覆盖的完整类型和值树，不能把缓存中的原文或旧桩送出；scope和投影器变化同样失效。
 # 函数用途: 为同轮纯投影构造含降级桩的精确结构键，不能在桩变化后复用旧原文或旧计量。
 def _prompt_history_projection_key(params, prompt, history, conversation, projector):
@@ -882,7 +901,7 @@ def _prompt_history_projection_key(params, prompt, history, conversation, projec
         return None
     # 外层history沿原合同统一序列类型；只在O(1)项数门通过后装箱，最多4096个引用。
     history = tuple(history)
-    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
+    scope = _context_memo_scope(params)
     try:
         content = _context_value_fingerprint((scope, str(prompt), prompt_cache_layout(prompt), history, conversation,
                                               getattr(params, "compact_degradation_stubs", None) or {}))
@@ -904,6 +923,12 @@ _CONTEXT_MEMO_PAIR_BYTES = sys.getsizeof((None, None))
 _CONTEXT_MEMO_EMPTY_TUPLE_BYTES = sys.getsizeof(())
 
 
+# 以声明字段为键、有界复用属性读取器，临时对象类型无需进入全局注册表。
+@lru_cache
+def _context_field_readers(data_fields):
+    return tuple((item.name, attrgetter(sys.intern(item.name))) for item in data_fields)
+
+
 def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) -> tuple | None:
     budget = [_CONTEXT_MEMO_KEY_MAX_BYTES, _CONTEXT_MEMO_KEY_MAX_NODES] if _budget is None else _budget
     budget[1] -= 1
@@ -923,7 +948,7 @@ def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) 
     elif is_dataclass(value) and not isinstance(value, type):
         if len(value.__dataclass_fields__) > budget[1]:
             return None
-        entries = ((item.name, getattr(value, item.name)) for item in fields(value))
+        entries = ((name, read(value)) for name, read in _context_field_readers(fields(value)))
     else:
         return None
     # 每条pair及最终tuple槽位预付，构造期间也不越过同一预算。
@@ -951,7 +976,7 @@ def _context_estimate_key(params, projection, history, guidance, forwarded, surf
     if (sys.getsizeof(projection.provider_prompt) > _CONTEXT_MEMO_KEY_MAX_BYTES
             or len(forwarded) > _CONTEXT_MEMO_KEY_MAX_NODES):
         return None
-    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
+    scope = _context_memo_scope(params)
     sources = (scope, str(projection.provider_prompt or ""), history, guidance,
                getattr(params, "provider_history_messages", None) if native else None,
                getattr(params, "tool_context", None) if native else None, tuple(sorted(forwarded)))
@@ -1098,7 +1123,7 @@ def _tokenizer_identity_key(agent: object, protocol: str) -> str:
 
 # 函数用途: 按固定序列化规则对结构化载荷取 sha256 十六进制摘要。
 def _sha256_json(payload: dict[str, object]) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = hot_json.dumps(payload, ensure_ascii=False, sort_keys=True, compact=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

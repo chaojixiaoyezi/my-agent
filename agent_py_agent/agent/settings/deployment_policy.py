@@ -9,13 +9,16 @@ import stat
 import threading
 from collections import OrderedDict
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
-from functools import cache
+from functools import lru_cache
+from operator import attrgetter
 from pathlib import Path
+from sys import intern
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
 from ..common import nofollow_fs
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
+from ..common.fast_dataclass import fast_frozen, slot_setter
 from ..common.nofollow_fs import read_bytes_beneath
 from ..user_space.home_layout import MyAgentHomePaths
 
@@ -35,7 +38,7 @@ class DeploymentPolicyError(ValueError):
     # LLM: reason 由内部固定分支给出，不从正文或异常消息反推。
     # 函数用途: 生成可以公开展示的配置错误。
     def __init__(self, reason: str = "deployment_policy_invalid") -> None:
-        super().__init__("部署策略无效或不可用，未采用其它配置来源。")
+        ValueError.__init__(self, "部署策略无效或不可用，未采用其它配置来源。")
         self.reason = reason
 
 
@@ -46,7 +49,7 @@ class DeploymentPolicyCommitError(DeploymentPolicyError):
     # 函数用途: 保存安全的提交状态属性及固定原因码，提醒调用方核实后再更新。
     def __init__(self, *, expected_revision: int, committed: bool | None) -> None:
         reason = "deployment_policy_durability_unconfirmed" if committed is True else "deployment_policy_commit_unconfirmed"
-        super().__init__(reason)
+        DeploymentPolicyError.__init__(self, reason)
         self.committed = committed
         self.unconfirmed = True
         self.durability_confirmed = False
@@ -58,20 +61,28 @@ class DeploymentPolicyCommitError(DeploymentPolicyError):
 # LLM: 所有嵌套策略在直接构造和 JSON 解析时都走同一严格校验；冻结对象不携带第二份可变字典。
 # 类用途: 让策略字段具有真正的类型、范围与不可变序列。
 class _PolicyNode:
+    __slots__ = ()
+
     # LLM: 只验证内存标量，既不读文件也不纠正非法值；bool 不得冒充数字。
     # 函数用途: 拒绝非法直接构造并将合法列表冻结成元组。
     def __post_init__(self) -> None:
-        hints = _policy_hints(type(self))
-        for item in fields(self):
-            if not item.name.startswith("_"):
-                value = _typed_value(hints[item.name], getattr(self, item.name),
-                                     positive=item.metadata.get("positive", False), allow_empty=item.metadata.get("allow_empty", False))
-                object.__setattr__(self, item.name, value)
+        policy_type = type(self)
+        normalizers = _FAST_POLICY_NORMALIZERS.get(policy_type)
+        if normalizers is None:
+            normalizers = _bind_policy_fields(policy_type)
+        for name, read, normalize, write in normalizers:
+            original = read(self)
+            value = normalize(original)
+            if write is None:
+                object.__setattr__(self, name, value)
+            elif value is not original:
+                write(self, value)
 
 
 # LLM: 23 项守卫的默认与说明唯一归本类，保留各自 0 语义；暂态空序列关闭重试，熔断退避必须非空有限。
 # 类用途: 保存运行守卫唯一的 typed 默认值与显式覆盖。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RuntimeGuardPolicy(_PolicyNode):
     repeat_fail_threshold: int = field(default=10, metadata={"description": "相同工具连续失败后提示换策略的次数阈值"})
     readonly_no_progress_threshold: int = field(default=3, metadata={"description": "只读工具重复无进展后的策略提示阈值"})
@@ -122,7 +133,9 @@ class RuntimeGuardPolicy(_PolicyNode):
     # 函数用途: 为原审计及冻结调用方提供只读值投影。
     @property
     def values(self) -> dict:
-        return {item.name: getattr(self, item.name) for item in fields(self) if item.init}
+        policy_type = type(self)
+        readers = _RUNTIME_GUARD_FIELDS if policy_type is RuntimeGuardPolicy else _policy_field_readers(policy_type)
+        return {item.name: read(self) for item, read in readers if item.init}
 
     # LLM: 区分显式宿主覆盖与 Python 默认，不能把默认伪称来自 JSON。
     # 函数用途: 返回每个字段的真实来源标签。
@@ -133,7 +146,8 @@ class RuntimeGuardPolicy(_PolicyNode):
     # LLM: typed 字段已严格校验，未登记内部算法键只使用调用方原代码默认，不从文件接收新键。
     # 函数用途: 保留原整数读取 API，而不维护可变 values 配置。
     def int_value(self, key: str, default: int = 0) -> int:
-        value = getattr(self, key, default)
+        read = _runtime_guard_reader(self, key)
+        value = read(self) if read is not None else getattr(self, key, default)
         if type(value) is not int:
             raise DeploymentPolicyError()
         return max(0, value)
@@ -141,7 +155,8 @@ class RuntimeGuardPolicy(_PolicyNode):
     # LLM: 不再把任意字符串猜成 bool；当前策略只接受真实布尔值。
     # 函数用途: 保留原布尔读取 API。
     def bool_value(self, key: str, default: bool = False) -> bool:
-        value = getattr(self, key, default)
+        read = _runtime_guard_reader(self, key)
+        value = read(self) if read is not None else getattr(self, key, default)
         if type(value) is not bool:
             raise DeploymentPolicyError()
         return value
@@ -149,7 +164,8 @@ class RuntimeGuardPolicy(_PolicyNode):
     # LLM: 空重试序列是明确关闭，不能用 or default 偷换；非法元组在构造时已经拒绝。
     # 函数用途: 保留原序列读取 API 并返回冻结元组。
     def float_tuple_value(self, key: str, default: tuple[float, ...]) -> tuple[float, ...]:
-        return tuple(getattr(self, key, default))
+        read = _runtime_guard_reader(self, key)
+        return tuple(read(self) if read is not None else getattr(self, key, default))
 
     # LLM: 运行快照仅投影本次值、来源和准确任务编号，不写配置或签发权限。
     # 函数用途: 为原日志和恢复链生成独立守卫快照。
@@ -160,7 +176,8 @@ class RuntimeGuardPolicy(_PolicyNode):
 
 # LLM: 源文件预算不是 RSS；0 只禁缓存，不删除 canonical 数据。
 # 类用途: 定义候选材料缓存的准入与驱逐上界。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class CandidateCachePolicy(_PolicyNode):
     max_paths: int = 8
     source_budget_bytes: int = 128 * 1024 * 1024
@@ -168,7 +185,8 @@ class CandidateCachePolicy(_PolicyNode):
 
 # LLM: 超大条目仍可读，只不缓存；三个容量不能互相冒充同一种限制。
 # 类用途: 定义任务缓存条数、条目源字节与负缓存条数。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class TaskCachePolicy(_PolicyNode):
     max_entries: int = 4096
     item_source_max_bytes: int = 256 * 1024
@@ -177,7 +195,8 @@ class TaskCachePolicy(_PolicyNode):
 
 # LLM: 驻留预算为估值而不是 OS 硬限制；null 不新增帽，不臆造 low preset。
 # 类用途: 汇总各缓存分区与部署者显式驻留估值预算。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class CachePolicy(_PolicyNode):
     resident_budget_bytes: int | None = None
     candidates: CandidateCachePolicy = field(default_factory=CandidateCachePolicy)
@@ -186,7 +205,8 @@ class CachePolicy(_PolicyNode):
 
 # LLM: 普通查询只能收紧此保护；0 不能取消后备扫描的文件与墙钟上限。
 # 类用途: 定义 Python 文件系统后备扫描的部署硬上界。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class FilesystemFallbackBudget(_PolicyNode):
     max_files: int = field(default=20000, metadata={"positive": True})
     max_wall_seconds: float = field(default=10.0, metadata={"positive": True})
@@ -228,54 +248,120 @@ class DeploymentPolicy(_PolicyNode):
         return {**body, "schema_version": _SCHEMA, "revision": self.revision}
 
 
-# LLM: 缓存只含代码定义的注解，不含策略文件、身份或权限；同一类的类型解析只做一次。
-# 函数用途: 获取 typed 字段的实际类型。
-@cache
-def _policy_hints(cls: type) -> dict:
-    return get_type_hints(cls)
+def _bind_policy_value(kind: type, *, positive: bool = False, allow_empty: bool = False):
+    """从类型声明预绑定严格校验，构造时只处理字段值。"""
+    if kind is bool:
+        def normalize_bool(value):
+            if type(value) is not bool:
+                raise DeploymentPolicyError()
+            return value
 
+        return normalize_bool
+    if kind is int:
+        minimum = 1 if positive else 0
 
-# LLM: JSON 与 Python 构造共用递归严格判据；不做字符串数值或真假值猜测，不夹取非法值。
-# 函数用途: 校验并冻结一个策略字段。
-def _typed_value(kind: type, value: object, *, positive: bool = False, allow_empty: bool = False):
+        def normalize_int(value):
+            if type(value) is not int or value < minimum:
+                raise DeploymentPolicyError()
+            return value
+
+        return normalize_int
+    if kind is float:
+        def normalize_float(value):
+            if type(value) not in (int, float) or not math.isfinite(value) or (value <= 0 if positive else value < 0):
+                raise DeploymentPolicyError()
+            return float(value)
+
+        return normalize_float
+    if kind is str:
+        def normalize_str(value):
+            if not isinstance(value, str) or len(value) > 4096 or any(ord(char) < 32 for char in value):
+                raise DeploymentPolicyError()
+            return value
+
+        return normalize_str
     origin, arguments = get_origin(kind), get_args(kind)
     if origin is UnionType:
-        if value is None and type(None) in arguments:
-            return None
-        return _typed_value(next(item for item in arguments if item is not type(None)), value, positive=positive, allow_empty=allow_empty)
+        nullable = type(None) in arguments
+        normalize_member = _bind_policy_value(next(item for item in arguments if item is not type(None)),
+                                              positive=positive, allow_empty=allow_empty)
+
+        def normalize_union(value):
+            return None if nullable and value is None else normalize_member(value)
+
+        return normalize_union
     if isinstance(kind, type) and is_dataclass(kind):
-        if isinstance(value, kind):
-            return value
-        if type(value) is not dict or set(value) - {item.name for item in fields(kind) if item.init}:
-            raise DeploymentPolicyError()
-        return kind(**value)
+        keys = frozenset(item.name for item in fields(kind) if item.init)
+
+        def normalize_record(value):
+            if isinstance(value, kind):
+                return value
+            if type(value) is not dict or value.keys() - keys:
+                raise DeploymentPolicyError()
+            return kind(**value)
+
+        return normalize_record
     if origin is tuple:
-        if type(value) not in (tuple, list) or arguments[0] is float and not value and not allow_empty:
-            raise DeploymentPolicyError()
-        return tuple(_typed_value(arguments[0], item) for item in value)
-    if kind is bool:
-        valid = type(value) is bool
-    elif kind is int:
-        valid = type(value) is int and value >= (1 if positive else 0)
-    elif kind is float:
-        valid = type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
-    elif kind is str:
-        valid = isinstance(value, str) and len(value) <= 4096 and not any(ord(char) < 32 for char in value)
-    else:
-        valid = False
-    if not valid:
+        empty_allowed = allow_empty or arguments[0] is not float
+        normalize_item = _bind_policy_value(arguments[0])
+
+        def normalize_tuple(value):
+            if type(value) not in (tuple, list) or not value and not empty_allowed:
+                raise DeploymentPolicyError()
+            return tuple(normalize_item(item) for item in value)
+
+        return normalize_tuple
+
+    def normalize_invalid(_value):
         raise DeploymentPolicyError()
-    return float(value) if kind is float else value
+
+    return normalize_invalid
+
+
+@lru_cache
+def _policy_field_readers(cls: type):
+    return tuple((item, attrgetter(intern(item.name))) for item in fields(cls))
+
+
+@lru_cache
+def _bind_policy_fields(cls: type, *, slotted: bool = False):
+    hints = get_type_hints(cls)
+    return tuple(
+        (
+            item.name,
+            cls.__dict__[item.name].__get__ if slotted else read,
+            _bind_policy_value(hints[item.name], positive=item.metadata.get("positive", False),
+                               allow_empty=item.metadata.get("allow_empty", False)),
+            slot_setter(cls, item.name) if slotted else None,
+        )
+        for item, read in _policy_field_readers(cls)
+        if not item.name.startswith("_")
+    )
+
+
+# 内置热策略在导入时绑定字段与校验选项，通用读取器缓存只供其它类型使用。
+_FAST_POLICY_NORMALIZERS = {
+    cls: _bind_policy_fields(cls, slotted=True)
+    for cls in (RuntimeGuardPolicy, CandidateCachePolicy, TaskCachePolicy, CachePolicy, FilesystemFallbackBudget)
+}
+_RUNTIME_GUARD_FIELDS = _policy_field_readers(RuntimeGuardPolicy)
+_RUNTIME_GUARD_READERS = {item.name: read for item, read in _RUNTIME_GUARD_FIELDS}
+
+
+def _runtime_guard_reader(policy: RuntimeGuardPolicy, key: str):
+    if type(policy) is RuntimeGuardPolicy and type(key) is str:
+        return _RUNTIME_GUARD_READERS.get(key)
+    return None
 
 
 # LLM: 仅用于没有原显式键集合的宿主直接构造；比较 typed 默认值不读取另一份配置。
 # 函数用途: 从策略对象中提取非默认覆盖，序列转成 JSON 列表。
 def _sparse_node(node: _PolicyNode) -> dict:
     result = {}
-    for item in fields(node):
+    for item, read in _policy_field_readers(type(node)):
         if not item.init:
             continue
-        value = getattr(node, item.name)
+        value = read(node)
         default = item.default_factory() if item.default_factory is not MISSING else item.default
         if value != default:
             result[item.name] = _sparse_node(value) if isinstance(value, _PolicyNode) else list(value) if isinstance(value, tuple) else value

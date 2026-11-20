@@ -1,5 +1,13 @@
 {
   "entries": {
+    "agent/agent_core/model/context_pressure.py::_diagnostic_context_params::object_setattr": {
+      "count": 1,
+      "reason": "cold-path: opt-in diagnostics copy arbitrary request parameters without re-running constructors."
+    },
+    "agent/agent_core/model/context_pressure.py::project_request_prompt_history::object_setattr": {
+      "count": 1,
+      "reason": "cold-path: history projection miss for extension parameters with custom or frozen assignment behavior."
+    },
     "agent/agent_core/orchestration/background/dispatch.py::_BackgroundProcessWaitOwner.__init__::thread_ctor": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M18"
@@ -87,6 +95,30 @@
     "agent/agent_core/tool_model_generation.py::generate_model_response::replace_on_fast_frozen": {
       "count": 2,
       "reason": "baseline-d9caa95af pending M14"
+    },
+    "agent/assets/descriptor.py::AccessTarget.__post_init__::super0": {
+      "count": 1,
+      "reason": "cooperative-mro: asset record subclasses can add normalization or decoding between this class and the shared record base."
+    },
+    "agent/assets/descriptor.py::AssetDescriptor.__post_init__::super0": {
+      "count": 1,
+      "reason": "cooperative-mro: asset record subclasses can add normalization or decoding between this class and the shared record base."
+    },
+    "agent/assets/descriptor.py::AssetDescriptor.from_dict::super0": {
+      "count": 1,
+      "reason": "cooperative-mro: asset record subclasses can add normalization or decoding between this class and the shared record base."
+    },
+    "agent/assets/descriptor.py::CredentialBindingRef.__post_init__::super0": {
+      "count": 1,
+      "reason": "cooperative-mro: asset record subclasses can add normalization or decoding between this class and the shared record base."
+    },
+    "agent/assets/descriptor.py::IOContract.__post_init__::super0": {
+      "count": 1,
+      "reason": "cooperative-mro: asset record subclasses can add normalization or decoding between this class and the shared record base."
+    },
+    "agent/assets/descriptor.py::_Record.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "slots-incompatible: _Record is not a frozen dataclass. This branch normalizes non-slotted asset records and extension classes."
     },
     "agent/backends/bounded_call.py::_Call.__setattr__::object_setattr": {
       "count": 1,
@@ -319,6 +351,30 @@
     "agent/gateway_parts/response_renderer.py::_int_value::dyn_getattr": {
       "count": 1,
       "reason": "cold-path: client-side response rendering, once per completed response; keys are the four literal context-estimate field names"
+    },
+    "agent/settings/config_layers.py::_object_values::dyn_getattr": {
+      "count": 1,
+      "reason": "cold-path: optional projection of arbitrary objects via from_object. Runtime layer resolution uses mappings."
+    },
+    "agent/settings/deployment_policy.py::RuntimeGuardPolicy.bool_value::dyn_getattr": {
+      "count": 1,
+      "reason": "cold-path: open attribute lookup for undeclared keys and policy subclasses. Built-in fields use prebound readers."
+    },
+    "agent/settings/deployment_policy.py::RuntimeGuardPolicy.float_tuple_value::dyn_getattr": {
+      "count": 1,
+      "reason": "cold-path: open attribute lookup for undeclared keys and policy subclasses. Built-in fields use prebound readers."
+    },
+    "agent/settings/deployment_policy.py::RuntimeGuardPolicy.int_value::dyn_getattr": {
+      "count": 1,
+      "reason": "cold-path: open attribute lookup for undeclared keys and policy subclasses. Built-in fields use prebound readers."
+    },
+    "agent/settings/deployment_policy.py::_PolicyNode.__post_init__::object_setattr": {
+      "count": 1,
+      "reason": "slots-incompatible: _PolicyNode is not a frozen dataclass. This branch writes fields on non-slotted policies and extension classes."
+    },
+    "agent/settings/deployment_policy.py::deployment_policy_from_dict::object_setattr": {
+      "count": 1,
+      "reason": "cold-path: records explicit JSON only during host policy load or administrative update."
     },
     "agent/tooling/registry.py::ToolRegistry.__init__::replace_on_fast_frozen": {
       "count": 1,
