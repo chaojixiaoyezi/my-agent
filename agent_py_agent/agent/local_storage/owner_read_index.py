@@ -364,6 +364,43 @@ def _authorize(action, arg1, arg2, _database, _trigger):
     return sqlite3.SQLITE_OK
 
 
+_KEYED_TABLE_DDL = {
+    "ori_upload_registry": (
+        "CREATE TABLE IF NOT EXISTS ori_upload_registry ("
+        "artifact_id TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL, "
+        "length INTEGER NOT NULL, row_sha TEXT NOT NULL, generation TEXT NOT NULL)"
+    ),
+}
+
+
+def _ensure_keyed_table(connection, name):
+    """仅写连接增补专用键表，缺表时刷新领域代，原 ORI 绑定不变。"""
+    ddl = _KEYED_TABLE_DDL[name]
+    connection.execute("SAVEPOINT keyed_projection")
+    try:
+        existing = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,),
+        ).fetchone()
+        changed = existing is None or existing[0] != ddl.replace(" IF NOT EXISTS", "", 1)
+        if changed:
+            if existing is not None:
+                connection.execute(f"DROP TABLE {name}")
+            connection.execute(ddl)
+        key = "domain_generation:" + name
+        generation = connection.execute("SELECT value FROM ori_meta WHERE key=?", (key,)).fetchone()
+        if changed or generation is None or not generation[0]:
+            connection.execute(
+                "INSERT INTO ori_meta(key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, secrets.token_hex(16)),
+            )
+        connection.execute("RELEASE keyed_projection")
+    except BaseException:
+        connection.execute("ROLLBACK TO keyed_projection")
+        connection.execute("RELEASE keyed_projection")
+        raise
+
+
 # LLM: 只从已观察异常类型和 SQLite 错误码分类，不猜测权限或隔离原因。
 # 函数用途: 将底层错误映射为固定 coverage 原因。
 def _failure(error):
@@ -718,6 +755,25 @@ class OwnerReadIndex:
         except BaseException:
             connection.rollback()
             raise
+
+    @contextmanager
+    def upload_registry_transaction(self):
+        """使用既有 owner 数据库与写锁同时提交上传索引和水位。"""
+        try:
+            with _home_advance_lock(self._home), self._database(create=True, write=True) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    _ensure_keyed_table(connection, "ori_upload_registry")
+                    # 兼容曾在 ORI 内留下旧进度表的缓存，独立旧库不再打开。
+                    connection.execute("DROP TABLE IF EXISTS progress")
+                    yield connection
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
+        except (_Issue, sqlite3.Error, OSError) as error:
+            status, reason = _failure(error)
+            raise OwnerReadUnavailable({"status": status, "reason": reason}) from error
 
     # 同一建表叶同时服务新库与旧缓存的惰性扩展，不另开连接或管理第二套索引。
     def _domain_validation(self, connection, domain, validator):

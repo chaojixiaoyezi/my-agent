@@ -3,36 +3,32 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
 import os
 import secrets
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..artifacts.registry import REGISTRY_RELATIVE_PATH, _record_from_payload
 from ..common.directory_lock import locked_private_directory
-from ..common.json_io import locked_json_path
-from ..common.nofollow_fs import (
-    file_descriptor_change_ns,
-    open_private_lock_beneath,
-    open_readonly_file_beneath,
+from ..common.nofollow_fs import file_descriptor_change_ns, open_readonly_file_beneath
+from ..local_storage.owner_read_index import (
+    OwnerReadIndex,
+    OwnerReadUnavailable,
+    _ensure_keyed_table,
 )
-from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
-from ..plugin_host.cursors import CURSOR_TTL_SECONDS
 from ..plugin_host.errors import HostAPIError
 
 _ROOT = ('artifacts', 'business')
 _SOURCE = (*_ROOT, *REGISTRY_RELATIVE_PATH.parts)
-_INDEX = (*_ROOT, 'data', 'artifacts', '.business-upload-progress.sqlite3')
-_KEY = secrets.token_bytes(32)
+_WATERMARK = 'upload_registry_watermark'
+_RECEIPT = 'upload_registry_receipt'
+_TABLE_GENERATION = 'domain_generation:ori_upload_registry'
 _SEAL = object()
 # 单次上传登记核验请求默认向前推进读取的分步上限次数。
 _UPLOAD_REGISTRY_STEPS_COUNT = 4
-# SQLite 上传续作进度表最多保留的近期 artifact 记录条数。
-_UPLOAD_PROGRESS_LIMIT_COUNT = 8
 # 单条上传登记 JSONL 记录允许读取并解析的最大字节数（2 MiB）。
 _MAX_RECORD_BYTES = 2 * 1024 * 1024
 
@@ -54,6 +50,7 @@ class UploadLookup:
     registry_size: int
     proof: RegistryRecordProof | None
     pending: bool = False
+    watermark: int | None = None
 
 
 def _host_error(code: str, status: int, *, message: str, reason: str) -> HostAPIError:
@@ -81,91 +78,79 @@ def _read(fd, offset, count):
     return b''.join(chunks)
 
 
-def _chain(previous, chunk):
-    return hashlib.sha256(bytes.fromhex(previous) + hashlib.sha256(chunk).digest()).hexdigest()
+def _read_checkpoint(db, stamp):
+    metadata = dict(db.execute(
+        'SELECT key,value FROM ori_meta WHERE key IN (?,?,?)',
+        (_WATERMARK, _RECEIPT, _TABLE_GENERATION),
+    ))
+    try:
+        watermark = json.loads(metadata[_WATERMARK])
+        receipt = json.loads(metadata[_RECEIPT])
+        offset = watermark['offset']
+        pending = base64.b64decode(receipt['pending'], validate=True)
+        largest = receipt['largest_row']
+        if (
+            receipt['table_generation'] == metadata[_TABLE_GENERATION]
+            and receipt['source_stamp'] == list(stamp)
+            and (watermark['st_dev'], watermark['st_ino']) == stamp[:2]
+            and isinstance(watermark['generation'], str) and watermark['generation']
+            and receipt['generation'] == watermark['generation']
+            and type(offset) is int and 0 <= offset <= stamp[2]
+            and len(pending) <= min(offset, _MAX_RECORD_BYTES)
+            and (offset < stamp[2] or not pending)
+            and type(largest) is int and 0 <= largest <= _MAX_RECORD_BYTES
+            and type(receipt['largest_row_offset']) is int and 0 <= receipt['largest_row_offset'] <= offset
+        ):
+            return watermark, receipt, pending, False
+    except (KeyError, ValueError, TypeError):
+        pass
+
+    # 仅重建上传投影。其它 ORI 领域和既有源检查点保持原代。
+    if db.execute('SELECT 1 FROM ori_upload_registry LIMIT 1').fetchone() is not None:
+        db.execute('DROP TABLE ori_upload_registry')
+        _ensure_keyed_table(db, 'ori_upload_registry')
+    table_generation = db.execute(
+        'SELECT value FROM ori_meta WHERE key=?', (_TABLE_GENERATION,),
+    ).fetchone()[0]
+    generation = secrets.token_hex(16)
+    return (
+        {'st_dev': stamp[0], 'st_ino': stamp[1], 'offset': 0, 'generation': generation},
+        {'generation': generation, 'source_stamp': list(stamp), 'table_generation': table_generation,
+         'coverage': 'partial', 'rebuilt_at': time.time(), 'largest_row': 0, 'largest_row_offset': 0},
+        b'',
+        True,
+    )
 
 
-def _pack(state):
-    data = json.dumps(state, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
-    return data, hmac.new(_KEY, data.encode(), hashlib.sha256).hexdigest()
+def _write_checkpoint(db, watermark, receipt, pending, size):
+    receipt['coverage'] = 'complete' if watermark['offset'] == size else 'partial'
+    receipt['pending'] = base64.b64encode(pending).decode('ascii')
+    db.executemany(
+        'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        ((_WATERMARK, json.dumps(watermark)), (_RECEIPT, json.dumps(receipt))),
+    )
 
 
-@contextmanager
-def _connection(owner):
-    path = owner.joinpath(*_INDEX)
-    def factory():
-        db = connect_projection_sqlite(path, timeout=5)
-        try:
-            db.execute('PRAGMA auto_vacuum=INCREMENTAL')
-            db.execute('PRAGMA journal_size_limit=1048576')
-            db.execute('CREATE TABLE IF NOT EXISTS progress (artifact_id TEXT PRIMARY KEY, '
-                       'state TEXT NOT NULL, signature TEXT NOT NULL, touched REAL NOT NULL)')
-            return db
-        except BaseException:
-            db.close()
-            raise
-    with locked_json_path(path):
-        fd = open_private_lock_beneath(owner, _INDEX)
-        os.close(fd)
-        with scoped_connection(path, False, factory) as db:
-            try:
-                yield db
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
+def _line_budget(offset, limit):
+    return _host_error(
+        'HOST_NOT_READY', 503, reason='line_budget',
+        message=f'原上传登记行超过{limit}字节核验上限（offset={offset}）；未读取内容，请核对该行后重试。',
+    )
 
 
-def _initial(owner, artifact_id, stamp, block):
-    return {'owner': str(owner), 'artifact_id': artifact_id, 'stamp': list(stamp),
-            'block': block, 'phase': 'collect', 'offset': 0, 'chain': '00' * 32,
-            'collected_chain': '', 'pending': '', 'latest': None}
-
-
-def _load(db, owner, artifact_id, stamp, block):
-    row = db.execute('SELECT substr(state,1,8388608),substr(signature,1,128),length(state) FROM progress WHERE artifact_id=?', (artifact_id,)).fetchone()
-    if row is not None:
-        raw, signature, size = row
-        if size <= 8388608 and isinstance(raw, str) and isinstance(signature, str) and hmac.compare_digest(hmac.new(_KEY, raw.encode(), hashlib.sha256).hexdigest(), signature):
-            state = json.loads(raw)
-            if (state['owner'] == str(owner) and state['artifact_id'] == artifact_id
-                    and state['stamp'] == list(stamp) and state['block'] == block):
-                return state
-    # 重启、源换代或派生状态被改写只重建进度，不把索引当登记权威。
-    return _initial(owner, artifact_id, stamp, block)
-
-
-def _save(db, artifact_id, state):
-    now = time.time()
-    db.execute('DELETE FROM progress WHERE touched < ?', (now - CURSOR_TTL_SECONDS,))
-    if (db.execute('SELECT 1 FROM progress WHERE artifact_id=?', (artifact_id,)).fetchone() is None
-            and db.execute('SELECT count(*) FROM progress').fetchone()[0] >= _UPLOAD_PROGRESS_LIMIT_COUNT):
-        return
-    raw, signature = _pack(state)
-    db.execute('INSERT INTO progress VALUES (?,?,?,?) ON CONFLICT(artifact_id) DO UPDATE SET '
-               'state=excluded.state,signature=excluded.signature,touched=excluded.touched',
-               (artifact_id, raw, signature, now))
-
-
-def _consume(state, chunk, *, eof, max_record_bytes=_MAX_RECORD_BYTES):
-    previous = base64.b64decode(state['pending'])
-    start = state['offset'] - len(previous)
-    data = previous + chunk
-    lines = data.splitlines(keepends=True)
+def _consume(db, watermark, receipt, pending, chunk, *, eof, limit):
+    start = watermark['offset'] - len(pending)
+    lines = (pending + chunk).splitlines(keepends=True)
     pending = b''
     for index, line in enumerate(lines):
+        if len(line) > limit:
+            raise _line_budget(start, limit)
         if index == len(lines) - 1 and not line.endswith(b'\n') and not eof:
             pending = line
             break
-        if len(line) > max_record_bytes:
-            raise _host_error(
-                'HOST_NOT_READY',
-                503,
-                message=(
-                    f'原登记单行超过{max_record_bytes}字节核验上限（offset={start}）；未读取内容，请核对该行，不得盲重试。'
-                ),
-                reason='line_budget',
-            )
+        if len(line) > receipt['largest_row']:
+            receipt['largest_row'] = len(line)
+            receipt['largest_row_offset'] = start
         if line.strip():
             try:
                 record = _record_from_payload(json.loads(line.decode('utf-8')))
@@ -173,25 +158,57 @@ def _consume(state, chunk, *, eof, max_record_bytes=_MAX_RECORD_BYTES):
                     raise ValueError('invalid record')
             except (UnicodeError, ValueError, TypeError) as error:
                 raise _host_error(
-                    'STORE_UNAVAILABLE',
-                    503,
-                    message=(
-                        f'原上传登记offset={start}含无效或未完成JSON行（{type(error).__name__}）；未读取内容，修复原登记后同参数重试。'
-                    ),
-                    reason='unreadable',
+                    'STORE_UNAVAILABLE', 503, reason='unreadable',
+                    message=(f'原上传登记offset={start}含无效或未完成JSON行（{type(error).__name__}）；'
+                             '未读取内容，修复原登记后同参数重试。'),
                 ) from error
-            if record.artifact_id == state['artifact_id']:
-                # 物理末行胜出；时间戳相等或回退均不改变权威行顺序。
-                state['latest'] = {'offset': start, 'raw': base64.b64encode(line).decode('ascii')}
+            db.execute(
+                'INSERT INTO ori_upload_registry(artifact_id,byte_offset,length,row_sha,generation) VALUES (?,?,?,?,?) '
+                'ON CONFLICT(artifact_id) DO UPDATE SET byte_offset=excluded.byte_offset,length=excluded.length,'
+                'row_sha=excluded.row_sha,generation=excluded.generation',
+                (record.artifact_id, start, len(line), hashlib.sha256(line).hexdigest(), watermark['generation']),
+            )
         start += len(line)
-    if len(pending) > max_record_bytes:
-        raise _host_error(
-            'HOST_NOT_READY',
-            503,
-            message='原上传登记单行超过读取上限；未读取内容，请核对该行，不得盲重试。',
-            reason='line_budget',
-        )
-    state['pending'] = base64.b64encode(pending).decode('ascii')
+    return pending
+
+
+def _advance(db, fd, stamp, *, max_bytes, max_steps, max_total_bytes, record_limit):
+    watermark, receipt, pending, reset = _read_checkpoint(db, stamp)
+    if receipt['largest_row'] > record_limit:
+        raise _line_budget(receipt['largest_row_offset'], record_limit)
+    if len(pending) > record_limit:
+        raise _line_budget(watermark['offset'] - len(pending), record_limit)
+    progressed = 0
+    for _ in range(max_steps):
+        remaining = min(max_bytes, stamp[2] - watermark['offset'])
+        if max_total_bytes is not None:
+            remaining = min(remaining, max_total_bytes - progressed)
+        if not remaining:
+            break
+        chunk = _read(fd, watermark['offset'], remaining)
+        if len(chunk) != remaining:
+            raise _host_error('HOST_NOT_READY', 503, reason='short_read',
+                message='原上传登记读取提前结束；未读取内容，请核对源文件后同参数重试。')
+        end = watermark['offset'] + len(chunk)
+        pending = _consume(db, watermark, receipt, pending, chunk, eof=end == stamp[2], limit=record_limit)
+        watermark['offset'] = end
+        progressed += len(chunk)
+    if reset or progressed:
+        _write_checkpoint(db, watermark, receipt, pending, stamp[2])
+    return watermark, progressed
+
+
+def _source_matches(owner, fd, stamp):
+    if _stamp(fd) != stamp:
+        return False
+    try:
+        current = open_readonly_file_beneath(owner, _SOURCE)
+    except FileNotFoundError:
+        return False
+    try:
+        return _stamp(current) == stamp
+    finally:
+        os.close(current)
 
 
 def lookup_business_upload(
@@ -205,7 +222,7 @@ def lookup_business_upload(
     return_pending=False,
     max_record_bytes=None,
 ):
-    """每步不超原预算，单请求按步数/总字节上限推进；无可信发布代时完整双遍，不抽样签latest。"""
+    """在原请求预算内推进共享水位；完整覆盖后按主键取址并复核原行。"""
     owner = Path(owner_home).absolute()
     if type(max_bytes) is not int or max_bytes < 1 or max_bytes > 2 * 1024 * 1024:
         raise ValueError('business registry block budget out of range')
@@ -248,95 +265,108 @@ def lookup_business_upload(
             return UploadLookup(None, 0, None)
         try:
             stamp = _stamp(fd)
-            with _connection(owner) as db:
-                state = _load(db, owner, artifact_id, stamp, max_bytes)
-                progressed = 0
-                for _step in range(max_steps):
-                    next_len = min(max_bytes, max(0, stamp[2] - state['offset']))
-                    if max_total_bytes is not None and (
-                        (progressed > 0 and progressed + next_len > max_total_bytes)
-                        or (_step == 0 and next_len > max_total_bytes)
-                    ):
-                        break
-                    if _stamp(fd) != stamp:
-                        raise _host_error(
-                            'HOST_NOT_READY',
-                            503,
-                            message='原上传登记在核验期间换代；未读取内容，请对同一ID重新核验，不得换ID重传。',
-                            reason='source_changed',
-                        )
-                    chunk = _read(fd, state['offset'], next_len)
-                    eof = state['offset'] + len(chunk) == stamp[2]
-                    if not chunk and not eof:
-                        raise _host_error(
-                            'HOST_NOT_READY',
-                            503,
-                            message='原上传登记读取提前结束；未读取内容，请核对源文件后同参数重试。',
-                            reason='short_read',
-                        )
-                    if state['phase'] == 'collect':
-                        _consume(state, chunk, eof=eof, max_record_bytes=record_limit)
-                    state['chain'] = _chain(state['chain'], chunk)
-                    state['offset'] += len(chunk)
-                    progressed += len(chunk)
-                    if _stamp(fd) != stamp:
-                        raise _host_error(
-                            'HOST_NOT_READY',
-                            503,
-                            message='原上传登记在核验期间变化；未读取内容，请对同一ID继续核验。',
-                            reason='source_changed',
-                        )
-                    if eof and state['phase'] == 'collect':
-                        state.update(phase='verify', collected_chain=state['chain'], offset=0, chain='00' * 32)
-                    elif eof:
-                        if state['chain'] != state['collected_chain']:
-                            state = _initial(owner, artifact_id, stamp, max_bytes)
-                            continue
-                        latest = state['latest']
-                        db.execute('DELETE FROM progress WHERE artifact_id=?', (artifact_id,))
-                        if latest is None:
+            conflict = None
+            try:
+                with OwnerReadIndex(owner).upload_registry_transaction() as db:
+                    watermark, progressed = _advance(
+                        db, fd, stamp, max_bytes=max_bytes, max_steps=max_steps,
+                        max_total_bytes=max_total_bytes, record_limit=record_limit,
+                    )
+                    offset = watermark['offset']
+                    if not _source_matches(owner, fd, stamp):
+                        raise _host_error('HOST_NOT_READY', 503, reason='source_changed',
+                            message='原上传登记在核验期间变化；未读取内容，请对同一ID继续核验。')
+                    if offset == stamp[2]:
+                        hit = db.execute(
+                            'SELECT byte_offset,length,row_sha,generation FROM ori_upload_registry WHERE artifact_id=?',
+                            (artifact_id,),
+                        ).fetchone()
+                        if hit is None:
                             return UploadLookup(None, stamp[2], None)
-                        raw = base64.b64decode(latest['raw'])
-                        record = _record_from_payload(json.loads(raw.decode('utf-8')))
-                        proof = RegistryRecordProof(str(owner), artifact_id, stamp, latest['offset'],
-                                                    len(raw), hashlib.sha256(raw).hexdigest(), _SEAL)
-                        return UploadLookup(record, stamp[2], proof)
-                _save(db, artifact_id, state)
+                        pos, length, row_sha, generation = hit
+                        proof = RegistryRecordProof(str(owner), artifact_id, stamp, pos, length, row_sha, _SEAL)
+                        try:
+                            if generation != watermark['generation'] or not _valid_extent(proof):
+                                raise _invalid_proof()
+                            if max_total_bytes is not None:
+                                if length > max_total_bytes:
+                                    raise _line_budget(pos, max_total_bytes)
+                                if progressed + length > max_total_bytes:
+                                    proof = None
+                            if proof is not None:
+                                record = _verify_row(owner, fd, proof)
+                                return UploadLookup(record, stamp[2], proof)
+                        except HostAPIError as error:
+                            if error.code != 'STATE_CONFLICT':
+                                raise
+                            # 保留原失败并撤销覆盖证明，下次按原始登记重建。
+                            db.execute('DELETE FROM ori_meta WHERE key IN (?,?)', (_WATERMARK, _RECEIPT))
+                            conflict = error
+            except OwnerReadUnavailable as error:
+                reason = error.coverage['reason']
+                raise _host_error('HOST_NOT_READY', 503, reason=reason,
+                    message=f'上传登记索引暂不可用（{reason}）；未读取内容，请对同一ID重试或核对所有者读索引。') from error
+            if conflict is not None:
+                raise conflict
             if return_pending:
-                return UploadLookup(None, stamp[2], None, pending=True)
-            # 返回进度前已提交派生checkpoint；503不是同一总量上限的永久拒绝。
-            raise _host_error(
-                'HOST_NOT_READY',
-                503,
-                message=(
-                    f'原上传登记核验可续：本次推进{progressed}字节，{state["phase"]} offset={state["offset"]}/{stamp[2]}；'
-                    '未读取内容，请保持同一artifact_id原参数再次调用，宿主将继续原游标，不重传或换ID。'
-                ),
-                reason='scan_in_progress',
+                return UploadLookup(None, stamp[2], None, pending=True, watermark=offset)
+            error = _host_error(
+                'HOST_NOT_READY', 503, reason='scan_in_progress',
+                message=(f'原上传登记核验可续：本次推进{progressed}字节，共享水位 offset={offset}/{stamp[2]}；'
+                         '未读取内容，请保持同一artifact_id原参数再次调用，不重传或换ID。'),
             )
+            error.registry_watermark = offset
+            raise error
         finally:
             os.close(fd)
 
 
+def _invalid_proof():
+    return HostAPIError('STATE_CONFLICT', 409,
+        message='原登记页证明失效；未读取内容，请用同一正式资产版本从首读重取，不扩大范围。')
+
+
+def _valid_extent(proof):
+    return (
+        type(proof.offset) is int and proof.offset >= 0
+        and type(proof.length) is int and 0 < proof.length <= _MAX_RECORD_BYTES
+        and proof.offset + proof.length <= proof.source_stamp[2]
+        and isinstance(proof.sha256, str)
+    )
+
+
+def _verify_row(owner, fd, proof):
+    if not _valid_extent(proof):
+        raise _invalid_proof()
+    if _stamp(fd) != proof.source_stamp:
+        raise HostAPIError('STATE_CONFLICT', 409,
+            message='原上传登记已换代；未读取内容，请保持同一资产版本从首读重新核验。')
+    raw = _read(fd, proof.offset, proof.length)
+    if (len(raw) != proof.length or hashlib.sha256(raw).hexdigest() != proof.sha256
+            or not _source_matches(owner, fd, proof.source_stamp)):
+        raise HostAPIError('STATE_CONFLICT', 409,
+            message='原上传登记行已改变；未读取内容，请核对原资产版本并从首读重新核验。')
+    try:
+        record = _record_from_payload(json.loads(raw.decode('utf-8')))
+    except (ValueError, TypeError) as error:
+        raise _invalid_proof() from error
+    if record is None or record.artifact_id != proof.artifact_id:
+        raise _invalid_proof()
+    return record
+
+
 def verify_record_proof(owner_home, proof):
-    """续页只复核原登记确切行与源代；调用方仍必须重验当前资产/空间和正文块。"""
+    """续页只复核原登记确切行与源代；调用方仍须重验资产归属、版本及正文块。"""
     owner = Path(owner_home).absolute()
     if (not isinstance(proof, RegistryRecordProof) or proof._seal is not _SEAL
-            or proof.owner != str(owner) or proof.offset < 0 or not 0 < proof.length <= 2 * 1024 * 1024):
-        raise HostAPIError('STATE_CONFLICT', 409, message='原登记页证明失效；未读取内容，请用同一正式资产版本从首读重取，不扩大范围。')
+            or proof.owner != str(owner)):
+        raise _invalid_proof()
     try:
         fd = open_readonly_file_beneath(owner, _SOURCE)
     except FileNotFoundError as error:
-        raise HostAPIError('STATE_CONFLICT', 409, message='原上传登记已不存在；未读取内容，请核对原资产和来源，不得沿旧游标读取。') from error
+        raise HostAPIError('STATE_CONFLICT', 409,
+            message='原上传登记已不存在；未读取内容，请核对原资产和来源，不得沿旧游标读取。') from error
     try:
-        if _stamp(fd) != proof.source_stamp:
-            raise HostAPIError('STATE_CONFLICT', 409, message='原上传登记已换代；未读取内容，请保持同一资产版本从首读重新核验。')
-        raw = _read(fd, proof.offset, proof.length)
-        if hashlib.sha256(raw).hexdigest() != proof.sha256 or _stamp(fd) != proof.source_stamp:
-            raise HostAPIError('STATE_CONFLICT', 409, message='原上传登记行已改变；未读取内容，请核对原资产版本并从首读重新核验。')
-        record = _record_from_payload(json.loads(raw.decode('utf-8')))
-        if record is None or record.artifact_id != proof.artifact_id:
-            raise HostAPIError('STATE_CONFLICT', 409, message='原上传登记身份不再对应原页；未读取内容，请从同一资产版本首读重取。')
-        return record
+        return _verify_row(owner, fd, proof)
     finally:
         os.close(fd)

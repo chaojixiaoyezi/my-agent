@@ -390,7 +390,8 @@ def artifact_content(artifact_id, version_ref, context, services, *, range_heade
         except BusinessError as error:
             status = 404 if error.code in {'OBSERVATION_NOT_FOUND', 'BUSINESS_ACCESS_DENIED', 'SPACE_SCOPE_MISMATCH'} else 409 if error.code == 'STATE_CONFLICT' else 503
             raise HostAPIError(error.code, status, message=str(error.details.get('reason') or error.code)[:256]) from error
-    if (record is None or record.status != 'ready' or record.metadata.get('owner_id') != services.owner_id
+    if (record is None or record.artifact_id != artifact_id or record.status != 'ready'
+            or record.metadata.get('owner_id') != services.owner_id
             or record.metadata.get('version_ref') != version_ref or record.source != 'business_upload'):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     if expected_space_id is not None and record.metadata.get('space_id') != expected_space_id:
