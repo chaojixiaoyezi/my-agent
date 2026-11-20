@@ -425,9 +425,10 @@ def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
                         result['unknown'] += 1
                         if len(result['errors']) < 16:
                             result['errors'].append({'code': 'CANONICAL_INDEX_SOURCE_UNAVAILABLE', 'reason': type(exc).__name__})
-                # 推进游标或阶段前用已持有的 FD 再 fstat：缓冲已预取整页时同 inode 截短不会碰到真实 EOF。
+                # 推进游标或阶段前用已持有的 FD 再 fstat：缓冲已预取整页时同 inode 截短不会碰到真实 EOF；
+                #   快照发布器原子替换已发布文件时旧 FD 仍指向旧 inode，所以还要核对已发布路径的当前身份。
                 # 截短或身份不符走原 INDEX_SOURCE_CHANGED，回偏移 0 重新打开幂等重读（不读旧缓冲）；完成只凭这份同身份证明。
-                if _held_source_changed(stamp, identity, end):
+                if _held_source_changed(stamp, identity, end, published=path):
                     if len(result['errors']) < 16:
                         result['errors'].append({'code': 'INDEX_SOURCE_CHANGED'})
                     offset = 0
@@ -491,8 +492,15 @@ def _index_source_stamp(path):
         return None
 
 
-# LLM: 只读已持有 FD 的 fstat，不重新按路径打开；身份须等于本页记入游标的 (st_dev, st_ino)，实际长度不得小于冻结 end。
-# 函数用途: 判断本页索引源在推进前是否已被截短或身份不符，供完成证明绑定文件身份。
-def _held_source_changed(fd: int, identity: list[int], end: int) -> bool:
+# LLM: 只做 fstat 与已发布路径 stat，不重新打开或读取；已持有 FD 与已发布路径的 (st_dev, st_ino) 都须等于本页记入游标的身份，
+#   FD 实际长度不得小于冻结 end。rename 原子，单次 stat 即为线性化点，不需要再拿发布锁；此后的替换由下一页开头的身份核对接住。
+# 函数用途: 判断本页索引源在推进前是否已被截短、身份不符或被原子替换/删除，供完成证明绑定已发布文件身份。
+def _held_source_changed(fd: int, identity: list[int], end: int, *, published: Path) -> bool:
     st = os.fstat(fd)
-    return [st.st_dev, st.st_ino] != identity or st.st_size < end
+    if [st.st_dev, st.st_ino] != identity or st.st_size < end:
+        return True
+    try:
+        current = published.stat()
+    except FileNotFoundError:
+        return True
+    return [current.st_dev, current.st_ino] != identity

@@ -15,6 +15,7 @@ import pytest
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
 from agent_py_agent.agent.assets.script_store import ScriptStore
+from agent_py_agent.agent.common.cancellation import CancellationToken, bind_cancellation_token
 from agent_py_agent.agent.contracts.error_taxonomy import error_contract
 from agent_py_agent.agent.contracts.recovery import RecoveryAction
 from agent_py_agent.agent.conversation.goal_progress_fuse import (
@@ -27,9 +28,17 @@ from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.tooling.host_output_redaction import turn_credential_redaction
 from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
 from agent_py_agent.agent.user_space.home_index_rebuild import reconcile_home_index_page
-from agent_py_agent.agent.user_space.home_indexes import latest_task_refs
+from agent_py_agent.agent.user_space.home_indexes import (
+    RunIndexRef,
+    TaskIndexRef,
+    latest_run_refs,
+    latest_task_refs,
+    replace_home_index_snapshots,
+)
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.agent.user_space.storage_lanes import StorageLaneBudget
+from agent_py_agent.agent.workflows import script_runner
+from agent_py_agent.agent.workflows.models import ScriptExecutionResult
 from agent_py_agent.agent.workflows.script_runner import ScriptRunner
 from agent_py_agent.tests.test_f155_w8_index_convergence import setup_workspace
 from agent_py_agent.tests.test_fc2_credential_shell_boundary import _submit_custom_card
@@ -297,3 +306,132 @@ def test_post_start_receipts_share_launch_identity_and_retry_mints_a_new_one(tmp
     first_id, second_id = (outcome.result_envelope['launch_id'] for outcome in attempts)
     assert first_id != second_id
     assert first_id not in attempts[1].output
+
+
+# ------------------------------------------------- M04-fix: D10.19 / D08.7 ----
+
+# LLM: 原快照发布器在第一次修复提交后原子换掉已发布索引（新 inode）；已持有的旧 FD 读不到新内容，完成证明必须绑定已发布路径身份。
+# 函数用途: 证明本页读到的源被原子替换时报 INDEX_SOURCE_CHANGED，并从偏移 0 重读新文件，使替换带入的过期行也被修复。
+@pytest.mark.parametrize('phase', ['task', 'run'])
+def test_atomic_index_replacement_during_page_is_detected_and_rereads_published_file(tmp_path, phase):
+    home, first = setup_workspace(tmp_path)
+    second = first.with_name('other-task')
+    (second / 'work').mkdir(parents=True)
+    (second / 'work' / 'state.json').write_text(json.dumps(dict(task_id='other-task', primary_run_id='other-run',
+                                                                status='DONE')))
+
+    def snapshot(first_status, second_status):
+        tasks = [TaskIndexRef(home.owner_id, 'task', first, first_status if phase == 'task' else 'done', 'task')]
+        runs = [RunIndexRef(home.owner_id, 'run', 'task', first / 'work', first_status if phase == 'run' else 'done')]
+        if second_status:
+            tasks.append(TaskIndexRef(home.owner_id, 'other-task', second,
+                                      second_status if phase == 'task' else 'done', 'other-task'))
+            runs.append(RunIndexRef(home.owner_id, 'other-run', 'other-task', second / 'work',
+                                    second_status if phase == 'run' else 'done'))
+        replace_home_index_snapshots(home, owners=(), task_refs=tuple(tasks), run_refs=tuple(runs), agent_refs=())
+
+    snapshot('active', None)
+    path = home.global_index_active_tasks_jsonl if phase == 'task' else home.global_index_active_runs_jsonl
+    inode = path.stat().st_ino
+    replaced = []
+
+    def replace_after_first_repair(operation):
+        receipt = operation()
+        if not replaced:
+            snapshot('done', 'active')
+            replaced.append(path.stat().st_ino)
+        return receipt
+
+    report = reconcile_home_index_page(home, owner_id=home.owner_id, apply=True,
+                                       budget=StorageLaneBudget(64, 1024 * 1024, None),
+                                       commit_transition=replace_after_first_repair)
+    assert replaced and replaced[0] != inode
+    assert any(err['code'] == 'INDEX_SOURCE_CHANGED' for err in report['errors']), report
+    assert report['partial'] is True, report
+    refs = latest_task_refs(home) if phase == 'task' else latest_run_refs(home)
+    # 替换带入的 other-task 过期 active 行必须在同一次重读里按权威 DONE 修复，而不是带着旧 inode 的证明宣告完成。
+    assert {row['task_id']: row['status'] for row in refs} == {'task': 'done', 'other-task': 'done'}, (report, refs)
+
+
+_LONG_RUNNING = "import time\ntime.sleep(30)\nprint('{\"ok\": true}')\n"
+
+
+# LLM: 取消只经原 CancellationToken 与 runner 的原检查点触发；按 capture.started 区分子进程创建前后，不依赖计时。
+# 函数用途: D08.7 取消两例：创建前取消报 not_started，创建后取消报 unknown；两者都带 CANCELLED、阶段、launch_id 与同 id 的回收回执。
+@pytest.mark.parametrize('moment', ['before_spawn', 'after_spawn'])
+def test_cancelled_run_keeps_phase_cleanup_receipt_and_launch_identity(tmp_path, monkeypatch, moment):
+    token, captures = CancellationToken(), []
+    original_execute, original_check = script_runner._execute, script_runner.raise_if_cancelled
+
+    def observed_execute(command, folder, environment, input_json, timeout, capture, **kwargs):
+        captures.append(capture)
+        return original_execute(command, folder, environment, input_json, timeout, capture, **kwargs)
+
+    def check():
+        if captures and not token.cancelled and bool(captures[0].get('started')) == (moment == 'after_spawn'):
+            token.cancel('m04 user stop')
+        original_check()
+
+    monkeypatch.setattr(script_runner, '_execute', observed_execute)
+    monkeypatch.setattr(script_runner, 'raise_if_cancelled', check)
+    with _credential_scripts(tmp_path) as (tool, context, ref), bind_cancellation_token(token):
+        outcome = tool.execute_scoped({'action': 'run', 'script_id': 'launch_probe', 'credential_ref': ref}, context)
+    assert token.cancelled and len(captures) == 1
+    expected_effect, expected_stage = (('not_started', 'runtime_gate') if moment == 'before_spawn'
+                                       else ('unknown', 'execution'))
+    envelope = outcome.result_envelope
+    assert not outcome.ok and outcome.error_code == envelope['error_code'] == 'CANCELLED', outcome.output
+    assert envelope['effect_outcome'] == outcome.effect_outcome == expected_effect, outcome.output
+    assert outcome.failure_stage == expected_stage and outcome.next_action
+    assert bool(captures[0].get('started')) is (moment == 'after_spawn')
+    assert envelope['phase'] == ('started' if moment == 'after_spawn' else 'preflight')
+    assert _LAUNCH_ID.fullmatch(envelope['launch_id'])
+    reclaim = envelope['credential_execution']
+    assert reclaim['launch_id'] == envelope['launch_id'] and reclaim['effect_outcome'] == expected_effect
+    assert (reclaim['process_tree_reaped'], reclaim['scratch_cleaned'], reclaim['fd_closed']) == (True, True, True)
+
+
+# LLM: runner 结果经其 JSON codec 往返（如跨进程或旧记录读回）不能丢 launch_id；旧记录缺字段读成空串，不猜值。
+# 函数用途: D08.7 序列化：声明字段随 to_dict/from_dict 往返，经序列化结果的 ScriptsTool 回执仍带原 id，旧结果可读。
+def test_launch_identity_survives_result_codec_and_tool_roundtrip(tmp_path):
+    identity = 'a' * 32
+    wire = json.loads(json.dumps(ScriptExecutionResult('s', True, 0, 1.0, 0.0, 0.0, {}, '', '',
+                                                       launch_id=identity).to_dict()))
+    assert wire['launch_id'] == identity and ScriptExecutionResult.from_dict(wire).launch_id == identity
+    legacy = {key: value for key, value in wire.items() if key != 'launch_id'}
+    assert ScriptExecutionResult.from_dict(legacy).launch_id == ''
+    assert 'launch_id' not in ScriptExecutionResult('s', True, 0, 1.0, 0.0, 0.0, {}, '', '').to_dict()
+
+    owner = tmp_path / 'owners' / 'local' / 'main'
+    work = owner / 'tasks' / 'roundtrip'
+    work.mkdir(parents=True)
+    ScriptStore(owner, workspace_root=work).save_script(
+        AssetDescriptor('m04_echo', 'script', 'm04_echo', io_contract={'inputs': [], 'outputs': ['ok']}),
+        "print('{\"ok\": true}')\n")
+    produced = []
+
+    class _SerializedRunner(ScriptRunner):
+        def run_script(self, *args, **kwargs):
+            result = super().run_script(*args, **kwargs)
+            produced.append(result.launch_id)
+            return json.loads(json.dumps(result.to_dict()))
+
+    runner = _SerializedRunner(owner, workspace_root=work, read_scope_mode='exact', owner_scope_root=owner,
+                               agent_home_root=tmp_path)
+    outcome = ScriptsTool(owner, workspace_root=work, runner=runner).execute({'action': 'run', 'script_id': 'm04_echo'})
+    assert outcome.ok, outcome.output
+    assert len(produced) == 1 and _LAUNCH_ID.fullmatch(produced[0])
+    assert outcome.result_envelope['launch_id'] == produced[0]
+
+
+# LLM: Schema 与必填项校验在 runner 进入之前拒绝，launch_id 只能是显式空串；其它动作的拒绝回执不加该字段。
+# 函数用途: D08.7 预派发拒绝：run 的校验拒绝带 launch_id=""，非 run 动作保持原回执形状。
+@pytest.mark.parametrize('params', [{'action': 'run', 'inputs': {}},
+                                    {'action': 'run', 'script_id': 'shell-scope', 'timeout_seconds': 'later'}])
+def test_predispatch_run_refusal_reports_explicit_empty_launch_id(tmp_path, params):
+    tool = _nested_shell_tool(tmp_path)
+    outcome = tool.execute(params)
+    assert outcome.error_code == 'TOOL_INVALID_ARGUMENTS' and outcome.effect_outcome == 'not_started', outcome.output
+    assert outcome.result_envelope['launch_id'] == '' and json.loads(outcome.output)['launch_id'] == ''
+    other = tool.execute({'action': 'get'})
+    assert other.error_code == 'TOOL_INVALID_ARGUMENTS' and 'launch_id' not in other.result_envelope

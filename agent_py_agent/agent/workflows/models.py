@@ -133,6 +133,8 @@ class ScriptExecutionResult:
     confirmed_step_refs: tuple[str, ...] = field(default=(), kw_only=True)
     output_dir: str = field(default='', kw_only=True)
     output_artifacts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
+    # D08.7 启动身份：只由 ScriptRunner 每次启动尝试生成；未进入 runner 的结果与旧记录为空串，空值不进入旧 JSON。
+    launch_id: str = field(default='', kw_only=True)
 
     # LLM: 动态运行事实仍由原工具投影补齐；空归档字段不改变旧脚本回执。
     # 函数用途: 返回独立脚本结果JSON。
@@ -314,11 +316,11 @@ class WorkflowRunRecord:
                       'failure_notification': raw.get('failure_notification')})
 
 
-# LLM: 所有JSON边界均复制；仅dataclass归档空字段省略，业务dict的同名键原样保留，嵌套步骤同样兼容。
+# LLM: 所有JSON边界均复制；仅dataclass归档空字段与空启动身份省略，业务dict的同名键原样保留，嵌套步骤同样兼容。
 # 函数用途: 将 dataclass 或 JSON 配置转成独立的普通数据。
 def payload(value):
     projected = asdict(value, dict_factory=lambda pairs: {
-        key: item for key, item in pairs if key not in ('output_dir', 'output_artifacts') or item
+        key: item for key, item in pairs if key not in ('output_dir', 'output_artifacts', 'launch_id') or item
     }) if is_dataclass(value) else value
     return json.loads(json.dumps(projected, allow_nan=False))
 

@@ -26,6 +26,7 @@ from ..assets.revision_history import get_version, list_versions, materialize_sc
 from ..assets.script_store import ScriptStore
 from ..assets.version_diff import diff_versions, load_snapshot
 from ..assets.version_hook import version_operation
+from ..common.cancellation import ToolCancelled
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import open_directory_beneath
 from .input_schema import validate_tool_input
@@ -171,6 +172,40 @@ def _with_launch_id(params, data, exc=None):
         return data
     launch_id = data.get('launch_id') if exc is None else getattr(exc, 'launch_id', '')
     return {**data, 'launch_id': str(launch_id or '')}
+
+
+# LLM: 只给 scripts run 在 runner 进入前的校验拒绝补显式空 launch_id，不改错误码、副作用或下一步；其它动作原样返回。
+# 函数用途: 让预派发拒绝回执与其它 run 分支同形，模型可直接区分“从未进入 runner”。
+def _refusal_with_empty_launch_id(params, outcome):
+    envelope = getattr(outcome, 'result_envelope', None)
+    if (outcome is None or not isinstance(params, dict) or params.get('action') != 'run'
+            or not isinstance(envelope, dict) or 'launch_id' in envelope):
+        return outcome
+    body = {**envelope, 'launch_id': ''}
+    return replace(outcome, output=json.dumps(body, ensure_ascii=False), result_envelope=body)
+
+
+# LLM: 取消信号保留为 CANCELLED（执行层据此记 cancelled、停止自动重试）；回执取自 runner 本次尝试，
+#   未进入 runner 时只有 launch_id=""。启动前取消为 not_started，启动后取消为 unknown，必须先核实副作用再决定重跑。
+# 函数用途: 把 scripts run 的取消转换为带阶段、清理回收事实与启动身份的结构化回执。
+def _cancelled_run_outcome(params, exc):
+    receipt = getattr(exc, 'script_receipt', None)
+    if isinstance(receipt, dict):
+        # 只有 runner 自己证明子进程未创建时才报 not_started，其余一律 unknown。
+        data = dict(receipt)
+        effect = 'not_started' if receipt.get('effect_outcome') == 'not_started' else 'unknown'
+    else:
+        data, effect = {'error': str(exc) or 'cancelled'}, 'not_started'
+    data['error_code'] = 'CANCELLED'
+    data['effect_outcome'] = effect
+    started = effect == 'unknown'
+    next_action = ('脚本已启动后被取消，进程组已按回执回收，但脚本可能已写文件或发出外部请求；'
+                   '先核实相关文件与远端业务状态，再决定是否重新运行，禁止原样盲目重放。' if started else
+                   '脚本在子进程创建前被取消，未产生副作用；如仍需要结果，确认用户意图后再重新运行。')
+    data['next_action'] = next_action
+    stage = 'execution' if started else 'runtime_gate'
+    return _outcome('scripts', _with_launch_id(params, data), False, 'CANCELLED',
+                    effect_outcome=effect, failure_stage=stage, next_action=next_action)
 
 
 # LLM: 只用于模型可见投影，保留领域版本字段并共用有限JSON安全codec，不能作为更新的旧值。
@@ -517,7 +552,7 @@ class ScriptsTool(BaseTool):
     # LLM: 纯参数预检供原执行器claim前使用，不创建Owner或取得领域Store。
     # 函数用途: 返回条件必填及Schema错误，合法调用返回None。
     def validate_invocation(self, params, context):
-        return _validate(self, params)
+        return _refusal_with_empty_launch_id(params, _validate(self, params))
 
     # LLM: 显式Store优先；默认Store每次绑定当前workspace，避免缓存旧项目目录。
     # 函数用途: 按需取得当前Owner唯一脚本存储。
@@ -622,6 +657,8 @@ class ScriptsTool(BaseTool):
                 )
             return _outcome('scripts', _with_launch_id(params, {'error': str(exc)}, exc), False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
+            if isinstance(exc, ToolCancelled) and params.get('action') == 'run':
+                return _cancelled_run_outcome(params, exc)
             return _outcome('scripts', _with_launch_id(params, {'error': str(exc)}, exc), False, 'TOOL_EXECUTION_FAILED')
 
     # LLM: action精确枚举；check_sources刷新而get稳定，运行仍经源硬门；workspace/runner仅取原宿主绑定。
@@ -732,17 +769,26 @@ class ScriptsTool(BaseTool):
                     expected_definition_ref=str((options.get('expected_script_pin') or {}).get('execution_definition_ref') or ''),
                     declared_origins=tuple(dict.fromkeys(declared_origins)),
                 )
-            run_data = _plain(run_script_with_datasources(self.owner_home, script_id, params.get('inputs', {}),
-                runner=runner, workspace_root=self._workspace_root(),
-                timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources'), **options))
-            if cred_ref is not None and context is not None and getattr(context, 'credential_use', None) is not None:
-                turn_red = getattr(context.credential_use, 'turn_redaction', None)
-                if turn_red is not None and isinstance(run_data, dict):
-                    run_data = turn_red.redact_value(run_data)
-                telemetry = getattr(runner, '_last_credential_telemetry', None)
-                if isinstance(telemetry, dict) and isinstance(run_data, dict):
-                    run_data = {**run_data, 'credential_execution': telemetry}
-            return run_data
+            # 取消照常上抛；runner 附在异常上的本次回执经与正常结果相同的投影、脱敏与回收回执拼装后随异常带出。
+            def project(result):
+                run_data = _plain(result)
+                if cred_ref is not None and context is not None and getattr(context, 'credential_use', None) is not None:
+                    turn_red = getattr(context.credential_use, 'turn_redaction', None)
+                    if turn_red is not None and isinstance(run_data, dict):
+                        run_data = turn_red.redact_value(run_data)
+                    telemetry = getattr(runner, '_last_credential_telemetry', None)
+                    if isinstance(telemetry, dict) and isinstance(run_data, dict):
+                        run_data = {**run_data, 'credential_execution': telemetry}
+                return run_data
+            try:
+                result = run_script_with_datasources(self.owner_home, script_id, params.get('inputs', {}),
+                    runner=runner, workspace_root=self._workspace_root(),
+                    timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources'), **options)
+            except ToolCancelled as exc:
+                if getattr(exc, 'script_result', None) is not None:
+                    exc.script_receipt = project(exc.script_result)
+                raise
+            return project(result)
         raise ValueError('未知脚本action')
 
     # LLM: update只继承原正式字段和代码；完整定义沿资产领域校验，不写回实时投影，CAS仍由Store原锁检查。

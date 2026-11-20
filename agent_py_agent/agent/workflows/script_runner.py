@@ -39,7 +39,7 @@ from ..attempt.sandbox import (
     gateway_bound_ports,
     system_read_roots_for_platform,
 )
-from ..common.cancellation import raise_if_cancelled
+from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.credential_artifact_paths import (
     is_blocked_credential_debug_path,
     path_contains_credential_echo,
@@ -744,8 +744,14 @@ def _summary_warning_clock(error_type):
 #   冻结异常对象拒绝写属性时保留原异常，不能让回执字段掩盖真实失败。
 # 函数用途: 让启动前拒绝与执行期异常都带本次启动尝试的身份，供上层回执原样复制。
 def _stamp_launch_id(exc: BaseException, launch_id: str) -> None:
+    _stamp_attribute(exc, 'launch_id', launch_id)
+
+
+# LLM: 只给离开 run_script 的异常附加回执事实；冻结异常对象拒绝写属性时保留原异常。
+# 函数用途: 在异常对象上写入一个附加回执属性。
+def _stamp_attribute(exc: BaseException, name: str, value: object) -> None:
     try:
-        exc.launch_id = launch_id
+        setattr(exc, name, value)
     except AttributeError:
         pass
 
@@ -1471,6 +1477,7 @@ class ScriptRunner:
         cleanup, capture, execution_error = {}, {'phase': 'preflight', 'timings': dict.fromkeys(_TIMING_FIELDS, 0.0)}, {}
         delivery_receipts = []
         batch, envelope_parsed, output_dir, output_artifacts = None, False, '', ()
+        cancelled: ToolCancelled | None = None
         try:
             inputs = payload({} if inputs is None else inputs)
             with self._prepare(script_id, inputs, timeout_seconds, override_data_sources, network_access, capture=capture) as prepared:
@@ -1511,6 +1518,14 @@ class ScriptRunner:
                 self._admit_delivery(intents, output, metadata, capture.get('work_context'), receipts=delivery_receipts)
                 if batch is not None and batch.artifacts:
                     output_dir, output_artifacts = batch.publish()
+        except ToolCancelled as exc:
+            # 取消必须继续上抛（调用方据此停止），但先按同一份回执装配记下阶段、清理与回收事实；
+            #   _execute 的 finally 已回收进程组，_prepare 退出已关 FD 并清 scratch。
+            cancelled = exc
+            cleanup = capture.get('cleanup_error', cleanup)
+            exit_code = capture.get('exit_code', exit_code)
+            error = 'CANCELLED'
+            execution_error = {'exception_type': type(exc).__name__, 'message': str(exc)}
         except (SandboxUnavailableError, SandboxUnavailable, CredentialInputError) as exc:
             _stamp_launch_id(exc, launch_id)
             raise
@@ -1536,7 +1551,7 @@ class ScriptRunner:
             if isinstance(exc, RunOutError):
                 execution_error.update(exc.diagnostics())
         except Exception as exc:
-            # 本层不转成回执的其它异常（如取消）原样上抛，只补本次 launch_id。
+            # 本层不转成回执的其它异常原样上抛，只补本次 launch_id。
             _stamp_launch_id(exc, launch_id)
             raise
         finally:
@@ -1604,6 +1619,11 @@ class ScriptRunner:
                 process_tree_reaped=not bool(cleanup),
                 launch_id=launch_id,
             )
+        if cancelled is not None:
+            # 取消不是脚本失败，不计入资产摘要；同一异常对象带上本次完整回执原样上抛，取消信号不被吞成普通结果。
+            _stamp_launch_id(cancelled, launch_id)
+            _stamp_attribute(cancelled, 'script_result', result)
+            raise cancelled
         if record_summary:
             _record_summary(self.owner_home, result)
         return result

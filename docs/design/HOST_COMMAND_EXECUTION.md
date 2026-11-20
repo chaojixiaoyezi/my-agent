@@ -132,3 +132,10 @@ handler 构造使用同一次安装快照的目录及目标，写入时原安装
   - 经 `ScriptsTool` 的 D08.7 三种情形：启动前拒绝、非零退出并回收进程树、重试换新 id；
   - 目标续跑扣下码的分类与继续条件。
 - 目标、CI 节点与影响测试在 Python 3.12 与 3.14t（`-X gil=0`）通过；静态门（ruff、导入边界、`git diff --check`、clean package）通过。
+
+**2026-11-20 M04 复核修正（Astra M04 审计三项）**
+
+- 已发布身份（D10.19）：持有的 FD 在快照发布器原子替换已发布索引后仍指向旧 inode。推进游标或阶段前除 FD 的 `fstat` 外，再 `stat` 已发布路径，`(st_dev, st_ino)` 须等于本页冻结身份；被替换或删除同样走 `INDEX_SOURCE_CHANGED`，回偏移 0 重读新文件。rename 原子，单次 `stat` 即线性化点，不拿发布锁；之后的替换由下一页开头的身份核对接住。追加增长与页预算不变。
+- 取消回执（D08.7）：`ToolCancelled` 继承 `RuntimeError`，此前被 `ScriptsTool` 的通用分支吞成 `TOOL_EXECUTION_FAILED/failed`。`run_script` 现在先按同一份回执装配记下阶段、退出码、进程组清理与凭据回收（同一 `launch_id`），把结果挂在原异常上继续上抛，不计入资产摘要；`ScriptsTool` 对 run 返回 `CANCELLED`，子进程创建前为 `not_started`/`runtime_gate`，创建后为 `unknown`/`execution`，并要求先核实副作用再重跑。
+- 结果字段（D08.7）：`ScriptExecutionResult` 声明 `launch_id`（kw-only，默认 `""`，空值不进旧 JSON），经 `to_dict`/`from_dict` 往返保留，旧记录读成 `""`；run 的预派发校验拒绝回执带显式 `launch_id: ""`。工作流步骤持久回执 `escalation_result.script_execution` 尚不带 `launch_id`，属 `workflows/engine.py`（M42/M57/M59/M67）与步骤效果状态（M58）范围，留作 M58 跟进。
+- 证据：`tests/test_conveyor_m04_base_cures.py` 新增七例（索引原子替换 ×2、取消前/后 ×2、codec 与经序列化工具往返、预派发拒绝 ×2），在 `6e7ee6d32` 全部失败，修正后在 3.12 与 3.14t（`-X gil=0`）通过。
