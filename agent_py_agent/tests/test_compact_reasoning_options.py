@@ -272,7 +272,7 @@ def test_structured_tool_call_is_discarded_then_retried_once_with_same_cache_sur
     assert len(payloads) == 2
     assert payloads[0]["tool_choice"] == "auto"
     assert payloads[0]["tools"]
-    assert payloads[1]["tool_choice"] == payloads[0]["tool_choice"] == "auto"
+    assert payloads[1]["tool_choice"] == "none"
     assert payloads[1]["tools"] == payloads[0]["tools"]
     assert payloads[1]["reasoning_effort"] == "max"
     assert "thinking" not in payloads[1]
@@ -503,7 +503,8 @@ def test_segmented_compact_uses_compact_reasoning_level(monkeypatch, level):
     monkeypatch.setattr(budget_module, "compact_summary_budget", lambda _agent: 800)
     generate_bounded_compact_response(AuxiliaryModelCallRequest(
         agent=agent,
-        prompt="源历史段。" * 3000,
+        # 保留多段请求，同时让测试来源能在真实的共享发送预算内完成。
+        prompt="源历史段。" * 350,
         system_instruction="main system",
         thread_id=thread_id,
         purpose="conversation_compact_summary",
