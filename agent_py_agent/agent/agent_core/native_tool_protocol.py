@@ -50,8 +50,11 @@ def select_tool_protocol(agent: object, *, run_id: str, request_id: str = "") ->
         disabled, effort = request_reasoning_options(agent, params, backend, forced=False)
         scope = ProbeAccountingScope(model_call_ledger(agent), request_id=str(request_id or ""), run_id=str(run_id or ""),
                                      thinking_disabled=disabled, reasoning_effort=effort)
+        freeze = getattr(type(backend), "probe_tool_protocol_snapshot", None)
         with probe_accounting_scope(scope):
-            capability = probe()
+            capability = freeze(backend, run_id=run_id) if callable(freeze) else probe()
+        if isinstance(capability, ToolProtocolSnapshot):
+            return capability
     else:
         capability = _declared_capability(
             backend,

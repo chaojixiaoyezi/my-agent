@@ -73,12 +73,26 @@ def _commit(path: Path, provider_id: str, binding: str, attempt: str, update: di
         data, row = _provider(path, provider_id)
         if not row["enabled"] or oauth_binding(row) != binding or row["auth"].get("pending", {}).get("id") != attempt:
             raise ModelProfileError("登录已取消或配置已变化，迟到结果未保存。")
-        draft = {**row["auth"], **update}
+        previous = row["auth"]
+        draft = {**previous, **update}
         if draft.get("pending") is None:
             draft.pop("pending", None)
         row["auth"] = stored_oauth(draft, row["api_base"])
         _save_profiles(path, data)
+        if previous.get("generation") != row["auth"].get("generation"):
+            _invalidate_previous_probe_generation(path, provider_id, binding, previous)
         return _projection(row["auth"], reveal_code=True)
+
+
+def _invalidate_previous_probe_generation(path, provider_id, binding, auth):
+    from ..backends.http import invalidate_oauth_probe_generation
+
+    generation = auth.get("generation")
+    if generation:
+        invalidate_oauth_probe_generation({
+            "path": str(path), "provider_id": provider_id, "binding": binding,
+            "mode": auth["mode"], "generation": generation,
+        })
 
 
 # LLM: 手动写阶段持群能力锁；读取/取消免新增 grant，自动 refresh 不走此手动入口；每服务商一个请求，网络不持文件锁。
@@ -241,6 +255,9 @@ def request_credentials(ref: dict, api_base: str) -> tuple[str, dict[str, str]]:
                         _check_ref(current, ref, api_base)
                         _clear_tokens(current["auth"])
                         _save_profiles(path, data)
+                        from ..backends.http import invalidate_oauth_probe_generation
+
+                        invalidate_oauth_probe_generation(ref)
                 raise
             with locked_json_path(path):
                 data, current = _provider(path, provider_id)
@@ -286,6 +303,7 @@ def _logout(path: Path, provider_id: str, *, agent) -> dict:
         _clear_tokens(current)
         current.pop("pending", None)
         _save_profiles(path, data)
+        _invalidate_previous_probe_generation(path, provider_id, expected[0], auth)
         result = _projection(current)
     if is_siwc(auth):
         result["remote_revocation_confirmed"] = confirmed

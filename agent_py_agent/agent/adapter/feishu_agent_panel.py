@@ -12,7 +12,10 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
+from datetime import timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from ..common.authenticated_http import open_authenticated_request
@@ -30,6 +33,10 @@ from .private_controls import GroupMembershipError, _current_group_member
 from .protocol import FeishuEventDisposition
 
 logger = logging.getLogger(__name__)
+
+# 只跟踪本进程还在发送的预约，结束即移除。
+_REPLACEMENT_SENDS: set[tuple[Path, str]] = set()
+_REPLACEMENT_SEND_LOCK = Lock()
 
 # 飞书卡片最长更新生命周期（14 天减 5 分钟安全缓冲）
 FEISHU_CARD_MAX_AGE_SECONDS = 14 * 86400 - 300
@@ -637,6 +644,166 @@ def handle_panel_command_event(adapter: Any, msg: Any) -> FeishuEventDisposition
         return FeishuEventDisposition("retryable", "FEISHU_PANEL_FAILED")
 
 
+def _expired_panel_response(binding_ref, record, *, replaced=False):
+    view = build_panel_view(None, binding_ref, record, next_revision=int(record.get("display_revision") or 1))
+    return {
+        "toast": {
+            "type": "info" if replaced else "warning",
+            "content": "原卡片已达飞书 14 天更新上限，已为您发送新面板卡片。" if replaced else
+                       "该旧面板已停用，请使用最新面板卡片操作。",
+        },
+        "card": {"type": "raw", "data": render_progress_card({"steps": (), "panel_view": view})},
+    }
+
+
+def _prepare_panel_replacement(adapter, owner_home, claims, actor, source):
+    pending = source["replacement"]
+    successor_id = source["successor_id"]
+    issued_at = pending["issued_at"]
+    binding_ref = sign_panel_binding(owner_home, {**claims, "binding_id": successor_id, "issued_at": issued_at})
+    successor = {
+        "schema_version": _PANEL_STATE_SCHEMA,
+        "binding_id": successor_id,
+        "audience": str(claims.get("audience") or "dm"),
+        "message_id": "",
+        "chat_id": "",
+        "display_revision": 1,
+        "display_generation": source["display_generation"],
+        "created_at": issued_at,
+        "selected_session_task_id": source.get("selected_session_task_id", ""),
+        "selected_bound_root_id": source.get("selected_bound_root_id", ""),
+        "selected_target_ref": source.get("selected_target_ref", "all_summary"),
+        "guide_open": False,
+        "confirm_stop_run_id": "",
+        "last_control_status": "",
+        "expired": False,
+        "dm_detail_cards": {},
+    }
+    _, data = _fetch_panel_data(adapter, claims, successor, actor)
+    view = build_panel_view(data, binding_ref, successor, next_revision=1)
+    return {**pending, "successor": successor, "card": render_progress_card({"steps": (), "panel_view": view})}
+
+
+def _replacement_matches(record, source):
+    return (
+        isinstance(record, dict)
+        and record.get("schema_version") == _PANEL_STATE_SCHEMA
+        and record.get("successor_id") == source["successor_id"]
+        and record.get("display_generation") == source["display_generation"]
+        and record.get("binding_id") == source.get("binding_id")
+        and record.get("message_id") == source.get("message_id")
+        and record.get("chat_id") == source.get("chat_id")
+    )
+
+
+def _write_replacement_successor(owner_home, pending, *, superseded=False):
+    successor = pending["successor"]
+    path = _panel_state_path(owner_home, successor["binding_id"])
+    receipt = pending.get("receipt") or {}
+    ensure_private_dir(path.parent)
+    with locked_json_path(path):
+        current = _read_panel_state(path)
+        if current is not None and not superseded:
+            if current.get("replacement_state") != "published" or (
+                current.get("message_id"), current.get("chat_id")
+            ) != (receipt["message_id"], receipt["chat_id"]):
+                raise ValueError("面板替换回执与已登记的后继不一致，请核对原发送回执后重试。")
+            return
+        if current is not None and current.get("replacement_state") == "superseded":
+            return
+        _write_panel_state(path, {
+            **(current if current is not None else successor),
+            **receipt,
+            "expired": superseded,
+            "replacement_state": "superseded" if superseded else "published",
+        })
+
+
+def _publish_panel_replacement_locked(state_path, owner_home, binding_ref, current, pending):
+    _write_replacement_successor(owner_home, pending)
+    current.update(
+        expired=True, expired_notice="该旧面板已停用，请使用最新面板卡片操作。",
+        replacement={"status": "published"},
+    )
+    _write_panel_state(state_path, current)
+    return _expired_panel_response(binding_ref, current, replaced=True)
+
+
+def _reissue_panel(adapter, state_path, owner_home, binding_ref, claims, actor, source):
+    from ..gateway_parts.daemon_metadata import build_process_identity
+    from .delivery import _dispatch_owner_live
+
+    pending = source["replacement"]
+    if pending.get("successor") is None:
+        pending = _prepare_panel_replacement(adapter, owner_home, claims, actor, source)
+    process = build_process_identity()
+    observed_owner = pending.get("owner_process")
+    owner_gone = (
+        pending.get("status") == "sending" and observed_owner != process
+        and _dispatch_owner_live(observed_owner) is False
+    )
+    claim_key = (state_path, source["successor_id"])
+    waiting = {"toast": {"type": "warning", "content": "新面板正在替换，请稍后刷新原卡片。"}}
+
+    with locked_json_path(state_path):
+        current = _read_panel_state(state_path)
+        if not _replacement_matches(current, source):
+            _write_replacement_successor(owner_home, pending, superseded=True)
+            return waiting
+        if current.get("expired") is True:
+            return _expired_panel_response(binding_ref, current)
+        existing = current["replacement"]
+        if existing.get("successor") is not None:
+            pending = existing
+        if _valid_card_receipt(pending.get("receipt")):
+            return _publish_panel_replacement_locked(state_path, owner_home, binding_ref, current, pending)
+        if pending.get("status") == "sending":
+            owner = pending.get("owner_process")
+            if owner != process and (owner != observed_owner or not owner_gone):
+                return waiting
+            with _REPLACEMENT_SEND_LOCK:
+                if claim_key in _REPLACEMENT_SENDS:
+                    return waiting
+        now = time.time()
+        # 飞书发送 UUID 的去重承诺为一小时，超过窗口需要先核对未决回执。
+        if now - pending.get("send_started_at", now) >= timedelta(hours=1).total_seconds():
+            return {"toast": {"type": "error", "content": "新面板发送结果待确认，请核对会话中的卡片后再操作。"}}
+        pending = {**pending, "status": "sending", "owner_process": process,
+                   "send_started_at": pending.get("send_started_at", now)}
+        current["replacement"] = pending
+        _write_panel_state(state_path, current)
+        with _REPLACEMENT_SEND_LOCK:
+            _REPLACEMENT_SENDS.add(claim_key)
+
+    try:
+        successor_id = source["successor_id"]
+        receipt = adapter.send_control_card(
+            pending["target"], pending["card"], idempotency_key=f"reissue:{successor_id}", uuid_value=successor_id,
+        )
+        valid = _valid_card_receipt(receipt)
+        if valid:
+            pending = {**pending, "status": "sent", "receipt": {
+                "message_id": str(receipt["message_id"]), "chat_id": str(receipt["chat_id"]),
+            }}
+            pending.pop("card", None)
+        with locked_json_path(state_path):
+            current = _read_panel_state(state_path)
+            if not _replacement_matches(current, source):
+                _write_replacement_successor(owner_home, pending, superseded=True)
+                return waiting
+            if not valid:
+                current["replacement"] = {**pending, "status": "reserved"}
+                _write_panel_state(state_path, current)
+                return {"toast": {"type": "error", "content": "新面板卡片发送未成功，请稍后重试原卡片。"}}
+            # 先保存发送回执，任何后续发布中断都可按同一回执恢复。
+            current["replacement"] = pending
+            _write_panel_state(state_path, current)
+            return _publish_panel_replacement_locked(state_path, owner_home, binding_ref, current, pending)
+    finally:
+        with _REPLACEMENT_SEND_LOCK:
+            _REPLACEMENT_SENDS.discard(claim_key)
+
+
 def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, Any] | None:
     """处理飞书卡片 my_agent_panel_action 回调操作。"""
     value = norm.get("value") or {}
@@ -665,7 +832,8 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
     owner_home = resolved.home_dir
     state_path = _panel_state_path(owner_home, binding_id)
 
-    with locked_json_path(state_path):
+    with ExitStack() as panel_lock:
+        panel_lock.enter_context(locked_json_path(state_path))
         record = _read_panel_state(state_path)
         if not isinstance(record, dict) or record.get("schema_version") != _PANEL_STATE_SCHEMA:
             return {"toast": {"type": "error", "content": "面板状态不存在或已过期。"}}
@@ -715,84 +883,26 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
             if lock_res is not None:
                 return lock_res
 
-        # 14 天卡片过期生命周期检查
-        now = time.time()
-        created_at = float(record.get("created_at") or 0.0)
-        is_expired = record.get("expired") is True or (now - created_at >= FEISHU_CARD_MAX_AGE_SECONDS)
-
         if record.get("expired") is True:
-            expired_pv = build_panel_view(
-                None,
-                binding_ref,
-                record,
-                next_revision=int(record.get("display_revision") or 1),
-            )
-            expired_card = render_progress_card({"steps": (), "panel_view": expired_pv})
-            return {
-                "toast": {"type": "warning", "content": "该旧面板已停用，请使用最新面板卡片操作。"},
-                "card": {"type": "raw", "data": expired_card},
-            }
+            return _expired_panel_response(binding_ref, record)
 
-        if now - created_at >= FEISHU_CARD_MAX_AGE_SECONDS:
-            succ_binding_id = secrets.token_hex(16)
-            succ_claims = {
-                **claims,
-                "binding_id": succ_binding_id,
-                "issued_at": now,
-            }
-            succ_binding_ref = sign_panel_binding(owner_home, succ_claims)
-            succ_record: dict[str, Any] = {
-                "schema_version": _PANEL_STATE_SCHEMA,
-                "binding_id": succ_binding_id,
-                "audience": audience,
-                "message_id": "",
-                "chat_id": "",
-                "display_revision": 1,
-                "display_generation": int(record.get("display_generation") or 1) + 1,
-                "created_at": now,
-                "selected_session_task_id": record.get("selected_session_task_id", ""),
-                "selected_bound_root_id": record.get("selected_bound_root_id", ""),
-                "selected_target_ref": record.get("selected_target_ref", "all_summary"),
-                "guide_open": False,
-                "confirm_stop_run_id": "",
-                "last_control_status": "",
-                "expired": False,
-                "dm_detail_cards": {},
-            }
+        now = time.time()
+        if now - float(record.get("created_at") or 0.0) >= FEISHU_CARD_MAX_AGE_SECONDS:
+            if not record.get("successor_id"):
+                record.update(
+                    successor_id=secrets.token_hex(16),
+                    display_generation=int(record.get("display_generation") or 1) + 1,
+                    replacement={
+                        "status": "reserved", "issued_at": now,
+                        "target": base_group_chat_id if audience == "group_public" else actor,
+                    },
+                )
+                _write_panel_state(state_path, record)
+            elif not isinstance(record.get("replacement"), dict):
+                return {"toast": {"type": "error", "content": "面板替换状态待核对，请在原会话确认新卡片。"}}
 
-            gw_code, panel_data = _fetch_panel_data(adapter, claims, succ_record, actor)
-            succ_pv = build_panel_view(panel_data, succ_binding_ref, succ_record, next_revision=1)
-            succ_card = render_progress_card({"steps": (), "panel_view": succ_pv})
-
-            reissue_target = actor if audience != "group_public" else base_group_chat_id
-            receipt = adapter.send_control_card(reissue_target, succ_card, idempotency_key=f"reissue:{succ_binding_id}")
-            if not _valid_card_receipt(receipt):
-                return {"toast": {"type": "error", "content": "新面板卡片发送未成功，请稍后重试原卡片。"}}
-
-            succ_record["message_id"] = str(receipt.get("message_id") or "")
-            succ_record["chat_id"] = str(receipt.get("chat_id") or "")
-
-            succ_path = _panel_state_path(owner_home, succ_binding_id)
-            ensure_private_dir(succ_path.parent)
-            with locked_json_path(succ_path):
-                _write_panel_state(succ_path, succ_record)
-
-            record["expired"] = True
-            record["expired_notice"] = "该旧面板已停用，请使用最新面板卡片操作。"
-            _write_panel_state(state_path, record)
-
-            expired_pv = build_panel_view(
-                None,
-                binding_ref,
-                record,
-                next_revision=int(record.get("display_revision") or 1),
-            )
-            expired_card = render_progress_card({"steps": (), "panel_view": expired_pv})
-
-            return {
-                "toast": {"type": "info", "content": "原卡片已达飞书 14 天更新上限，已为您发送新面板卡片。"},
-                "card": {"type": "raw", "data": expired_card},
-            }
+            panel_lock.close()
+            return _reissue_panel(adapter, state_path, owner_home, binding_ref, claims, actor, record)
 
         action_name = str(value.get("action") or "").strip()
 
