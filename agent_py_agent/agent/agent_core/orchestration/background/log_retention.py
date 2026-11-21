@@ -10,7 +10,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-from ....common import json_io
+from ....common import hot_json, json_io
 from ....common.nofollow_fs import open_directory_beneath, read_bytes_beneath
 from ....memory_store.retention_scan_budget import (
     RETENTION_SCAN_SLICE_ENTRIES,
@@ -20,7 +20,9 @@ from ....user_space.directory_paging import directory_page
 
 _DAY_SHARD = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
 _PROGRESS_NAME = '.retention_progress.json'
-_PROGRESS_SCHEMA = 'background_dispatch_log_retention_progress.v2'
+_PROGRESS_SCHEMA = 'background_dispatch_log_retention_progress.v3'
+# Shared on-disk format limit for both progress readers and writers.
+_PROGRESS_MAX_BYTES = 65536
 _MARKER_SUFFIX = '.exit.json'
 
 
@@ -86,7 +88,7 @@ def _business_closed(owner, run_ids, attempt_ids):
     return observed
 
 
-def _retire_exit_marker(folder, descriptor, marker, owner_home, cutoff):
+def _retire_exit_marker(folder, descriptor, marker, owner_home, cutoff, on_unlink):
     try:
         raw = read_bytes_beneath(folder, (marker,), max_bytes=1048576, require_dir_fd=True)
         row = json.loads(raw)
@@ -113,6 +115,7 @@ def _retire_exit_marker(folder, descriptor, marker, owner_home, cutoff):
             # 手工删日志或上轮只删掉日志时，已有退出与业务终态证明仍允许退役原回执。
             if read_bytes_beneath(folder, (marker,), max_bytes=1048576, require_dir_fd=True) == raw:
                 os.unlink(marker, dir_fd=descriptor)
+                on_unlink()
                 if capture is not None:
                     os.unlink(capture_path(folder / name).name, dir_fd=descriptor)
             return False
@@ -136,6 +139,7 @@ def _retire_exit_marker(folder, descriptor, marker, owner_home, cutoff):
                 if current_capture is None or current_capture[1] != capture[1]:
                     return False
             os.unlink(name, dir_fd=descriptor)
+            on_unlink()
             os.unlink(marker, dir_fd=descriptor)
             if capture is not None:
                 os.unlink(capture_path(folder / name).name, dir_fd=descriptor)
@@ -156,9 +160,10 @@ def _marker_names(value):
 
 
 def _fresh_progress(identity):
-    """一轮从旧平铺层开始：phase=flat 分页根目录，phase=days 按日名升序分页各日目录。"""
+    """Scan the flat layout first, then discover day shards by root-directory position."""
     return {'schema': _PROGRESS_SCHEMA, 'identity': list(identity), 'phase': 'flat', 'day': '',
-            'page': {}, 'listed': False, 'names': [], 'days': []}
+            'page': {}, 'listed': False, 'names': [], 'days': [], 'day_page': {}, 'days_listed': False,
+            'changed': False, 'days_changed': False, 'revisits': 0}
 
 
 # LLM: 进度记录是唯一续点（阶段、当前日、目录分页游标、本页未处理回执与旧平铺层收集到的日名）；
@@ -166,17 +171,24 @@ def _fresh_progress(identity):
 # 函数用途: 读取并校验根目录下的派工日志留存续点。
 def _load_progress(folder, identity):
     try:
-        raw = read_bytes_beneath(folder, (_PROGRESS_NAME,), max_bytes=65536, require_dir_fd=True)
+        raw = read_bytes_beneath(folder, (_PROGRESS_NAME,), max_bytes=_PROGRESS_MAX_BYTES, require_dir_fd=True)
         row = json.loads(raw) if raw is not None else None
     except (OSError, ValueError):
         row = None
+    if isinstance(row, dict) and row.get('schema') == 'background_dispatch_log_retention_progress.v2':
+        # Keep the active directory's work. Rediscover the old accumulated day list through paging.
+        row.update(schema=_PROGRESS_SCHEMA, days=[], day_page={}, days_listed=False,
+                   changed=not row.get('listed', False), days_changed=False, revisits=0)
     if (isinstance(row, dict) and row.get('schema') == _PROGRESS_SCHEMA and row.get('identity') == list(identity)
             and row.get('phase') in ('flat', 'days') and type(row.get('day')) is str
             and (row['day'] == '' or (row['phase'] == 'days' and _DAY_SHARD.fullmatch(row['day'])))
             and isinstance(row.get('page'), dict) and type(row.get('listed')) is bool
+            and isinstance(row.get('day_page'), dict) and type(row.get('days_listed')) is bool
+            and type(row.get('changed')) is bool and type(row.get('days_changed')) is bool
+            and type(row.get('revisits')) is int and row['revisits'] >= 0
             and _marker_names(row.get('names')) and type(row.get('days')) is list
             and all(type(day) is str and _DAY_SHARD.fullmatch(day) for day in row['days'])):
-        return row
+        return {key: row[key] for key in _fresh_progress(identity)}
     return _fresh_progress(identity)
 
 
@@ -186,22 +198,31 @@ def _store_progress(folder, progress, complete):
         if complete:
             path.unlink(missing_ok=True)
         else:
-            # 进度只是加速事实：丢失只会让下一轮从头复扫，不影响任何退役判定，故不 fsync。
-            json_io.write_private_json_file_atomic_unlocked(path, progress, durable=False)
+            encoded = hot_json.dumps(progress, compact=True) + '\n'
+            if len(encoded) > _PROGRESS_MAX_BYTES:
+                raise ValueError("dispatch continuation exceeds the checkpoint format limit")
+            json_io.write_private_text_file_atomic_unlocked(path, encoded, durable=False)
     except OSError:
         pass
 
 
-def _list_page(folder, progress, limit):
-    """沿持久游标读取当前目录一页；续点失效时只让本目录从头重列，不跳过任何回执。"""
-    parts = (folder.name,) if progress['phase'] == 'flat' else (folder.name, progress['day'])
+def _list_page(folder, parts, cursor, limit):
+    """Resume the exact admitted page, restarting this directory if its position is invalid."""
     try:
-        return directory_page(folder.parent, parts, progress['page'], limit)
+        return directory_page(folder.parent, parts, cursor, limit)
     except (OSError, ValueError):
-        if not progress['page']:
+        if not cursor:
             raise
-        progress['page'] = {}
         return directory_page(folder.parent, parts, {}, limit)
+
+
+def _checkpoint_page_limit(descriptor):
+    # Two pager positions fit in the reserved half. A name byte can escape to six ASCII bytes.
+    try:
+        name_max = os.fpathconf(descriptor, 'PC_NAME_MAX')
+    except (OSError, ValueError):
+        return 1
+    return max(1, (_PROGRESS_MAX_BYTES // 2) // (6 * name_max + len(',""'))) if name_max > 0 else 1
 
 
 def _retire_old_day(descriptor, progress, cutoff_day):
@@ -212,8 +233,10 @@ def _retire_old_day(descriptor, progress, cutoff_day):
             info = os.stat(day, dir_fd=descriptor, follow_symlinks=False)
             if [info.st_dev, info.st_ino] == progress['page'].get('directory_identity'):
                 os.rmdir(day, dir_fd=descriptor)
+                return True
         except OSError:
             pass
+    return False
 
 
 # LLM: 物理枚举只经共享 directory_page 有界分页（每页不超过剩余条目预算），根目录与每个日目录的游标每片落盘；
@@ -242,7 +265,13 @@ def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries
         day_fd = None
         try:
             progress = _load_progress(folder, _directory_identity(descriptor))
+            page_limit = _checkpoint_page_limit(descriptor)
             progressed = False
+
+            def note_unlink():
+                if not progress['listed']:
+                    progress['changed'] = True
+
             while True:
                 if progress['names']:
                     if progressed and time.monotonic() >= deadline:
@@ -258,44 +287,67 @@ def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries
                             except OSError:
                                 progress['names'] = []  # 日目录在列名后消失或被替换：放弃该日剩余名单。
                                 continue
+                            if list(_directory_identity(day_fd)) != progress['page'].get('directory_identity'):
+                                os.close(day_fd)
+                                day_fd = None
+                                progress.update(names=[], page={}, listed=False)
+                                continue
                         directory, fd = folder / progress['day'], day_fd
-                    result['deleted'] += _retire_exit_marker(directory, fd, progress['names'].pop(0), owner_home, cutoff)
+                    result['deleted'] += _retire_exit_marker(
+                        directory, fd, progress['names'].pop(0), owner_home, cutoff, note_unlink,
+                    )
                     continue
                 if progressed and (result['scanned'] >= max_entries or time.monotonic() >= deadline):
                     break
+                limit = min(page_limit, max(1, max_entries - result['scanned']))
+                if progress['phase'] == 'days' and not progress['day']:
+                    if progress['days']:
+                        result['scanned'] += 1
+                        progressed = True
+                        progress.update(day=progress['days'].pop(0), page={}, listed=False, changed=False)
+                    elif progress['days_listed']:
+                        if progress['days_changed']:
+                            progress.update(day_page={}, days_listed=False, days_changed=False,
+                                            revisits=progress['revisits'] + 1)
+                            continue
+                        result['complete'] = True
+                        break
+                    else:
+                        names, resume, complete = _list_page(folder, (folder.name,), progress['day_page'], limit)
+                        result['scanned'] += resume.get('last_scanned', len(names))
+                        progress.update(day_page=resume, days_listed=complete,
+                                        days=[name for name in names if _DAY_SHARD.fullmatch(name)])
+                        progressed = True
+                    continue
                 if not progress['listed']:
+                    parts = (folder.name,) if progress['phase'] == 'flat' else (folder.name, progress['day'])
                     try:
                         names, progress['page'], progress['listed'] = _list_page(
-                            folder, progress, max(1, max_entries - result['scanned']))
+                            folder, parts, progress['page'], limit)
                     except OSError:
                         if progress['phase'] == 'flat':
                             raise
                         names, progress['page'], progress['listed'] = [], {}, True  # 日目录不可读：跳过该日。
-                    result['scanned'] += len(names)
+                    result['scanned'] += progress['page'].get('last_scanned', len(names))
                     progressed = True
-                    if progress['phase'] == 'flat':
-                        progress['days'].extend(name for name in names
-                                                if _DAY_SHARD.fullmatch(name) and name not in progress['days'])
                     progress['names'] = [name for name in names if name.endswith(_MARKER_SUFFIX)]
                     continue
                 # 当前目录已列完且其回执均已处理。
+                if progress['changed']:
+                    # Directory offsets can skip survivors after an unlink. Only repeat a sweep after actual removal.
+                    progress.update(page={}, listed=False, changed=False, revisits=progress['revisits'] + 1)
+                    continue
                 if progress['phase'] == 'flat':
-                    progress.update(phase='days', day='', days=sorted(progress['days']))
+                    progress.update(phase='days', day='', page={}, listed=False)
                     continue
                 if progress['day']:
                     if day_fd is not None:
                         os.close(day_fd)
                         day_fd = None
-                    _retire_old_day(descriptor, progress, cutoff_day)
+                    if _retire_old_day(descriptor, progress, cutoff_day) and not progress['days_listed']:
+                        progress['days_changed'] = True
                     progress['day'] = ''
                     continue
-                if not progress['days']:
-                    result['complete'] = True
-                    break
-                # 换日计入预算：大量空旧目录也按片推进。
-                result['scanned'] += 1
-                progressed = True
-                progress.update(day=progress['days'].pop(0), page={}, listed=False)
             _store_progress(folder, progress, result['complete'])
             return result
         finally:

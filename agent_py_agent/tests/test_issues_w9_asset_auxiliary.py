@@ -732,6 +732,29 @@ def test_auxiliary_commit_rereads_share_budget_and_resume(setup):
     assert history._AUXILIARY_READ_METER.get() is None
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_first_extraction_page_keeps_retry_at_directory_start(setup, legacy):
+    home, now = setup
+    paths = []
+    for index in range(3):
+        draft = save_evolution_draft(home.owner_home_dir, f"{index:x}" * 64, {
+            "script_id": f"large-{index}", "title": "Large draft",
+            "language": "python", "entry_source": "# " + "x" * 3_200_000 + "\ndef main(inputs):\n    return {}\n",
+            "input_schema": {"properties": {}}, "output_schema": {"properties": {}},
+        }, run_id="run", thread_id="thread", created_at=(now - timedelta(days=15)).isoformat())
+        paths.append(home.owner_home_dir / "data" / "asset_extractions" / (draft["proposal_id"] + ".json"))
+    first = history.maintain_asset_auxiliary_lane(request(setup, cursor={"phase": "extractions"}))
+    assert first["deleted_items"] == 0 and first["deferred_reason"] == "budget_exhausted"
+    retry = json.loads(json.dumps(first["cursor"]))
+    assert retry["retry_name"] and retry["directory"]["directory_identity"]
+    if legacy:
+        retry.pop("directory")
+    second = history.maintain_asset_auxiliary_lane(request(setup, cursor=retry))
+    assert second["deleted_items"] == 1
+    drain(setup, cursor=second["cursor"])
+    assert not any(path.exists() for path in paths)
+
+
 # LLM: pending存在就是保留依据，包括巨大的损坏JSON；不应为了决定保留而整读未知载荷。
 # 函数用途: 验证pending探测不消耗未申报的JSON读取量。
 def test_large_invalid_pending_is_protected_without_reading(setup):

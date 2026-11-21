@@ -192,7 +192,8 @@ def test_mixed_flat_and_day_shards_retire_in_bounded_slices(tmp_path, monkeypatc
         assert result["scanned"] <= 2
         if result["complete"]:
             break
-    assert retired == [folder, folder / "2026-10-01", folder / "2026-10-02"]
+    assert retired[0] == folder and len(retired) == 3
+    assert set(retired[1:]) == {folder / "2026-10-01", folder / "2026-10-02"}
     assert not list(folder.iterdir())
 
 
@@ -229,19 +230,19 @@ def _rotating_roots(tmp_path, count=33, days=129):
 
 @pytest.mark.skipif(fcntl is None, reason="需要原日志句柄租约")
 def test_rotating_workspaces_resume_scan_position_beyond_cache(tmp_path):
-    # 续点只在目录内进度记录中，进程内无名单缓存：33个轮转工作区与进程重启同一路径。
-    # 墙钟放宽，每片只受 128 条目预算约束：每个工作区恰需三片（129 个日名两页，再逐日换日与退役），
-    # 结果与机器快慢无关；慢机墙钟截断由 slow_host 用例以受控时钟覆盖。
+    # Exercise persisted cursors beyond the in-process directory stream cache.
     roots, subjects = _rotating_roots(tmp_path)
     later = time.time() + 31 * DAY
-    deleted = completed = 0
-    for _round in range(3):
-        for folder in roots:
+    deleted = 0
+    unfinished = set(roots)
+    for _round in range(6):
+        for folder in tuple(unfinished):
             result = log_retention.retire_dispatch_logs_slice(folder, now=later, max_ms=60_000)
             assert result["scanned"] <= 128
             deleted += result["deleted"]
-            completed += result["complete"]
-    assert deleted == len(roots) and completed >= len(roots)
+            if result["complete"]:
+                unfinished.remove(folder)
+    assert deleted == len(roots) and not unfinished
     assert not any(log.exists() for log in subjects)
     for folder in roots:
         # 完整一轮后旧空日目录与进度文件都已退役，下一轮从头开始。
@@ -277,7 +278,8 @@ def test_resumed_cursor_skips_processed_markers_and_resets_on_identity_change(tm
     progress = json.loads((folder / log_retention._PROGRESS_NAME).read_text())
     progress["identity"] = [0, 0]
     (folder / log_retention._PROGRESS_NAME).write_text(json.dumps(progress))
-    result = log_retention.retire_dispatch_logs_slice(folder, now=time.time() + 31 * DAY, max_entries=16)
+    result = log_retention.retire_dispatch_logs_slice(folder, now=time.time() + 31 * DAY, max_entries=16,
+                                                      max_ms=60_000)
     assert result["complete"] and result["deleted"] == 4
     assert sorted(seen) == [f"resume-{index:03d}.exit.json" for index in range(4)]
     assert not folder.joinpath(log_retention._PROGRESS_NAME).exists() and not shard.exists()
@@ -342,6 +344,51 @@ def test_wide_flat_and_day_directories_retire_across_rotating_workspaces_on_a_sl
         if log_retention.retire_dispatch_logs_slice(wide, now=later, **budget)["complete"]:
             break
     assert not (wide / "2026-01-01").exists() and not progress.exists()
+
+
+@pytest.mark.skipif(fcntl is None, reason="requires dispatch log descriptor leases")
+def test_large_dispatch_checkpoint_round_trips_under_loaded_entry_budget(tmp_path, monkeypatch):
+    owner = _settled_owner(tmp_path)
+    folder = tmp_path / "background_dispatch"
+    shard = folder / "2026-01-01"
+    count = 1800
+    shard.mkdir(parents=True)
+    logs = []
+    for index in range(count):
+        log = shard / f"subagent-start-{1_800_000_000_000_000_000 + index}.log"
+        log.write_bytes(b"stdout")
+        info = log.stat()
+        log_retention.record_dispatch_log_exit(log, returncode=0, run_ids=["run"], owner_home=owner,
+                                              attempt_ids={"run": "attempt"}, expected_identity=(info.st_dev, info.st_ino))
+        logs.append(log)
+    clock = SimpleNamespace(value=0.0)
+    directory_page = log_retention.directory_page
+
+    def page_then_expire(*args, **kwargs):
+        result = directory_page(*args, **kwargs)
+        clock.value += 0.026
+        return result
+
+    monkeypatch.setattr(log_retention, "directory_page", page_then_expire)
+    monkeypatch.setattr(log_retention, "time", SimpleNamespace(
+        monotonic=lambda: clock.value, time=time.time, strftime=time.strftime, gmtime=time.gmtime))
+    path = folder / log_retention._PROGRESS_NAME
+    identity = (folder.stat().st_dev, folder.stat().st_ino)
+    previous = None
+    deleted = 0
+    for _ in range(4 * count):
+        result = log_retention.retire_dispatch_logs_slice(
+            folder, owner_home=owner, now=time.time() + 31 * DAY, max_entries=8192, max_ms=25)
+        assert result["scanned"] <= 8192
+        deleted += result["deleted"]
+        if result["complete"]:
+            break
+        raw = path.read_bytes()
+        assert len(raw) <= 65_536 and raw != previous
+        assert log_retention._load_progress(folder, identity) == json.loads(raw)
+        previous = raw
+    assert result["complete"] and deleted == count
+    assert not any(log.exists() for log in logs)
 
 
 def test_both_dispatch_callers_pass_the_loaded_retention_budget(tmp_path, monkeypatch):

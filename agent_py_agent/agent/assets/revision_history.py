@@ -939,7 +939,6 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
         return receipt
     if not any(key in cursor for key in ('directory', 'parent_directory', 'asset_id')):
         cursor.pop('after', None)
-        cursor.pop('retry_name', None)
     cursor.setdefault('after', '')
     cursor['cycle_generation'] = generation
     home = Path(request.home.owner_home_dir)
@@ -964,7 +963,8 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
     now = datetime.fromtimestamp(request.now, timezone.utc)
     due, decided, page = [], set(), []
     position = cursor.get('directory', {})
-    retry_candidate = bool(cursor.get('retry_name'))
+    # Older retry-only cursors restart from the first entry with a one-candidate budget.
+    retry_candidate = isinstance(cursor.get('retry_name'), str) and bool(cursor['retry_name'])
     checked_candidate = False
     while parts is not None and not budget.exhausted(receipt['items'], receipt['bytes']):
         if due and budget.remaining_ms() <= STORAGE_LANE_SLICE_MS / 2:
@@ -980,6 +980,10 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
             receipt['deferred_reason'] = 'asset_auxiliary_unreadable'
             break
         receipt['items'] += visited
+        identity = position.get('directory_identity')
+        if identity and cursor.get('directory', {}).get('directory_identity') != identity:
+            # Bind the start checkpoint to this phase's actual directory before any decision.
+            cursor.update(phase=phase, kind=kind, directory={'directory_identity': identity})
         if exhausted:
             break
         if name is None or not name.endswith('.json') or (phase == 'extractions' and not name.startswith('exp_')):
