@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1568,
+  "count": 1569,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -11570,6 +11570,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "输入 v2 保留完整 stdin；大 JSON 不进入单个环境变量，避免 E2BIG。"
+    },
+    {
+      "name": "_WORKFLOW_STOP_POLL_SECONDS",
+      "file": "agent_py_agent/agent/workflows/step_retry.py",
+      "value": 0.2,
+      "unit": "秒",
+      "category": "其它",
+      "description": ""
     },
     {
       "name": "SUBAGENT_CLI_DEFAULT_COUNT",
