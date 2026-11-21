@@ -21,7 +21,8 @@ from ..common import nofollow_fs
 from ..common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
 from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath, unlink_file_beneath
 from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
-from .observation_index import _identity
+from .observation_index import _identity, _stat_identity
+from .store_io import safe_file_stem
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,8 +51,6 @@ class _InstallMeta:
         self.generation = int(self.original.get('generation', '0'))
         self._observed_for = None
         self._observed_stamp = None
-        # 当前完整身份是否取自写者锁内记录；是则锁外后来的目录变化留给读者实时核验和下一写者接续判定。
-        self.writer_stamp = False
 
     def observe_stamp(self, index, before_stamp):
         # 相同写前身份共享一次观察。目录后来变化时，覆盖读取仍以实时身份核验。
@@ -111,6 +110,7 @@ class UsageSourceIndex:
         self.pending_directory = self.path.parent / 'pending'
         self.quarantine_directory = self.path.parent / 'quarantine'
         self._needs_prepare = False
+        self._name_limit = None
 
     def stamps(self):
         pending = _stamp(self.pending_directory)
@@ -170,17 +170,22 @@ class UsageSourceIndex:
                 if isolated_tokens:
                     self._quarantine_tokens(isolated_tokens)
 
-    def _quarantine_tokens(self, tokens):
+    def _quarantine_tokens(self, entries):
         """重建义务已在同一事务提交；损坏凭据原字节随原文件身份改名移出待提交目录，留作恢复证据，不删除。"""
         ensure_private_dir(self.quarantine_directory)
-        for token in tokens:
-            name = token + '.json'
+        for name, identity in entries:
+            source = self.pending_directory / name
+            destination = self.quarantine_directory / name
             try:
-                os.replace(self.pending_directory / name, self.quarantine_directory / name)
+                if _identity(source) != identity:
+                    continue
+                if destination.exists() or destination.is_symlink():
+                    destination = self.quarantine_directory / (uuid.uuid4().hex + '.json')
+                os.replace(source, destination)
             except FileNotFoundError:
                 continue  # 另一修复者已隔离同一凭据。
             logging.getLogger(__name__).warning(
-                'USAGE_SOURCE_INTENT_ISOLATED token=%s effect=canonical_preserved next=full_source_rebuild', token)
+                'USAGE_SOURCE_INTENT_ISOLATED effect=canonical_preserved next=full_source_rebuild')
 
     @contextmanager
     def _pending_fd(self):
@@ -283,6 +288,18 @@ class UsageSourceIndex:
         record = json.loads(raw)
         if type(record) is not dict or set(record) != {'thread_id'} or type(record['thread_id']) is not str:
             raise ValueError('usage source intent invalid')
+        identifier = record['thread_id']
+        if identifier != safe_file_stem(identifier) or identifier in {'.', '..'}:
+            raise ValueError('usage source intent thread identifier is not a canonical file stem')
+        if self._name_limit is None:
+            # Windows also caps filesystem components at 255 characters.
+            self._name_limit = os.pathconf(self.directory, 'PC_NAME_MAX') if hasattr(os, 'pathconf') else 255
+        # Include the suffixes of both the append lock and the SQLite sidecars.
+        if self._name_limit > 0 and any(
+            len(os.fsencode(name)) > self._name_limit
+            for name in (f'.{identifier}.jsonl.append-once.lock', f'.{identifier}-usage.sqlite3-journal')
+        ):
+            raise ValueError('usage source intent thread identifier exceeds the filesystem component limit')
         return record
 
     def _pending_one(self):
@@ -294,21 +311,35 @@ class UsageSourceIndex:
                         return None
                     if entry.name.startswith('.') and entry.name.endswith('.tmp'):
                         continue  # 原子发表前的临时文件不可能已允许canonical追加。
-                    if not entry.name.endswith('.json'):
-                        raise ValueError('usage source intent name invalid')
                     token = entry.name[:-5]
-                    if not _valid_token(token):
-                        raise ValueError('usage source intent name invalid')
+                    if not entry.name.endswith('.json') or not _valid_token(token):
+                        identity = self._isolation_identity(entry.name)
+                        if identity is not None:
+                            return {'damaged': (entry.name, identity)}
+                        continue
+                    identity = self._isolation_identity(entry.name)
                     try:
                         record = self._pending_record(token)
                     except (ValueError, RecursionError):
                         # 合法凭据名下的内容无法解析：仍是未结清义务，由修复者隔离并全量重建后才可完整。
-                        return {'token': token, 'damaged': True}
+                        if identity is not None:
+                            return {'damaged': (entry.name, identity)}
+                        continue
                     if record is not None:
                         return {'token': token, **record}
                 raise ValueError('usage source pending probe incomplete')
         except FileNotFoundError:
             return None
+
+    def _isolation_identity(self, name):
+        path = self.pending_directory / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('usage source intent is not a private regular file')
+        return _stat_identity(info)
 
     def begin(self, thread_id):
         # 独立私有intent是唯一待提交证明，不等待来源SQLite锁，也不与其它source争抢全局写锁。
@@ -345,17 +376,19 @@ class UsageSourceIndex:
                 if intent.token in seen:
                     continue
                 seen.add(intent.token)
+                if not _valid_token(intent.token):
+                    raise ValueError('usage source intent name invalid')
+                name = intent.token + '.json'
                 try:
                     record = self._pending_record(intent.token, parent=parent)
                 except (ValueError, RecursionError):
-                    if not _valid_token(intent.token):
-                        raise
                     record = {}  # 持久记录损坏，按不可信凭据隔离。
                 if record is None:
                     continue  # 另一进程或恢复通道已完成该凭据。
                 if record.get('thread_id') != intent.thread_id:
                     # 坏凭据不能证明它覆盖的来源：本批其余凭据照常提交，同一事务把覆盖退回全量重建，提交后再隔离原文件。
-                    isolated.append(intent.token)
+                    if (identity := self._isolation_identity(name)) is not None:
+                        isolated.append((name, identity))
                     meta.scan, meta.complete = {}, False
                     continue
                 snapshot = intent.store._usage_source_snapshot(intent.thread_id)
@@ -369,7 +402,7 @@ class UsageSourceIndex:
                 opened = os.fstat(parent)
                 if current is None or current[:2] != (opened.st_dev, opened.st_ino):
                     raise ValueError('usage source intent directory changed before commit')
-            if meta.complete and not meta.writer_stamp and meta.stamp != self.stamps():
+            if meta.complete and meta.stamp != self.stamps():
                 meta.complete = False
             meta.flush(conn)
             self._needs_prepare = (not meta.complete
@@ -404,12 +437,13 @@ class UsageSourceIndex:
         if scan_matches or ready_matches:
             # 排空异步发生：接续用写者锁内记录的写后身份，不把排空时才观察到的后续写者或锁外变化算作本次已登记变更。
             current_stamp = after_stamp if after_stamp is not None else state.observe_stamp(self, before_stamp)
+            if after_stamp is None and current_stamp != before_stamp:
+                scan_matches = ready_matches = False
         if scan_matches:
             # 只承认同一pending写者的已登记变更；新源已带当前epoch，不因忙owner反复回到目录前缀。
             state.scan['stamp'] = current_stamp
         if ready_matches:
             state.stamp = current_stamp
-            state.writer_stamp = after_stamp is not None
         else:
             state.complete = False
         state.generation += 1
@@ -476,7 +510,7 @@ class UsageSourceIndex:
                 # 中途退出只会重复隔离；完整性只能由隔离之后开始的清点重新签发。
                 self._put(conn, 'scan', '{}')
                 self._put(conn, 'complete', 0)
-                isolated.append(writing['token'])
+                isolated.append(writing['damaged'])
                 return {'coverage': 'partial', 'sources_examined': 1, 'cursor': {'isolated_intent': True}, 'errors': []}
             after = self._get(conn, 'repair_after')
             pending = conn.execute('SELECT thread_id FROM sources WHERE complete=0 AND thread_id>? ORDER BY thread_id LIMIT 1',

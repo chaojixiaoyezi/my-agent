@@ -302,3 +302,32 @@ def test_retirement_without_dir_fd_verifies_paths_and_keeps_ambiguous_objects(tm
     else:
         assert result["removed"] == 1 and result["kept_referenced"] == 0 and not expired.exists()
     assert ops.read_gateway_control_operation(paths, recent.stem).operation_id == recent.stem
+
+
+@pytest.mark.skipif(fcntl is None, reason="needs the descriptor-based reference reader")
+def test_unreadable_generation_is_retried_without_changing_directory_identity(tmp_path, monkeypatch):
+    paths = gateway_paths_from_root(tmp_path.resolve())
+    expired = _receipt(paths, "unreferenced")
+    protected = _receipt(paths, "referenced")
+    source = _generation(paths, "gen-fixture", refs=(protected,))
+    read = ops.read_bytes_beneath
+    attempts = []
+
+    def read_with_outage(root, parts, **kwargs):
+        if parts[-1] == source.name:
+            attempts.append(parts)
+            if len(attempts) <= 2:
+                raise OSError("simulated generation read interruption")
+        return read(root, parts, **kwargs)
+
+    monkeypatch.setattr(ops, "read_bytes_beneath", read_with_outage)
+    for expected_attempts in (1, 2):
+        _prune(paths, max_entries=128, max_ms=500)
+        assert expired.exists() and protected.exists()
+        assert len(attempts) == expected_attempts
+    for _ in range(4):
+        _prune(paths, max_entries=128, max_ms=500)
+        if not expired.exists():
+            break
+    assert len(attempts) >= 3
+    assert not expired.exists() and protected.exists()

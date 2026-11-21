@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import time
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
@@ -19,9 +20,9 @@ def _native_directory_supported():
     return os.name != 'nt' and bool(getattr(os, 'O_NOFOLLOW', 0) and getattr(os, 'O_DIRECTORY', 0))
 
 
-def _require_entry_name(name):
-    if type(name) is not str or name in {'', '.', '..'} or any(value in name for value in ('/', '\\', '\x00')):
-        raise ValueError('invalid_directory_entry')
+def _usable_entry_name(name):
+    return (type(name) is str and name not in {'', '.', '..'}
+            and all(value not in name for value in ('/', '\\', '\x00')))
 
 
 def directory_page(root: Path, parts: tuple, cursor: dict, limit: int, *,
@@ -70,7 +71,7 @@ def directory_page(root: Path, parts: tuple, cursor: dict, limit: int, *,
         if type(offset) is not int or offset < 0:
             raise ValueError("invalid_directory_offset")
         os.lseek(descriptor, offset, os.SEEK_SET)
-        names, complete = [], False
+        names, scanned, complete = [], 0, False
         entries = _quota_scandir(descriptor)
         if not callable(getattr(entries, "checkpoint", None)):
             return _portable_page((os.getpid(), str(root), parts, *identity), entries, state, identity, limit)
@@ -85,26 +86,38 @@ def directory_page(root: Path, parts: tuple, cursor: dict, limit: int, *,
                 except StopIteration:
                     complete = True
                     break
-                _require_entry_name(entry.name)
-                names.append(entry.name)
+                scanned += 1
+                if _usable_entry_name(entry.name):
+                    names.append(entry.name)
             saved = entries.checkpoint()
-        return names, {"directory_identity": identity, "last_scanned": len(names), **saved}, complete
+        return names, {"directory_identity": identity, "last_scanned": scanned, **saved}, complete
     finally:
         os.close(descriptor)
 
 
 def _portable_page(key, opened, state, identity, limit):
-    """最多32个惰性目录流；冷恢复逐片有界重放，原生后端直接持久化checkpoint。"""
+    """Keep admitted streams through a scan so replay can finish under pressure."""
+    from .owner_maintenance import _OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS
+
     target = state.get("visited", 0)
     if type(target) is not int or target < 0:
         opened.close()
         raise ValueError("invalid_directory_replay")
     with _SCAN_LOCK:
         cached = _SCAN_STREAMS.pop(key, None)
+        now = time.monotonic()
         if cached is None or cached[1] != target:
             if cached is not None:
                 cached[0].close()
-            cached = [opened, target, target]
+            if len(_SCAN_STREAMS) >= 32:
+                oldest_key = next(iter(_SCAN_STREAMS))
+                oldest = _SCAN_STREAMS[oldest_key]
+                if now - oldest[3] < _OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS:
+                    opened.close()
+                    return [], {**state, "directory_identity": identity, "last_scanned": 0}, False
+                _SCAN_STREAMS.pop(oldest_key)
+                oldest[0].close()
+            cached = [opened, target, target, now]
         else:
             opened.close()
         names, scanned, complete = [], 0, False
@@ -119,18 +132,16 @@ def _portable_page(key, opened, state, identity, limit):
                 if cached[2]:
                     cached[2] -= 1
                     continue
-                _require_entry_name(entry.name)
-                names.append(entry.name)
                 cached[1] += 1
+                if _usable_entry_name(entry.name):
+                    names.append(entry.name)
         except BaseException:
             cached[0].close()
             raise
         if complete:
             cached[0].close()
         else:
+            cached[3] = now
             _SCAN_STREAMS[key] = cached
-        while len(_SCAN_STREAMS) > 32:
-            _old_key, old = _SCAN_STREAMS.popitem(last=False)
-            old[0].close()
         return names, {"directory_identity": identity, "offset": 0, "visited": cached[1],
                        "last_scanned": scanned}, complete

@@ -125,9 +125,6 @@ def _continue_goal_after_report_once(
     _account_goal_slice(dependencies, signal, report, _GoalSlice(goal, task_status, now))
 
 
-# LLM: 返回结构化结算结果：settled 表示本片裁决已沿原账应用或无可应用动作；retry 表示裁决已冻结但应用失败，
-#   调用方须保留原 wake 待处理，下次按冻结裁决重放、不重新记账；failed 表示裁决未能落账，调用方照旧确认原 wake。
-# 函数用途: 记账并应用本片 Goal 裁决，告诉调用方原唤醒是否可以确认。
 def continue_goal_after_report(
     dependencies: GoalContinuationDependencies,
     signal: WakeSignal,
@@ -135,6 +132,7 @@ def continue_goal_after_report(
     report: BackgroundMainAgentReport,
     now: float,
 ) -> str:
+    """Settle the completed slice or leave its wake pending for settlement retry."""
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
     goal_id = str(metadata.get("goal_id") or "").strip()
     try:
@@ -163,12 +161,7 @@ def continue_goal_after_report(
             exc,
             exc_info=True,
         )
-    # 本片裁决已冻结才让调用方保留原 wake 重放（不重跑模型、不重复记账）；从未落账的失败沿原语义确认原 wake。
-    try:
-        goal = _goal_for_signal(dependencies, signal)
-    except Exception:
-        return "failed"
-    return "retry" if goal is not None and frozen_goal_disposition(goal, signal.wake_signal_id) is not None else "failed"
+    return "retry"
 
 
 @dataclass(frozen=True)
@@ -298,12 +291,6 @@ def _apply_disposition(
             "material_progress_count": evidence.get("material_progress_count", 0),
         }
         frozen_report = report if all(getattr(report, key) == value for key, value in fields.items()) else replace(report, **fields)
-        try:
-            if dependencies.queue_withheld_notice(goal, signal, frozen_report) is False:
-                _LOGGER.warning("thread goal withheld-continuation notice was not queued(goal=%s)", goal.goal_id)
-        except Exception as exc:
-            _LOGGER.warning(
-                "thread goal withheld-continuation notice failed code=%s effect_outcome=%s next_action=%s error=%s",
-                "GOAL_CONTINUATION_WITHHELD_NOTICE_FAILED", "notice_not_queued",
-                "inspect conversation store health; the goal stays active without a continuation wake", exc,
-            )
+        # The notice sink reports durable duplicates as success.
+        if dependencies.queue_withheld_notice(goal, signal, frozen_report) is False:
+            raise OSError("GOAL_CONTINUATION_WITHHELD_NOTICE_FAILED: notice insertion is unconfirmed")

@@ -121,7 +121,7 @@ def authority(tmp_path):
 @pytest.mark.skipif(sys.platform != "darwin", reason="the shared native spawn implementation uses Darwin")
 def test_background_launcher_uses_native_spawn(authority, native_calls):
     _, store, request = authority
-    hosted = launch.start_background_process(request)
+    hosted = launch.start_background_process(request, startup_timeout_seconds=CHILD_TIMEOUT)
     try:
         assert hosted.process.wait(timeout=CHILD_TIMEOUT) == 0
     finally:
@@ -180,10 +180,11 @@ def _maintain(home, now, *, cursor=None, max_items=None, write=None):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process group observation")
-def test_dead_host_marked_lost_and_pruned(authority, group_leader):
+def test_dead_host_marked_lost_and_pruned(authority, group_leader, monkeypatch):
     home, store, request = authority
     sid = "bg-m26-dead"
     before = store.write(_managed_record(request, sid, group_leader(finished=True), group_leader(finished=True)))
+    _lane_clock(monkeypatch)
     now = time.time()
     result = _maintain(home, now)
     assert not result["errors"]
@@ -192,7 +193,7 @@ def test_dead_host_marked_lost_and_pruned(authority, group_leader):
     assert lost["revision"] == before["revision"] + 1 and lost["finished_at"] == now
     assert not store.record_path(sid).exists()
     result = _maintain(home, now + 86401, cursor=result["cursor"])
-    assert not result["errors"] and result["deleted_items"] == 1
+    assert not result["errors"] and result["deleted_items"] == 1, result
     assert not store.load(sid).record
 
 
@@ -522,3 +523,73 @@ def test_passive_read_keeps_malformed_redo_commit_facts_unknown(authority):
     assert error["committed"] == error["committed_effects"] == "unknown"
     assert error["recoverable"] and error["session_ids"] == []
     assert redo.read_bytes() == b"{" and store.record_path(sid).read_bytes() == snapshot
+
+
+def test_portable_directory_pages_finish_under_stream_pressure(tmp_path, monkeypatch):
+    _without_dir_fd(monkeypatch, False)
+    roots = [tmp_path / str(i) for i in range(33)]
+    expected = {f"entry-{i:03d}" for i in range(130)}
+    for root in roots:
+        root.mkdir()
+        for name in expected:
+            (root / name).touch()
+
+    active = {root: {} for root in roots}
+    seen = {root: set() for root in roots}
+    for _ in range(12):
+        for root, cursor in tuple(active.items()):
+            names, following, complete = directory_paging.directory_page(root, (), cursor, 128, require_dir_fd=False)
+            assert following.get("last_scanned", 0) <= 128
+            assert seen[root].isdisjoint(names)
+            seen[root].update(names)
+            if complete:
+                del active[root]
+            else:
+                active[root] = following
+        if not active:
+            break
+    assert not active
+    assert all(names == expected for names in seen.values())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="backslash is a POSIX filename character")
+def test_directory_page_consumes_an_unusable_name(tmp_path):
+    (tmp_path / "unusable\\name").touch()
+    (tmp_path / "healthy").touch()
+    cursor, seen, visited = {}, [], 0
+    for _ in range(3):
+        names, cursor, complete = directory_paging.directory_page(tmp_path, (), cursor, 1)
+        visited += cursor.get("last_scanned", 0)
+        seen.extend(names)
+        if complete:
+            break
+    assert complete and seen == ["healthy"] and visited == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group observation")
+def test_large_archive_gives_the_active_host_an_independent_turn(authority, group_leader, monkeypatch):
+    home, store, request = authority
+    sid = "bg-m26-active-with-wide-history"
+    host = group_leader(finished=True)
+    store.write(_managed_record(request, sid, host, host))
+    history = store.root / "finished"
+    history.mkdir(mode=0o700)
+    for index in range(256):
+        (history / f"unrelated-{index:03d}.txt").touch()
+    list_records = storage.ProcessSessionTransaction.list_records
+
+    def at_catalogue_limit(transaction, *args, **kwargs):
+        if transaction.root == history:
+            raise RuntimeError("process_session_scan_budget_exceeded")
+        return list_records(transaction, *args, **kwargs)
+
+    monkeypatch.setattr(storage.ProcessSessionTransaction, "list_records", at_catalogue_limit)
+    _lane_clock(monkeypatch)
+    now = time.time()
+    cursor = None
+    for _ in range(2):
+        report = _maintain(home, now, cursor=cursor)
+        assert not report["errors"]
+        assert report["items"] <= 128
+        cursor = report["cursor"]
+    assert store.load(sid).record["reason"] == "lost"

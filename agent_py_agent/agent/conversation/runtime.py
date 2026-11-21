@@ -5004,6 +5004,17 @@ def _execute_wake_signal(
     redelivery = _redeliver_frozen_wake(scheduler, signal, now=now)
     if redelivery is not None:
         return redelivery
+    try:
+        recovered = _accounted_goal_wake_report(scheduler, signal, lifecycle_reason, reason, now)
+    except (OSError, DataCorruptionError) as exc:
+        _HEARTBEAT_LOGGER.warning(
+            "GOAL_DISPOSITION_READ_DEFERRED wake=%s effect=model_not_started next=retry_settlement error_type=%s",
+            signal.wake_signal_id, type(exc).__name__,
+        )
+        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+        return _WakeExecution(path=WAKE_ATTEMPT_PATH_REDELIVERY)
+    if recovered is not None:
+        return _WakeExecution(recovered, path=WAKE_ATTEMPT_PATH_REDELIVERY)
     saved_target = _saved_scheduler_target(scheduler, signal) if claim is not None else None
     if saved_target is None and _wake_signal_should_skip(
         scheduler.runtime.agent,
@@ -5023,9 +5034,6 @@ def _execute_wake_signal(
     if _is_legacy_per_source_audit_capacity_signal(signal):
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
-    recovered = _accounted_goal_wake_report(scheduler, signal, lifecycle_reason, reason, now)
-    if recovered is not None:
-        return _WakeExecution(recovered, path=WAKE_ATTEMPT_PATH_REDELIVERY)
     if signal.wake_signal_id in scheduler._quota_fallback_wakes:
         return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now), path=WAKE_ATTEMPT_PATH_QUOTA_FALLBACK)
     scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
@@ -5118,27 +5126,61 @@ def _retire_cancelled_task_wake(
     return True
 
 
-# LLM: 本 wake 的 Goal 片已记账（裁决冻结或已被后续裁决取代）时不再运行模型；合成报告只驱动原完成入口，
-#   由 continue_goal_after_report 按冻结裁决补做发布或提示并确认本 wake。读不到目标时沿原路径执行。
-# 函数用途: 记账后、发布或确认前中断时，经正常待处理唤醒发现恢复同一续跑义务。
 def _accounted_goal_wake_report(
     scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, lifecycle_reason: str, reason: str, now: float,
 ) -> BackgroundMainAgentReport | None:
+    """Recover a completed slice from the wake or its existing Goal accounting record."""
     if lifecycle_reason != "thread_goal_continue":
         return None
     from .goal_progress_fuse import frozen_goal_disposition
 
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-    try:
+    delivery = metadata.get("owner_delivery")
+    facts = delivery.get(_GOAL_WAKE_SETTLEMENT) if isinstance(delivery, dict) else None
+    if facts is None:
         goal = scheduler.store.goals.load(signal.thread_id, goal_id=str(metadata.get("goal_id") or "").strip())
-    except Exception:
-        return None
-    if goal is None or frozen_goal_disposition(goal, signal.wake_signal_id) is None:
-        return None
+        if goal is None or frozen_goal_disposition(goal, signal.wake_signal_id) is None:
+            return None
+        fields = {}
+    else:
+        if (not isinstance(facts, dict) or delivery.get("schema_version") != "wake-owner-delivery.v2"
+                or delivery.get("reason") != signal.reason or delivery.get("task_id") != signal.root_task_id):
+            raise DataCorruptionError("goal wake settlement facts are invalid")
+        fields = _frozen_goal_slice_report_fields(facts)
+        fields["goal_continuation_allowed"] = facts.get("goal_continuation_allowed") is True
+        fields["goal_slice_facts_known"] = (
+            facts.get("goal_slice_facts_known") is True and fields.get("goal_slice_facts_known", True)
+        )
     return BackgroundMainAgentReport(
         signal.thread_id, signal.root_task_id, reason, "", "", "", now,
         delivery_status="suppressed", delivery_reason=_GOAL_DISPOSITION_RECOVERY_REASON,
+        **fields,
     )
+
+
+def _freeze_goal_wake_settlement(wakes, signal: WakeSignal, report: BackgroundMainAgentReport) -> None:
+    """Persist bounded settlement input on the original pending wake before accounting."""
+    from .goal_progress_fuse import goal_report_reason_fields
+
+    facts = {
+        **goal_report_reason_fields(report),
+        "goal_continuation_allowed": report.goal_continuation_allowed,
+        "goal_slice_facts_known": report.goal_slice_facts_known,
+        "tool_call_count": report.tool_call_count,
+        "tool_success_count": report.tool_success_count,
+        "material_progress_count": report.material_progress_count,
+    }
+
+    # The wake already has one host-owned delivery slot. An empty payload carries settlement
+    # facts without creating a reply or changing the published wake's identity.
+    if wakes.cache_delivery(signal.wake_signal_id, {
+        "schema_version": "wake-owner-delivery.v2",
+        "reason": signal.reason,
+        "task_id": signal.root_task_id,
+        "content": "",
+        _GOAL_WAKE_SETTLEMENT: facts,
+    }) is None:
+        raise FileNotFoundError("completed Goal wake is unavailable for settlement")
 
 
 # LLM: 调用方先准确回读pending；未发送认证通知须由原claim内重投，已sent只补canonical，其它原冻结回复保持原路径。
@@ -5391,13 +5433,14 @@ def _complete_wake_report(
     if scheduler.scheduler_service is not None and report.delivery_reason != _GOAL_DISPOSITION_RECOVERY_REASON:
         scheduler.scheduler_service.repository.record_waiting_delivery(report, now=time.time())
     cutoff_owns_next = cutoff is not None and cutoff.status in {"pending", "claimed"}
-    # Goal 续跑先记账并应用本片裁决（后继沿同一 Goal 键显式接替仍待确认的本 wake），之后才确认本 wake；
-    # 裁决已冻结却未能应用时本 wake 留在待处理队列，下次经正常发现按冻结裁决重放，不重跑模型、不重复记账。
-    if lifecycle_reason == "thread_goal_continue" and not cutoff_owns_next and continue_goal_after_report(
-        _background_goal_dependencies(scheduler), signal, report=report, now=now,
-    ) == "retry":
-        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
-        return None
+    if lifecycle_reason == "thread_goal_continue" and not cutoff_owns_next:
+        if report.delivery_reason != _GOAL_DISPOSITION_RECOVERY_REASON:
+            _freeze_goal_wake_settlement(scheduler.store.wakes, signal, report)
+        if continue_goal_after_report(
+            _background_goal_dependencies(scheduler), signal, report=report, now=now,
+        ) != "settled":
+            scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+            return None
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
     if cutoff_owns_next:
         publish_pending(scheduler.runtime.agent, scheduler.store, str(signal.root_task_id or ""))
@@ -5424,6 +5467,7 @@ def _complete_wake_report(
 _QUOTA_NOTICE_REPORT_REASON = "provider_quota_exhausted"
 # Goal 裁决恢复报告的 delivery_reason。_complete_wake_report 按它识别「本片已记账、未运行模型」，不覆盖原片交付记录。
 _GOAL_DISPOSITION_RECOVERY_REASON = "goal_disposition_recovery"
+_GOAL_WAKE_SETTLEMENT = "goal_slice_settlement"
 
 
 # LLM: 只沿原额度耗尽分路使用固定通知；地址选择不等于送达，写入和 wake_handled 仍取真实回执。

@@ -346,7 +346,7 @@ def _control_reference_identity(root, lease):
 
 
 # LLM: 代次引用跨片续扫：同一来源身份下保存目录续点、未处理名和已收集引用，全部页覆盖后才发布完整视图；
-#   身份变化即丢弃重扫；坏记录或非本服务代的未封口v2使引用不明，缓存为None直到来源变化，全部回执保留。
+#   身份变化即丢弃重扫；坏记录或非本服务代的未封口v2使引用不明，全部回执保留。
 # 函数用途: 返回(完整引用集或None, 来源身份, 本片消耗条目, 是否预算耗尽)。
 def _control_generation_refs(root, lease, *, deadline, max_entries):
     from ..user_space.directory_paging import directory_page
@@ -364,18 +364,25 @@ def _control_generation_refs(root, lease, *, deadline, max_entries):
     with _CONTROL_RETENTION_SCAN_LOCK:
         view = _CONTROL_REFERENCE_VIEWS.pop(root, None)
     if view is None or view["identity"] != identity:
-        view = dict(identity=identity, cursor={}, pending=[], refs=set(), complete=identity[0] is None)
-        if registry is not None and not identity[2]:
+        view = dict(identity=identity, cursor={}, pending=[], refs=set(), complete=identity[0] is None,
+                    registry_checked=registry is None or bool(identity[2]))
+    used, directory = 0, ("workers", "generations")
+    try:
+        if not view["registry_checked"]:
+            if used >= max_entries or time.monotonic() >= deadline:
+                return None, identity, used, True
             # 当前登记的无路由回执也可能出现在原 drain 快照；非本服务代须已封口且闭包登记一致。
+            used += 1
             try:
                 metadata = read_generation_metadata(root, registry["c_run_id"])
-            except (OSError, ValueError):
+            except OSError:
+                return None, identity, used, False
+            except ValueError:
                 metadata = None
             closure = metadata[0].get("closure") if metadata is not None else None
             if closure is None or closure["registry"] != registry:
                 view["refs"] = None
-    used, directory = 0, ("workers", "generations")
-    try:
+            view["registry_checked"] = True
         while view["refs"] is not None and (view["pending"] or not view["complete"]):
             if used >= max_entries or time.monotonic() >= deadline:
                 return None, identity, used, True
@@ -383,9 +390,10 @@ def _control_generation_refs(root, lease, *, deadline, max_entries):
                 view["pending"], view["cursor"], view["complete"] = directory_page(
                     root, directory, view["cursor"], max_entries - used, require_dir_fd=True)
                 continue
-            name = view["pending"].pop()
+            name = view["pending"][-1]
             used += 1
             if not _CONTROL_GENERATION_FILENAME.fullmatch(name):
+                view["pending"].pop()
                 continue
             try:
                 value = deserialize_record(read_bytes_beneath(
@@ -399,8 +407,12 @@ def _control_generation_refs(root, lease, *, deadline, max_entries):
                 elif closure is not None:
                     view["refs"].update(source.removeprefix("control_operations/") for source in closure["source_files"]
                                         if source.startswith("control_operations/"))
-            except (OSError, ValueError, TypeError, KeyError):
+            except OSError:
+                # Retain the failed entry and any proven references for the next budgeted pass.
+                return None, identity, used, False
+            except (ValueError, TypeError, KeyError):
                 view["refs"] = None
+            view["pending"].pop()
         return (None if view["refs"] is None else frozenset(view["refs"])), identity, used, False
     finally:
         with _CONTROL_RETENTION_SCAN_LOCK:
