@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1570,
+  "count": 1571,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -418,6 +418,14 @@
       "unit": "个节点",
       "category": "上限预算",
       "description": "一次身份核对最多4096节点；宽容器不能先线性装箱再判预算。"
+    },
+    {
+      "name": "_PROGRESS_MAX_BYTES",
+      "file": "agent_py_agent/agent/agent_core/orchestration/background/log_retention.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_MAX_INLINE_JSON_CHARS",
