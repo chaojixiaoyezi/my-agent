@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import stat
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,6 +17,8 @@ from ..common.json_io import (
 from ..tooling.registry_workspace import WorkspaceRef, freeze_workspace_ref
 from .scope_contract import canonical_scope_key
 
+PROJECT_BINDINGS_UNREADABLE = "PROJECT_BINDINGS_UNREADABLE"
+
 
 def _path(owner_home: Path) -> Path:
     return owner_home / "memory" / "project_bindings.json"
@@ -26,7 +29,7 @@ def _read(path: Path) -> tuple[dict, dict]:
     roots = report.payload.get("roots", {})
     aliases = report.payload.get("aliases", {})
     if report.load_error or not isinstance(roots, dict) or not isinstance(aliases, dict):
-        raise ValueError("PROJECT_BINDINGS_UNREADABLE")
+        raise ValueError(PROJECT_BINDINGS_UNREADABLE)
     return roots, aliases
 
 
@@ -34,7 +37,7 @@ def _generation(binding: dict | None) -> str:
     if binding is None:
         return ""
     if not isinstance(binding, dict):
-        raise ValueError("PROJECT_BINDINGS_UNREADABLE")
+        raise ValueError(PROJECT_BINDINGS_UNREADABLE)
     generation = binding.get("generation")
     if isinstance(generation, str) and generation:
         return generation
@@ -44,7 +47,26 @@ def _generation(binding: dict | None) -> str:
 
 def generation(owner_home: Path, workspace_root: Path) -> str:
     roots, _ = _read(_path(owner_home))
-    return _generation(roots.get(str(workspace_root)))
+    return _generation(_binding_at(roots, str(workspace_root)))
+
+
+def capture_generation(owner_home: Path, workspace_root: Path) -> str:
+    """Capture a comparable predecessor under the same lock used for publication."""
+    with locked_json_path(_path(owner_home)):
+        try:
+            return generation(owner_home, workspace_root)
+        except (OSError, ValueError):
+            # Recheck a transient read under the same lock so a writer cannot overtake it.
+            return generation(owner_home, workspace_root)
+
+
+def _binding_at(roots: dict, root: str) -> dict | None:
+    if root not in roots:
+        return None
+    binding = roots[root]
+    if not isinstance(binding, dict):
+        raise ValueError(PROJECT_BINDINGS_UNREADABLE)
+    return binding
 
 
 def record(
@@ -57,26 +79,34 @@ def record(
     path = _path(owner_home)
     with locked_json_path(path):
         workspace = freeze_workspace_ref(workspace_root)
-        if workspace is None or (expected_identity is not None and (
+        if workspace is None:
+            if expected_identity is None:
+                return "superseded"
+            try:
+                info = workspace_root.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                return "superseded"
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != expected_identity:
+                return "superseded"
+            raise ValueError(PROJECT_BINDINGS_UNREADABLE)
+        if expected_identity is not None and (
             workspace.root != workspace_root or workspace.root_identity != expected_identity
-        )):
+        ):
             return "superseded"
         roots, aliases = _read(path)
         root = str(workspace.root)
-        previous = roots.get(root)
-        if previous is not None and not isinstance(previous, dict):
-            raise ValueError("PROJECT_BINDINGS_UNREADABLE")
+        previous = _binding_at(roots, root)
         binding = {"project": project, "identity": list(workspace.root_identity)}
         previous_alias = previous.get("alias", "") if previous else ""
         if not isinstance(previous_alias, str):
-            raise ValueError("PROJECT_BINDINGS_UNREADABLE")
+            raise ValueError(PROJECT_BINDINGS_UNREADABLE)
         if publication is not None:
             basis, operation = publication
             current = _generation(previous)
             if current == operation:
                 return "settled"
             if current != basis:
-                return "superseded"
+                return "superseded" if previous is not None else "pending"
         same_binding = previous is not None and all(previous.get(key) == value for key, value in binding.items())
         requested_alias = alias.strip()
         selected_alias = requested_alias or (previous_alias if same_binding else "")
@@ -108,7 +138,7 @@ def resolve(
     try:
         roots, alias_index = _read(_path(owner_home))
     except ValueError:
-        logging.getLogger(__name__).warning("PROJECT_BINDINGS_UNREADABLE")
+        logging.getLogger(__name__).warning(PROJECT_BINDINGS_UNREADABLE)
         return "", ()
     workspace = freeze_workspace_ref(workspace_root) if roots else None
     if workspace is not None:

@@ -10,9 +10,13 @@ import os
 import platform
 import re
 import stat
-from collections.abc import Iterable
+import sys
+import unicodedata
+from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from hashlib import sha256
+from itertools import count
 from pathlib import Path
 from threading import Lock
 from typing import ClassVar, Literal
@@ -1350,35 +1354,95 @@ class DelegationDecision:
         }
 
 
-# LLM: 暂存位置只在子任务自己的 output 下；每个不同的绝对目标取最短的唯一尾部路径，名字唯一时仍是原
-#   “文件名”位置（保留已运行任务的原映射），同名不同目录才带上区分它们的上级目录。hint 是拒绝记录给出的
-#   相对位置，合法且不与其它目标冲突时沿用。只做命名，不授予任何写权限。
-# 函数用途: 为一组被拒绝直写的目标分配互不冲突且可复现的暂存相对位置。
-def staging_relative_locations(targets: list[str], hints: dict[str, str] | None = None) -> dict[str, str]:
-    unique = list(dict.fromkeys(str(target) for target in targets))
-    # 绝对路径首段是根（"/" 或盘符），不参与暂存相对位置。
-    parts = {target: Path(target).parts[1:] if Path(target).is_absolute() else Path(target).parts
-             for target in unique}
+def _staging_name(parts: tuple[str, ...]) -> tuple[str, ...]:
+    if sys.platform == "darwin":
+        return tuple(unicodedata.normalize("NFD", part).casefold() for part in parts)
+    if os.name == "nt":
+        return tuple(part.rstrip(" .").casefold() for part in parts)
+    return parts
 
-    def suffix(target: str) -> str:
-        own = parts[target]
-        for size in range(1, len(own) + 1):
-            tail = own[-size:]
-            if all(other == target or parts[other][-size:] != tail for other in unique):
-                return Path(*tail).as_posix()
-        return Path(*own).as_posix()
 
-    chosen = {target: suffix(target) for target in unique}
-    given = {target: Path(str((hints or {}).get(target) or "")) for target in unique}
-    texts = [hint.as_posix() for hint in given.values() if hint.parts]
+def staging_relative_locations(
+    targets: list[str], hints: dict[str, str] | None = None, *,
+    existing_file: Callable[[tuple[str, ...]], bool] | None = None,
+) -> dict[str, str]:
+    """Allocate deterministic, mutually nonoverlapping staging file locations."""
+    unique = list(dict.fromkeys(map(str, targets)))
+    suffixes = {}
     for target in unique:
-        hint = given[target]
-        text = hint.as_posix()
-        # 只有独占（其它目标既没有同一 hint、也没有落到同一位置）且合法的 hint 才沿用。
-        if (hint.parts and not hint.is_absolute() and ".." not in hint.parts and texts.count(text) == 1
-                and all(other == target or chosen[other] != text for other in unique)):
-            chosen[target] = text
-    return chosen
+        path = Path(target)
+        parts = path.parts[1:] if path.anchor else path.parts
+        suffixes[target] = [
+            parts[-size:] for size in range(1, len(parts) + 1) if ".." not in parts[-size:]
+        ]
+    suffix_counts = Counter(_staging_name(parts) for candidates in suffixes.values() for parts in candidates)
+    defaults = {
+        target: next((parts for parts in candidates if suffix_counts[_staging_name(parts)] == 1),
+                     candidates[-1] if candidates else ())
+        for target, candidates in suffixes.items()
+    }
+    given = {target: Path(str((hints or {}).get(target) or "")) for target in unique}
+    hint_counts = Counter(_staging_name(hint.parts) for hint in given.values() if hint.parts)
+    preferred = {
+        target: hint.parts for target, hint in given.items()
+        if hint.parts and not hint.anchor and ".." not in hint.parts
+        and hint_counts[_staging_name(hint.parts)] == 1
+    }
+    default_counts = Counter(_staging_name(parts) for target, parts in defaults.items() if target not in preferred)
+    preferred = {
+        target: hint for target, hint in preferred.items() if not default_counts[_staging_name(hint)]
+    }
+    proposals = {target: preferred.get(target, defaults[target]) for target in unique}
+    names = {target: _staging_name(parts) for target, parts in proposals.items()}
+    proposal_counts = Counter(names.values())
+    proposal_parents = {name[:size] for name in names.values() for size in range(1, len(name))}
+    ambiguous = {name for name, occurrences in proposal_counts.items() if occurrences > 1}
+    assigned = {}
+    files = set()
+    directories = set()
+
+    # An old shared location cannot supply exact evidence for either target.
+    if existing_file:
+        for target, name in names.items():
+            if name in ambiguous and name and existing_file(proposals[target]):
+                files.add(name)
+                directories.update(name[:size] for size in range(1, len(name)))
+
+    def assign(target: str, parts: tuple[str, ...]) -> bool:
+        name = _staging_name(parts)
+        parents = {name[:size] for size in range(1, len(name))}
+        if not parts or name in ambiguous or name in files or name in directories or files & parents:
+            return False
+        files.add(name)
+        directories.update(parents)
+        assigned[target] = Path(*parts).as_posix()
+        return True
+
+    conflicts = []
+    for target, name in names.items():
+        if (name and proposal_counts[name] == 1 and name not in proposal_parents
+                and not any(name[:size] in proposal_counts for size in range(1, len(name)))
+                and assign(target, proposals[target])):
+            continue
+        conflicts.append(target)
+
+    # An issued location with verified bytes wins over an unwritten conflicting location.
+    # Without physical evidence, prefer retained hints and then the longer path.
+    def priority(target: str) -> tuple[bool, bool, int, str]:
+        parts = proposals[target]
+        present = bool(existing_file and parts and proposal_counts[names[target]] == 1 and existing_file(parts))
+        return not present, target not in preferred, -len(parts), target
+
+    displaced = [target for target in sorted(conflicts, key=priority) if not assign(target, proposals[target])]
+    for target in displaced:
+        if any(assign(target, parts) for parts in suffixes[target]):
+            continue
+        for index in count():
+            namespace = "staged-" + sha256(f"{target}\0{index}".encode()).hexdigest()
+            leaf = suffixes[target][0] if suffixes[target] else ()
+            if assign(target, (namespace, *leaf)):
+                break
+    return {target: assigned[target] for target in unique}
 
 
 def _path_identity(path: Path) -> tuple[int, int] | None:
