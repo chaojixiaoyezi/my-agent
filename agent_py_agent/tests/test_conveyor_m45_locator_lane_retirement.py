@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -121,10 +123,11 @@ def test_locator_stops_reading_wake_entries_at_slice_deadline(tmp_path, monkeypa
 
     monkeypatch.setattr(hygiene, "_classify", classify)
     monkeypatch.setattr(hygiene, "read_projection_object", slow_read)
-    receipt = validate_lane_receipt(hygiene.maintain_subagents_lane(_request(home, {}, entries=4)))
+    receipt = validate_lane_receipt(hygiene.maintain_subagents_lane(_request(home, {}, entries=32)))
 
     assert len(seen) == 3
-    assert receipt["items"] == receipt["protected"]["projection"] == 1
+    assert receipt["items"] == 1 + 12 + len(seen)
+    assert receipt["protected"]["projection"] == 1
     assert not receipt["complete"]
 
 
@@ -171,17 +174,30 @@ def _count_queue_reads(monkeypatch, queue):
 
 
 def test_wake_cover_resumes_across_production_slices_and_reclaims(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+
     home, now = _home_fixture(tmp_path)
     run_dir = _write_projection(home.owner_home_dir, tmp_path, now, run_id="old-run", days=40.0)
     queue = _dedupe_queue(home, 2000)
 
+    # Expire real slices by work performed so parallel filesystem setup cannot skew this test.
+    clock = [0.0]
+    read_projection = hygiene.read_projection_object
+
+    def timed_read(path, *args, **kwargs):
+        if path.parent == queue:
+            clock[0] += 0.001
+        return read_projection(path, *args, **kwargs)
+
     lookups = []
-    for _ in range(100):
-        budget = RetentionScanBudget.default()
-        lookups.append(hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=budget.exhausted))
-        if lookups[-1] is not None:
-            break
-    # 每片只推进有界的一段并留下持久进度，覆盖在有限片数内完成，而不是每片从头读。
+    with monkeypatch.context() as timed:
+        timed.setattr(retention_scan_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        timed.setattr(hygiene, "read_projection_object", timed_read)
+        for _ in range(100):
+            budget = RetentionScanBudget.default()
+            lookups.append(hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=budget.exhausted))
+            if lookups[-1] is not None:
+                break
     assert lookups[-1] == set(), lookups[-3:]
 
     reads = _count_queue_reads(monkeypatch, queue)
@@ -267,3 +283,88 @@ def test_wake_cover_rereads_entry_replaced_during_read(tmp_path, monkeypatch):
     monkeypatch.setattr(hygiene, "read_projection_object", read)
     refs = hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False)
     assert replaced and refs is not None and "swapped-run" in refs
+
+
+def test_wake_cover_retries_unchanged_receipt_after_read_error(tmp_path, monkeypatch):
+    home, now = _home_fixture(tmp_path)
+    run_dir = _write_projection(home.owner_home_dir, tmp_path, now, run_id="old-run", days=40.0)
+    queue = _dedupe_queue(home, 3)
+    target = queue / "thread.key-00000.json"
+    read_projection = hygiene.read_projection_object
+    attempts = []
+
+    def read(path, *args, **kwargs):
+        if path == target:
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise OSError("simulated read error")
+        return read_projection(path, *args, **kwargs)
+
+    monkeypatch.setattr(hygiene, "read_projection_object", read)
+    assert hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False) is None
+    assert run_dir.exists()
+    assert _drain_until_removed(home, now, run_dir) is not None
+    assert len(attempts) == 2
+
+
+def test_confirmed_wake_cover_corruption_rebuilds_from_queue(tmp_path):
+    home, now = _home_fixture(tmp_path)
+    run_dir = _write_projection(home.owner_home_dir, tmp_path, now, run_id="old-run", days=40.0)
+    queue = _dedupe_queue(home, 6)
+    assert hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False) == set()
+    cover = home.owner_home_dir.joinpath(*hygiene._WAKE_COVER_PARTS)
+    damaged = b"invalid SQLite header" * 64
+    cover.write_bytes(damaged)
+    hold_lock = """
+import sys
+from pathlib import Path
+from agent_py_agent.agent.common.json_io import locked_json_path
+with locked_json_path(Path(sys.argv[1])):
+    print("ready", flush=True)
+    sys.stdin.readline()
+"""
+    with subprocess.Popen([sys.executable, "-c", hold_lock, str(cover)], text=True,
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as peer:
+        assert peer.stdout.readline().strip() == "ready"
+        assert hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False) is None
+        assert cover.read_bytes() == damaged and run_dir.exists()
+        peer.communicate("\n", timeout=10)
+        assert peer.returncode == 0
+    assert _drain_until_removed(home, now, run_dir) is not None
+    assert len(list(queue.iterdir())) == 6
+
+
+@pytest.mark.parametrize(("entries", "count"), [(1, 8), (4, 72)])
+def test_cold_wake_listing_and_reads_share_loaded_entry_allowance(tmp_path, monkeypatch, entries, count):
+    from agent_py_agent.agent.user_space import directory_paging
+
+    home, _ = _home_fixture(tmp_path)
+    (home.owner_home_dir / "agents" / "run-one").mkdir(parents=True)
+    queue = _dedupe_queue(home, count)
+    reads = _count_queue_reads(monkeypatch, queue)
+    clock = [0.0]
+    _observe_projections(monkeypatch, home, clock=clock)
+    directory_page = directory_paging.directory_page
+
+    def late_page(root, parts, position, limit, **kwargs):
+        page = directory_page(root, parts, position, limit, **kwargs)
+        if root.joinpath(*parts) == queue:
+            clock[0] += 0.026
+        return page
+
+    monkeypatch.setattr(directory_paging, "directory_page", late_page)
+
+    def classify(_home, _run, *, wake_lookup, **_kwargs):
+        wake_lookup()
+        return {"classification": "active_or_protected"}
+
+    monkeypatch.setattr(hygiene, "_classify", classify)
+    cursor = {}
+    for _ in range(80):
+        before = len(reads)
+        receipt = validate_lane_receipt(hygiene.maintain_subagents_lane(_request(home, cursor, entries=entries)))
+        assert len(reads) - before <= receipt["items"] <= entries
+        cursor = json.loads(json.dumps(receipt["cursor"]))
+        if len(reads) == count:
+            break
+    assert len(reads) == len(set(reads)) == count

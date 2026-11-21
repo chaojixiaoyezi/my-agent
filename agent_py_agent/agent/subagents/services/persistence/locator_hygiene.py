@@ -19,12 +19,12 @@ from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import lru_cache, partial
-from itertools import islice
+from itertools import chain, islice
 from pathlib import Path
 from typing import Any
 
 from ....common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
-from ....common.json_io import write_private_json_file_atomic
+from ....common.json_io import locked_json_path, write_private_json_file_atomic
 from ....common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ....common.opaque_id import validate_opaque_id
 from ....io.sqlite_probe import sqlite_readonly_probe_uri
@@ -60,7 +60,7 @@ class ProjectionInspectionBudgetExceeded(ValueError):
 
 # LLM: 只读nofollow普通文件；缺失可显式为空，损坏、链接和非对象均抛错，不能作删除许可。
 # 函数用途: 为发现与维护读取同一投影结构，不写文件或创建目录。
-def read_projection_object(path: Path, *, optional: bool = False) -> dict[str, Any]:
+def read_projection_object(path: Path, *, optional: bool = False, max_bytes: int | None = None) -> dict[str, Any]:
     try:
         fd = open_readonly_file_beneath(path.parent, (path.name,))
     except FileNotFoundError:
@@ -75,7 +75,12 @@ def read_projection_object(path: Path, *, optional: bool = False) -> dict[str, A
             context[2]['bytes'] += size
             if budget is not None and budget.exhausted(size=context[2]['bytes']):
                 raise ProjectionInspectionBudgetExceeded('projection inspection byte/deadline budget exhausted')
-        value = json.load(source)
+        if max_bytes is None:
+            value = json.load(source)
+        else:
+            if os.fstat(source.fileno()).st_size > max_bytes:
+                raise ProjectionInspectionBudgetExceeded("wake entry grew before reading")
+            value = json.loads(source.buffer.read(max_bytes))
     if not isinstance(value, dict):
         raise ValueError("投影必须是JSON对象")
     return value
@@ -364,11 +369,15 @@ def _pending_obligation(payload: dict[str, Any]) -> bool:
 def _has_parent_wake(
     owner_home: Path, run_id: str, payload: dict[str, Any], *,
     time_expired: Callable[[], bool] | None = None,
+    wake_recheck: Callable[[set[str]], set[str] | None] | None = None,
 ) -> bool:
     ids = _projection_wake_ids(run_id, payload)
+    if wake_recheck is not None:
+        refs = wake_recheck(ids)
+        return refs is None or bool(refs)
     roots = [owner_home / "conversations", owner_home / "data/conversations"]
     if time_expired is not None:
-        refs = _collect_active_wake_ids(owner_home, time_expired=time_expired)
+        refs = _collect_active_wake_ids(owner_home, time_expired=time_expired, candidate_ids=ids)
         return refs is None or bool(ids & refs)
     if _ADMIN_RECONCILE.get() is not None:
         refs = _collect_active_wake_ids(owner_home)
@@ -438,12 +447,12 @@ def _collect_wake_refs(wake_doc: dict[str, Any], target: set[str]) -> None:
 #   lane 计时调用（time_expired 且非 admin 对账）改走可跨片续扫的持久覆盖；admin 对账与未计时显式调用保持原全量读语义。
 # 函数用途: 预先索引活跃唤醒引用的 run/task ID 集合，避免每个投影目录重复全扫 wake_queue。
 def _collect_active_wake_ids(
-    owner_home: Path, *, time_expired: Callable[[], bool] | None = None,
+    owner_home: Path, *, time_expired: Callable[[], bool] | None = None, candidate_ids: set[str] | None = None,
 ) -> set[str] | None:
     roots = (owner_home / "conversations", owner_home / "data/conversations")
     context = _ADMIN_RECONCILE.get()
     if time_expired is not None and context is None:
-        return _covered_active_wake_ids(owner_home, time_expired)
+        return _covered_active_wake_ids(owner_home, time_expired, candidate_ids=candidate_ids)
 
     def conversation_roots():
         yield from roots
@@ -510,7 +519,10 @@ _WAKE_DONE_STATUSES = frozenset({"consumed", "acked", "acknowledged", "cancelled
 # 条目覆盖值：终态无引用；"*" 表示未知/不可读/链接，只要仍在就保护全部候选；工作区目录项记 "dir"。
 _WAKE_COVER_TERMINAL = "[]"
 _WAKE_COVER_UNKNOWN = "*"
+_WAKE_COVER_RETRY = "!"
 _WAKE_COVER_DIRECTORY = "dir"
+# Derived-store format with retry state and indexed reference membership.
+_WAKE_COVER_VERSION = 1
 # 未计时显式调用（无 lane 预算）超过这一条数仍按原语义 fail-closed，与 maintain_owner_agent_projections(max_dirs) 默认一致。
 _UNTIMED_WAKE_SCAN_MAX_ENTRIES = 5000
 
@@ -532,46 +544,95 @@ def _wake_cover_value(wake: dict[str, Any], kind: str) -> str:
     return json.dumps(sorted(refs))
 
 
-# LLM: 覆盖库是可丢弃的派生状态：删除或损坏只会让下一片重新覆盖并在此期间保护全部候选；锁忙立即失败（保护）。
-# 函数用途: 打开（必要时私有创建）owner 的唤醒覆盖库并补齐表结构。
+def _discard_wake_cover(path: Path, opened: os.stat_result) -> None:
+    from ....common.nofollow_fs import unlink_file_beneath
+
+    if not os.path.samestat(opened, path.lstat()):
+        raise OSError("wake cover changed before rebuild")
+    leaves = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm", "-journal", "")]
+    for leaf in leaves:
+        try:
+            info = leaf.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("invalid wake cover file during rebuild")
+    for leaf in leaves:
+        unlink_file_beneath(path.parent, (leaf.name,))
+
+
+def _initialize_wake_cover(conn) -> None:
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(f"""
+        BEGIN IMMEDIATE;
+        CREATE TABLE wake_cover_folders(folder TEXT PRIMARY KEY, identity TEXT NOT NULL,
+            cursor TEXT, sweep INTEGER NOT NULL, start_sig TEXT NOT NULL, covered_sig TEXT NOT NULL,
+            covered_at REAL NOT NULL);
+        CREATE TABLE wake_cover_entries(folder TEXT NOT NULL, name TEXT NOT NULL,
+            sig TEXT NOT NULL, sweep INTEGER NOT NULL, refs TEXT, PRIMARY KEY(folder, name)) WITHOUT ROWID;
+        CREATE INDEX wake_cover_pending ON wake_cover_entries(folder, sweep, name)
+            WHERE refs IS NULL OR refs = '!';
+        CREATE INDEX wake_cover_unverified ON wake_cover_entries(folder)
+            WHERE refs IS NULL OR refs IN ('*', '!');
+        CREATE INDEX wake_cover_workspaces ON wake_cover_entries(folder, name) WHERE refs = 'dir';
+        CREATE TABLE wake_cover_refs(folder TEXT NOT NULL, name TEXT NOT NULL, ref TEXT NOT NULL,
+            PRIMARY KEY(folder, name, ref), FOREIGN KEY(folder, name)
+            REFERENCES wake_cover_entries(folder, name) ON DELETE CASCADE) WITHOUT ROWID;
+        CREATE INDEX wake_cover_ref_lookup ON wake_cover_refs(ref);
+        PRAGMA user_version={_WAKE_COVER_VERSION};
+        COMMIT;
+    """)
+
+
 @contextmanager
 def _wake_cover_connection(owner_home: Path):
     from ....common.nofollow_fs import ensure_private_dir
+    from ....io.sqlite_connection import sqlite_error_details
     from ....io.sqlite_scope import ensure_private_sqlite_birth
 
     path = owner_home.joinpath(*_WAKE_COVER_PARTS)
     ensure_private_dir(path.parent)
-    created = ensure_private_sqlite_birth(path)
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise OSError("invalid wake cover store")
-    with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, timeout=0,
-                                 isolation_level=None)) as conn:
-        if created:
-            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            conn.execute("PRAGMA journal_mode=WAL")
-        # 派生状态只需防损坏不需每次提交落盘：WAL+NORMAL 断电最多丢最近进度（下一片重扫），不会损坏库。
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA journal_size_limit=1048576")
-        conn.execute("CREATE TABLE IF NOT EXISTS wake_cover_folders(folder TEXT PRIMARY KEY, identity TEXT NOT NULL, "
-                     "cursor TEXT, sweep INTEGER NOT NULL, start_sig TEXT NOT NULL, covered_sig TEXT NOT NULL, "
-                     "covered_at REAL NOT NULL)")
-        conn.execute("CREATE TABLE IF NOT EXISTS wake_cover_entries(folder TEXT NOT NULL, name TEXT NOT NULL, "
-                     "sig TEXT NOT NULL, sweep INTEGER NOT NULL, refs TEXT, PRIMARY KEY(folder, name)) WITHOUT ROWID")
-        # 终态条目占绝大多数；部分索引让核验只与活跃/未知/待读条目成正比。
-        conn.execute("CREATE INDEX IF NOT EXISTS wake_cover_live ON wake_cover_entries(folder) "
-                     "WHERE refs IS NULL OR refs != '[]'")
-        yield conn
-
-
-def _wake_cover_live_rows(conn, folder: str):
-    return conn.execute("SELECT name, refs, sweep FROM wake_cover_entries WHERE folder=? "
-                        "AND (refs IS NULL OR refs != '[]')", (folder,)).fetchall()
+    # All cover connections share the stable owner lock, including generation replacement.
+    with locked_json_path(path, blocking=False):
+        for allow_upgrade in (True, False):
+            created = ensure_private_sqlite_birth(path)
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError("invalid wake cover store")
+            try:
+                with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, timeout=0,
+                                             isolation_level=None)) as conn:
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    conn.execute("PRAGMA synchronous=NORMAL")
+                    conn.execute("PRAGMA journal_size_limit=1048576")
+                    if created:
+                        _initialize_wake_cover(conn)
+                    version = conn.execute("PRAGMA user_version").fetchone()[0]
+                    if version == _WAKE_COVER_VERSION:
+                        yield conn
+                        return
+                    if version != 0 or not allow_upgrade:
+                        raise ValueError("unsupported wake cover version")
+                    # A busy legacy connection keeps its current generation.
+                    conn.execute("BEGIN EXCLUSIVE")
+                    conn.rollback()
+                    if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                        raise BlockingIOError("legacy wake cover journal is busy")
+            except sqlite3.Error as error:
+                if sqlite_error_details(error)["sqlite_primary_code"] in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                    _discard_wake_cover(path, info)
+                raise
+            _discard_wake_cover(path, info)
 
 
 def _forget_wake_folder(conn, folder: str) -> None:
     conn.execute("DELETE FROM wake_cover_entries WHERE folder=?", (folder,))
     conn.execute("DELETE FROM wake_cover_folders WHERE folder=?", (folder,))
+
+
+def _wake_entry_signature(info: os.stat_result) -> str:
+    return f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}"
 
 
 # LLM: 只 lstat，不读正文；签名 (st_ino, st_size, st_mtime_ns) 未变的条目沿用原覆盖值，变化或新条目置待读。
@@ -583,12 +644,16 @@ def _list_wake_entry(conn, directory: Path, folder: str, name: str, kind: str, s
         info = os.lstat(directory / name)
     except FileNotFoundError:
         return
+    except OSError:
+        conn.execute("INSERT OR REPLACE INTO wake_cover_entries VALUES (?,?,?,?,?)",
+                     (folder, name, "", sweep, _WAKE_COVER_UNKNOWN if kind == "workspaces" else _WAKE_COVER_RETRY))
+        return
     if kind == "workspaces":
         sig = str(info.st_ino)
         value = (_WAKE_COVER_UNKNOWN if stat.S_ISLNK(info.st_mode) else
                  _WAKE_COVER_DIRECTORY if stat.S_ISDIR(info.st_mode) else _WAKE_COVER_TERMINAL)
     else:
-        sig = f"{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+        sig = _wake_entry_signature(info)
         value = None if stat.S_ISREG(info.st_mode) else _WAKE_COVER_UNKNOWN
     row = conn.execute("SELECT sig FROM wake_cover_entries WHERE folder=? AND name=?", (folder, name)).fetchone()
     if row is not None and row[0] == sig:
@@ -599,39 +664,74 @@ def _list_wake_entry(conn, directory: Path, folder: str, name: str, kind: str, s
 
 # LLM: 读前后签名一致才记录结果；读中被替换则留待读，绝不把半途结果当覆盖；缺失即删条目。
 # 函数用途: 读取一个新增或变化的唤醒文件并写入覆盖值；返回 False 表示仍待读。
-def _read_wake_entry(conn, directory: Path, folder: str, name: str, kind: str) -> bool:
+def _read_wake_entry(conn, directory: Path, folder: str, name: str, kind: str, work) -> bool:
     path = directory / name
     try:
         before = os.lstat(path)
         value = _WAKE_COVER_UNKNOWN
         if stat.S_ISREG(before.st_mode):
-            try:
-                value = _wake_cover_value(read_projection_object(path), kind)
-            except FileNotFoundError:
-                raise
-            except (OSError, ValueError, TypeError, RecursionError):
-                # 坏文件只要仍在原签名下就保护全部候选；签名变化后会重读。
-                value = _WAKE_COVER_UNKNOWN
+            size = before.st_size
+            if work.budget is not None and size > work.budget.max_bytes:
+                value = _WAKE_COVER_RETRY
+            elif work.budget is not None and size > work.budget.max_bytes - work.usage["bytes"]:
+                return False
+            else:
+                work.usage["bytes"] += size
+                try:
+                    value = _wake_cover_value(read_projection_object(path, max_bytes=size), kind)
+                except FileNotFoundError:
+                    raise
+                except (OSError, ProjectionInspectionBudgetExceeded):
+                    value = _WAKE_COVER_RETRY
+                except (ValueError, TypeError, RecursionError):
+                    value = _WAKE_COVER_UNKNOWN
         after = os.lstat(path)
     except FileNotFoundError:
         conn.execute("DELETE FROM wake_cover_entries WHERE folder=? AND name=?", (folder, name))
         return True
-    signature = f"{before.st_ino}:{before.st_size}:{before.st_mtime_ns}"
-    if signature != f"{after.st_ino}:{after.st_size}:{after.st_mtime_ns}":
-        return False
+    except OSError:
+        conn.execute("UPDATE wake_cover_entries SET refs=? WHERE folder=? AND name=?",
+                     (_WAKE_COVER_RETRY, folder, name))
+        return True
+    signature = _wake_entry_signature(before)
+    if signature != _wake_entry_signature(after):
+        value = None
     conn.execute("UPDATE wake_cover_entries SET sig=?, refs=? WHERE folder=? AND name=?", (signature, value, folder, name))
+    if value not in (None, _WAKE_COVER_UNKNOWN, _WAKE_COVER_RETRY, _WAKE_COVER_TERMINAL):
+        conn.executemany("INSERT INTO wake_cover_refs VALUES (?,?,?)",
+                         ((folder, name, ref) for ref in json.loads(value)))
     return True
 
 
-# LLM: 扫完时目录签名与起扫时一致且无待读条目，本次调用即得到完整覆盖（与原全量读同为时点保证）；
-#   只有起扫时目录 mtime 已离开粗粒度窗口的覆盖才持久绑定该签名供后续调用复用——之后任一增删改名都会改目录 mtime
-#   而使其失效；窗口内起扫的覆盖不持久，下次调用重扫。超过复核周期强制重扫（仅 lstat，未变条目不重读）。
-# 函数用途: 在 lane 预算内推进一个文件夹的覆盖；返回 covered / pending / protect。
+class _WakeCoverWork:
+    def __init__(self, time_expired, budget, usage, visited_entries):
+        self.time_expired = time_expired
+        self.budget = budget
+        self.usage = usage
+        self.visited_entries = visited_entries
+        self.started = False
+
+    def capacity(self):
+        from ....user_space.storage_lanes import STORAGE_LANE_SLICE_ENTRIES
+
+        expired = self.time_expired()
+        if self.started and expired:
+            return 0
+        limit = STORAGE_LANE_SLICE_ENTRIES
+        if self.budget is not None:
+            limit = min(limit, self.budget.max_items - self.usage["items"] - self.visited_entries)
+        # Even if opening the cover used the time allowance, one useful unit can make progress.
+        return max(0, min(limit, 1) if expired else limit)
+
+    def charge(self, count):
+        self.started = True
+        self.usage["items"] += count
+
+
 def _advance_wake_folder(conn, owner_home: Path, parts: tuple[str, ...], kind: str,
-                         expired: Callable[[], bool], strict: bool) -> str:
+                         work: _WakeCoverWork, strict: bool) -> str:
     from ....common.cache_freshness import cache_entry_trustworthy
     from ....user_space.directory_paging import directory_page
-    from ....user_space.storage_lanes import STORAGE_LANE_SLICE_ENTRIES
 
     folder, directory = "/".join(parts), owner_home.joinpath(*parts)
     row = conn.execute("SELECT identity, cursor, sweep, start_sig, covered_sig, covered_at FROM wake_cover_folders "
@@ -654,30 +754,52 @@ def _advance_wake_folder(conn, owner_home: Path, parts: tuple[str, ...], kind: s
     if cursor is None and covered_sig == signature and 0 <= time.time() - covered_at < _WAKE_PROJECTION_REVERIFY_SECONDS:
         return "covered"
     outcome = "pending"
-    while not expired():
+    recheck_changed = True
+    while limit := work.capacity():
         if cursor is None:
             # 起扫时目录 mtime 仍在粗粒度窗口内的，同一时间片内的后续修改可能不改 mtime，故不能持久复用。
             sweep, start_sig, covered_sig = sweep + 1, signature, ""
             cursor = {"page": {}, "durable": cache_entry_trustworthy(info.st_mtime_ns)}
         if "page" in cursor:
-            names, resume, complete = directory_page(owner_home, parts, cursor["page"], STORAGE_LANE_SLICE_ENTRIES,
-                                                     require_dir_fd=strict)
+            names, resume, complete = directory_page(owner_home, parts, cursor["page"], limit, require_dir_fd=strict)
+            work.charge(resume.get("last_scanned", len(names)))
             for name in names:
                 _list_wake_entry(conn, directory, folder, name, kind, sweep)
             cursor = {"durable": cursor["durable"], **({} if complete else {"page": resume})}
             continue
-        settled = True
-        for name, value, entry_sweep in _wake_cover_live_rows(conn, folder):
-            if value is None and entry_sweep == sweep:
-                if expired():
-                    settled = None
+        # Persist a keyset for both virgin and retryable entries. A failed read cannot hide later entries.
+        pending = conn.execute("SELECT name FROM wake_cover_entries INDEXED BY wake_cover_pending "
+                               "WHERE folder=? AND sweep=? AND name>? "
+                               "AND (refs IS NULL OR refs = '!') ORDER BY name LIMIT ?",
+                               (folder, sweep, cursor.get("read_after", ""), limit)).fetchall()
+        if pending:
+            deferred = False
+            for (name,) in pending:
+                if not work.capacity():
+                    deferred = True
                     break
-                settled = _read_wake_entry(conn, directory, folder, name, kind) and settled
-        if settled is None:
-            break
+                work.charge(1)
+                if not _read_wake_entry(conn, directory, folder, name, kind, work):
+                    deferred = True
+                    break
+                cursor["read_after"] = name
+            if deferred:
+                break
+            continue
+        outstanding = conn.execute("SELECT refs FROM wake_cover_entries INDEXED BY wake_cover_pending "
+                                   "WHERE folder=? AND sweep=? "
+                                   "AND (refs IS NULL OR refs = '!') LIMIT 1",
+                                   (folder, sweep)).fetchone()
+        if outstanding is not None:
+            cursor.pop("read_after", None)
+            if outstanding[0] == _WAKE_COVER_RETRY or not recheck_changed:
+                # Recheck transient failures on the next slice, after this pass has visited every pending entry.
+                break
+            recheck_changed = False
+            continue
         if kind == "workspaces":
             for (name,) in conn.execute("SELECT name FROM wake_cover_entries WHERE folder=? AND sweep!=? AND refs=?",
-                                        (folder, sweep, _WAKE_COVER_DIRECTORY)).fetchall():
+                                        (folder, sweep, _WAKE_COVER_DIRECTORY)):
                 for queue in _WAKE_QUEUE_KINDS:
                     _forget_wake_folder(conn, "/".join((*parts, name, "conversations", "wake_queue", queue)))
         conn.execute("DELETE FROM wake_cover_entries WHERE folder=? AND sweep!=?", (folder, sweep))
@@ -685,7 +807,7 @@ def _advance_wake_folder(conn, owner_home: Path, parts: tuple[str, ...], kind: s
         if f"{latest.st_dev}:{latest.st_ino}" != identity:
             raise ValueError("wake queue directory replaced during cover sweep")
         durable, cursor = cursor["durable"], None
-        if settled and f"{identity}:{latest.st_mtime_ns}" == start_sig:
+        if f"{identity}:{latest.st_mtime_ns}" == start_sig:
             outcome = "covered"
             if durable:
                 covered_sig, covered_at = start_sig, time.time()
@@ -701,51 +823,51 @@ def _advance_wake_folder(conn, owner_home: Path, parts: tuple[str, ...], kind: s
 # LLM: 跨片续扫的活跃唤醒引用覆盖：每片只重读新增或变化条目，只有全部文件夹对当前身份完成覆盖才返回集合；
 #   链接、非目录、不可读、未知 phase 与未完成覆盖一律返回 None（保护全部候选）；每次调用至少推进一个单元以保证极短片仍有进展。
 # 函数用途: 为 lane 计时调用提供不随唤醒文件总数增长而失效的引用集合。
-def _covered_active_wake_ids(owner_home: Path, time_expired: Callable[[], bool]) -> set[str] | None:
+def _covered_active_wake_ids(owner_home: Path, time_expired: Callable[[], bool], *,
+                             budget=None, usage=None, visited_entries=0,
+                             candidate_ids: set[str] | None = None) -> set[str] | None:
     from ....user_space.directory_paging import _native_directory_supported
 
-    calls = [0]
-
-    def expired() -> bool:
-        calls[0] += 1
-        return calls[0] > 1 and time_expired()
-
+    work = _WakeCoverWork(time_expired, budget, usage if usage is not None else {"items": 0, "bytes": 0},
+                          visited_entries)
     strict = _native_directory_supported()
-    refs: set[str] = set()
     try:
         with _wake_cover_connection(owner_home) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                outcome = _advance_wake_folder(conn, owner_home, _WAKE_WORKSPACE_PARTS, "workspaces", expired, strict)
-                roots = [("conversations",), ("data", "conversations")]
-                if outcome == "covered":
-                    base = "/".join(_WAKE_WORKSPACE_PARTS)
-                    for name, value, _sweep in sorted(_wake_cover_live_rows(conn, base)):
-                        if value != _WAKE_COVER_DIRECTORY:
-                            outcome = "protect"
-                            break
-                        roots.append((*_WAKE_WORKSPACE_PARTS, name, "conversations"))
-                for root in roots:
-                    for kind in _WAKE_QUEUE_KINDS:
-                        if outcome != "covered":
-                            break
-                        parts = (*root, "wake_queue", kind)
-                        outcome = _advance_wake_folder(conn, owner_home, parts, kind, expired, strict)
-                        if outcome == "covered":
-                            for _name, value, _sweep in _wake_cover_live_rows(conn, "/".join(parts)):
-                                if value is None or value == _WAKE_COVER_UNKNOWN:
-                                    outcome = "protect"
-                                    break
-                                refs.update(json.loads(value))
+                refs = _read_wake_cover(conn, owner_home, work, strict, candidate_ids)
                 conn.execute("COMMIT")
             except BaseException:
-                conn.execute("ROLLBACK")
+                if conn.in_transaction:
+                    conn.rollback()
                 raise
             # 有界回收已删条目的空闲页；pragma 逐步执行，必须取尽结果才真正完成。
             conn.execute("PRAGMA incremental_vacuum(64)").fetchall()
     except (OSError, ValueError, TypeError, RecursionError, sqlite3.Error):
         return None
-    return refs if outcome == "covered" else None
+    return refs
+
+
+def _read_wake_cover(conn, owner_home, work, strict, candidate_ids):
+    def covered(parts, kind):
+        if _advance_wake_folder(conn, owner_home, parts, kind, work, strict) != "covered":
+            return False
+        return conn.execute("SELECT 1 FROM wake_cover_entries INDEXED BY wake_cover_unverified WHERE folder=? "
+                            "AND (refs IS NULL OR refs IN ('*', '!')) LIMIT 1", ("/".join(parts),)).fetchone() is None
+
+    if not covered(_WAKE_WORKSPACE_PARTS, "workspaces"):
+        return None
+    with closing(conn.execute("SELECT name FROM wake_cover_entries WHERE folder=? AND refs='dir' ORDER BY name",
+                              ("/".join(_WAKE_WORKSPACE_PARTS),))) as rows:
+        workspaces = ((*_WAKE_WORKSPACE_PARTS, name, "conversations") for (name,) in rows)
+        for root in chain((("conversations",), ("data", "conversations")), workspaces):
+            for kind in _WAKE_QUEUE_KINDS:
+                if not covered((*root, "wake_queue", kind), kind):
+                    return None
+    if candidate_ids is None:
+        return {ref for (ref,) in conn.execute("SELECT DISTINCT ref FROM wake_cover_refs")}
+    return {ref for ref in candidate_ids if conn.execute(
+        "SELECT 1 FROM wake_cover_refs WHERE ref=? LIMIT 1", (ref,)).fetchone() is not None}
 
 
 def _has_active_parent_wake(
@@ -1050,8 +1172,10 @@ def _maintenance_guard(owner_home: Path, run_dir: Path, *, expected=None):
 # LLM: compact是本次唯一允许新增/替换的叶；原state/refs/locator及其余清单变化均不得成为新删除授权。
 # 函数用途: 检查写compact后的非服务输入仍与分类时一致，并重查欠账保护。
 def _verify_before_delete(owner_home, run_dir, info, *, now, active_run_ids, pinned_run_ids, slim_after_days,
-                          archive_after_days, time_expired=None):
-    wake_lookup = (partial(_collect_active_wake_ids, owner_home, time_expired=time_expired)
+                          archive_after_days, time_expired=None, wake_recheck=None):
+    ids = _projection_wake_ids(run_dir.name, info["payload"])
+    wake_lookup = (partial(wake_recheck, ids) if wake_recheck is not None else
+                   partial(_collect_active_wake_ids, owner_home, time_expired=time_expired, candidate_ids=ids)
                    if time_expired is not None else None)
     fresh = _classify(owner_home, run_dir, now=now, active_run_ids=active_run_ids, pinned_run_ids=pinned_run_ids,
                       slim_after_days=slim_after_days, archive_after_days=archive_after_days,
@@ -1071,12 +1195,14 @@ def _verify_before_delete(owner_home, run_dir, info, *, now, active_run_ids, pin
 # LLM: 执行沿分类时父链身份取锁；末次权威核验到删叶共用FD临界区，归档失败不删原件。
 # 函数用途: 执行一个候选目录的完整持锁维护动作。
 def _maintain_projection(owner_home, run_dir, info, report, *, now, active_run_ids, pinned_run_ids, slim_after_days,
-                         archive_after_days, time_expired=None):
+                         archive_after_days, time_expired=None, wake_recheck=None):
     options = dict(now=now, active_run_ids=active_run_ids, pinned_run_ids=pinned_run_ids,
-                   slim_after_days=slim_after_days, archive_after_days=archive_after_days, time_expired=time_expired)
+                   slim_after_days=slim_after_days, archive_after_days=archive_after_days, time_expired=time_expired,
+                   wake_recheck=wake_recheck)
     with _maintenance_guard(owner_home, run_dir, expected=info["directory_ids"]) as boundary:
         boundary["payload"] = info["payload"]
         boundary["time_expired"] = time_expired
+        boundary["wake_recheck"] = wake_recheck
         records = _verify_before_delete(owner_home, run_dir, info, **options)
         kind = info["classification"]
         if kind == "terminal_slim_candidate":
@@ -1247,7 +1373,7 @@ def _assert_no_new_obligation(boundary):
     status, pending = projection_runtime_facts(boundary["owner_home"], boundary["run_id"], boundary["payload"])
     if ((status and status not in AGENT_RUN_TERMINAL_STATUSES) or pending
             or _has_parent_wake(boundary["owner_home"], boundary["run_id"], boundary["payload"],
-                                time_expired=boundary.get("time_expired"))):
+                                time_expired=boundary.get("time_expired"), wake_recheck=boundary.get("wake_recheck"))):
         raise ValueError("隔离后运行恢复或出现父唤醒")
 
 
@@ -1326,7 +1452,10 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
                                      wake_ref_ids: set[str] | None = None,
                                      directory_position: dict | None = None,
                                      slice_budget=None,
-                                     slice_wake_lookup: Callable[[], set[str] | None] | None = None) -> dict[str, Any]:
+                                     slice_wake_lookup: Callable[[], set[str] | None] | None = None,
+                                     slice_wake_usage: dict | None = None,
+                                     covered_wake_lookup: Callable[[int, set[str] | None], set[str] | None] | None = None,
+                                     ) -> dict[str, Any]:
     owner_home = Path(owner_home)
     current = time.time() if now is None else float(now)
     if not all(math.isfinite(value) and value >= 0 for value in (current, slim_after_days, archive_after_days)):
@@ -1345,16 +1474,25 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
         return slice_budget is not None and slice_budget.remaining_ms() <= 0
 
     def should_stop():
-        return time_expired() or (budget_exhausted is not None and budget_exhausted())
+        return (time_expired() or (budget_exhausted is not None and budget_exhausted())
+                or (slice_budget is not None and slice_wake_usage is not None and slice_budget.exhausted(
+                    report.get("visited_entries", 0) + slice_wake_usage["items"], slice_wake_usage["bytes"])))
 
     wake_cache: list[set[str] | None] = []
     if wake_ref_ids is not None:
         wake_cache.append(wake_ref_ids)
 
     def wake_lookup() -> set[str] | None:
+        if covered_wake_lookup is not None:
+            return covered_wake_lookup(report.get("visited_entries", 0), None)
+        if slice_wake_lookup is not None:
+            return slice_wake_lookup()
         if not wake_cache:
             wake_cache.append(_collect_active_wake_ids(owner_home))
         return wake_cache[0]
+
+    def wake_recheck(ids):
+        return covered_wake_lookup(report.get("visited_entries", 0), ids)
 
     def directories():
         if bounded:
@@ -1384,7 +1522,7 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
             report["next_after"] = run_dir.name if not report["page_complete"] else ""
         info = _classify(owner_home, run_dir, now=current, active_run_ids=active_run_ids,
                          pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days,
-                         wake_lookup=slice_wake_lookup or wake_lookup)
+                         wake_lookup=wake_lookup)
         if time_expired():
             # 当前项已检查；时间不足时保留投影，下个周期重新核验。
             report["protected_dirs"] += 1
@@ -1402,13 +1540,15 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
                 _maintain_projection(owner_home, run_dir, info, report, now=current, active_run_ids=active_run_ids,
                                       pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days,
                                       archive_after_days=archive_after_days,
-                                      time_expired=time_expired if slice_budget is not None else None)
+                                      time_expired=time_expired if slice_budget is not None else None,
+                                      wake_recheck=wake_recheck if covered_wake_lookup is not None else None)
             else:
                 run_write(lambda run_dir=run_dir, info=info: _maintain_projection(
                     owner_home, run_dir, info, report, now=current, active_run_ids=active_run_ids,
                     pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days,
                                       archive_after_days=archive_after_days,
-                                      time_expired=time_expired if slice_budget is not None else None))
+                                      time_expired=time_expired if slice_budget is not None else None,
+                                      wake_recheck=wake_recheck if covered_wake_lookup is not None else None))
         except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
             error = {"run_id": run_dir.name, "error_type": type(exc).__name__}
             if getattr(exc, "projection_recovery", None) is not None:
@@ -1477,7 +1617,8 @@ def maintain_subagents_lane(request) -> dict:
             return False
         status, pending = projection_runtime_facts(home, run_id, payload)
         return (status in AGENT_RUN_TERMINAL_STATUSES and not pending and not _pending_obligation(payload)
-                and not _has_parent_wake(home, run_id, payload, time_expired=time_expired) and pins.complete
+                and not _has_parent_wake(home, run_id, payload, time_expired=time_expired,
+                    wake_recheck=lambda ids: slice_wake_lookup(candidate_ids=ids)) and pins.complete
                 and run_id not in pins.ids and not pins.protects(path, []) and not time_expired())
 
     def retire_stream(path, observation):
@@ -1508,19 +1649,33 @@ def maintain_subagents_lane(request) -> dict:
     def time_expired():
         return budget.remaining_ms() <= 0
 
-    def slice_wake_lookup() -> set[str] | None:
+    def slice_wake_lookup(visited_entries=0, candidate_ids=None) -> set[str] | None:
+        if candidate_ids is not None:
+            return _covered_active_wake_ids(home, time_expired, budget=budget, usage=receipt,
+                                            visited_entries=visited_entries, candidate_ids=candidate_ids)
         if not wake_cache:
-            wake_cache.append(_collect_active_wake_ids(home, time_expired=time_expired))
+            refs = _covered_active_wake_ids(home, time_expired, budget=budget, usage=receipt,
+                                           visited_entries=visited_entries)
+            wake_cache.append(refs)
+            if refs is None:
+                cursor["wake_pending"] = True
+            else:
+                cursor.pop("wake_pending", None)
         return wake_cache[0]
 
     cursor = {"phase": "projections", "cycle_generation": generation}
     cursor.update({key: value for key, value in request.cursor.items() if key in {
-        "phase", "directory", "root", "workspace", "workspace_directory",
+        "phase", "directory", "root", "workspace", "workspace_directory", "wake_pending",
     }})
     receipt["cursor"] = cursor
     if cursor["phase"] not in ("projections", "transcripts"):
         cursor.clear()
         cursor.update(phase="projections", cycle_generation=generation)
+    if cursor.get("wake_pending") is True:
+        # A projection can consume the last entry allowance before discovering pending wake work.
+        slice_wake_lookup()
+        if budget.exhausted(receipt["items"], receipt["bytes"]):
+            return receipt
     phase = cursor["phase"]
     position = cursor.get("directory", {})
     if phase != "transcripts":
@@ -1537,7 +1692,8 @@ def maintain_subagents_lane(request) -> dict:
                 run_write=request.run_write,
                 directory_position=position,
                 slice_budget=budget,
-                slice_wake_lookup=slice_wake_lookup,
+                slice_wake_usage=receipt,
+                covered_wake_lookup=slice_wake_lookup,
             )
             receipt["items"] += report["visited_entries"]
             receipt["deleted_items"] += report["removed_dirs"] + report["slimmed_dirs"] + report["archived_dirs"]
@@ -1548,8 +1704,11 @@ def maintain_subagents_lane(request) -> dict:
             cursor["directory"] = report["directory"]
             if not report["page_complete"]:
                 return receipt
+        wake_pending = cursor.get("wake_pending") is True
         cursor.clear()
         cursor.update(phase="transcripts", root="owner", cycle_generation=generation)
+        if wake_pending:
+            cursor["wake_pending"] = True
     days = owner_retention_override(request.home, "agent_transcript_days", agent_transcript.AGENT_TRANSCRIPT_RETENTION_DAYS)
     try:
         workspace_parts = (*Path(request.home.owner_workspace_dir).relative_to(home).parts, "runtime", "workspaces")
@@ -1656,7 +1815,8 @@ def maintain_subagents_lane(request) -> dict:
     else:
         return receipt
     generation = lane_cycle_generation(cursor, wrapped=True)
-    return {**receipt, "cursor": {"cycle_generation": generation}, "complete": True,
+    return {**receipt, "cursor": {"cycle_generation": generation,
+            **({"wake_pending": True} if cursor.get("wake_pending") is True else {})}, "complete": True,
             "cycle_generation": generation}
 
 
