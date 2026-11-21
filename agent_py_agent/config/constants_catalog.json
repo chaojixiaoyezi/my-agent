@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1569,
+  "count": 1570,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -12450,6 +12450,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "重启交接等待前任进程退出最多 60 秒，超时按异常处理"
+    },
+    {
+      "name": "_STARTUP_WAIT_SECONDS",
+      "file": "agent_py_agent/cli/gateway_restart_handover.py",
+      "value": 120.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "旧进程退出（或新进程号出现）后等待接班就绪的独立时限 120 秒，与排空预算分开计时。"
     },
     {
       "name": "_CLI_LOCAL_SEARCH_COUNT",
