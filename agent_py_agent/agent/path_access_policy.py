@@ -1350,6 +1350,37 @@ class DelegationDecision:
         }
 
 
+# LLM: 暂存位置只在子任务自己的 output 下；每个不同的绝对目标取最短的唯一尾部路径，名字唯一时仍是原
+#   “文件名”位置（保留已运行任务的原映射），同名不同目录才带上区分它们的上级目录。hint 是拒绝记录给出的
+#   相对位置，合法且不与其它目标冲突时沿用。只做命名，不授予任何写权限。
+# 函数用途: 为一组被拒绝直写的目标分配互不冲突且可复现的暂存相对位置。
+def staging_relative_locations(targets: list[str], hints: dict[str, str] | None = None) -> dict[str, str]:
+    unique = list(dict.fromkeys(str(target) for target in targets))
+    # 绝对路径首段是根（"/" 或盘符），不参与暂存相对位置。
+    parts = {target: Path(target).parts[1:] if Path(target).is_absolute() else Path(target).parts
+             for target in unique}
+
+    def suffix(target: str) -> str:
+        own = parts[target]
+        for size in range(1, len(own) + 1):
+            tail = own[-size:]
+            if all(other == target or parts[other][-size:] != tail for other in unique):
+                return Path(*tail).as_posix()
+        return Path(*own).as_posix()
+
+    chosen = {target: suffix(target) for target in unique}
+    given = {target: Path(str((hints or {}).get(target) or "")) for target in unique}
+    texts = [hint.as_posix() for hint in given.values() if hint.parts]
+    for target in unique:
+        hint = given[target]
+        text = hint.as_posix()
+        # 只有独占（其它目标既没有同一 hint、也没有落到同一位置）且合法的 hint 才沿用。
+        if (hint.parts and not hint.is_absolute() and ".." not in hint.parts and texts.count(text) == 1
+                and all(other == target or chosen[other] != text for other in unique)):
+            chosen[target] = text
+    return chosen
+
+
 def _path_identity(path: Path) -> tuple[int, int] | None:
     try:
         info = path.stat()
@@ -1523,6 +1554,7 @@ __all__ = [
     "normalize_path_access_mode",
     "owner_home_containing",
     "path_scope_regime",
+    "staging_relative_locations",
     "task_host_state_paths",
     "task_root_containing",
 ]

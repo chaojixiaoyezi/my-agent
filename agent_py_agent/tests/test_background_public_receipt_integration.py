@@ -205,3 +205,28 @@ def test_disabled_contract_retains_typed_scheduler_error_without_model_or_retry(
     assert not prompts and not channels.attempts
     assert scheduler.tick(now=case.job['next_run_at'] + 31) == []
     assert not prompts and not channels.attempts
+
+
+_LOG_SAMPLE = '日志摘录：\n```text\nERROR synthetic case 1\n```'
+
+
+@pytest.mark.parametrize('wrap', ['检查结果如下：\n{body}', '说明\n```json\n{body}\n```'])
+@pytest.mark.parametrize('intent', ['publish', 'internal_only'])
+def test_mixed_receipt_with_markdown_value_repairs_once_through_scheduler(tmp_path, wrap, intent):
+    original = wrap.format(body=_body(public=_LOG_SAMPLE))
+    corrected = _body(intent, _LOG_SAMPLE if intent == 'publish' else '', '内部完成。')
+    case, prompts, channels, scheduler = _case(tmp_path, [original, corrected])
+
+    reports = scheduler.tick(now=case.job['next_run_at'])
+
+    history, errors = case.agent.scheduler_repository.history()
+    assert not errors and history[0]['status'] == 'done', history
+    assert len(prompts) == 2 and reports[0].wake_handled
+    if intent == 'publish':
+        assert history[0]['delivery_status'] == 'sent'
+        assert len(channels.attempts) == 1 and channels.attempts[0][1].content == _LOG_SAMPLE
+    else:
+        assert history[0]['delivery_status'] == 'suppressed' and not channels.attempts
+    rows = case.store.messages.recent(case.thread.thread_id, limit=0)
+    assert not any(row.content == original for row in rows)
+    assert scheduler.tick(now=case.job['next_run_at'] + 31) == [] and len(prompts) == 2

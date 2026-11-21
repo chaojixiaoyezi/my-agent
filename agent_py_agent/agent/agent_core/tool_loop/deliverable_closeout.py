@@ -23,6 +23,8 @@ _REPORT_KEY = "declared_file_delivery"
 _ACCEPT_TOOL = "business_assets_versions_accept"
 _MAX_DELIVERABLE_REPAIR_COUNT = 2
 _MISSING_PREVIEW_COUNT = 5
+# 多个权威声明对同一目标给出不同摘要时的标记；它不是十六进制摘要，任何文件都不会与之匹配。
+_CONFLICTING_DIGESTS = "conflicting-declared-digests"
 
 
 def _sources(params: object, agent=None):
@@ -36,19 +38,35 @@ def _sources(params: object, agent=None):
             yield source
 
 
-def _declared_path(raw, workspace) -> Path | None:
+# LLM: 相对声明与文件工具共用同一可信基准：冻结 WorkspaceRef 根，旧任务无快照时用宿主写入边界的
+#   execution_cwd（effective_registry_cwd 同一语义）；两者都没有时返回 None，由调用方保留为未解析义务。
+# 函数用途: 给出解析相对交付声明的可信目录，不授予任何写权限。
+def _declared_base(boundary) -> Path | None:
+    workspace = workspace_ref_from_boundary(boundary)
+    if workspace is not None:
+        return workspace.root
+    cwd = boundary.get("execution_cwd") if isinstance(boundary, dict) else None
+    if isinstance(cwd, str) and cwd.strip() and Path(cwd.strip()).expanduser().is_absolute():
+        return Path(cwd.strip()).expanduser()
+    return None
+
+
+# LLM: 无可信基准的相对声明保留为相对 Path（未解析），不按宿主进程 cwd 猜位置，也不静默丢弃。
+def _declared_path(raw, base) -> Path | None:
     if not isinstance(raw, str) or not raw.strip() or "\0" in raw or "://" in raw:
         return None
     path = Path(raw.strip()).expanduser()
     if not path.is_absolute():
-        if workspace is None:
-            return None
-        path = workspace.root / path
+        if base is None:
+            return path
+        path = base / path
     return Path(os.path.abspath(path))
 
 
+# LLM: 摘要只来自声明 required_file_refs 的权威来源；同一目标多个非空摘要不一致时标记冲突，不取先到者。
+#   暂存摘要与已采用摘要是独立证据，在落地时另行核对，不参与这里的声明合并。
 def _declared_files(params: object, agent=None) -> dict[Path, tuple[bool, str]]:
-    workspace = workspace_ref_from_boundary(getattr(params, "write_boundary", None))
+    base = _declared_base(getattr(params, "write_boundary", None))
     child = getattr(params, "context_scope", "") in _CHILD_SCOPES
     targets: dict[Path, tuple[bool, str]] = {}
     for source in _sources(params, agent):
@@ -56,12 +74,17 @@ def _declared_files(params: object, agent=None) -> dict[Path, tuple[bool, str]]:
             items = source.get(key)
             for item in items if isinstance(items, (list, tuple)) else ():
                 raw = item.get("path") if isinstance(item, dict) else item
-                if (path := _declared_path(raw, workspace)) is None:
+                if (path := _declared_path(raw, base)) is None:
+                    continue
+                # 旧产物字段可能混有逻辑名，无可信基准时沿原规则忽略；只有显式 required_file_refs 保留为未解析义务。
+                if key != "required_file_refs" and not path.is_absolute():
                     continue
                 if key == "required_file_refs":
-                    digest = item.get("sha256") if isinstance(item, dict) else ""
-                    targets.setdefault(path, (True, ""))
-                    targets[path] = (True, targets[path][1] or str(digest or ""))
+                    digest = str((item.get("sha256") if isinstance(item, dict) else "") or "")
+                    known = targets.get(path, (True, ""))[1]
+                    if digest and known and digest != known:
+                        digest = _CONFLICTING_DIGESTS
+                    targets[path] = (True, digest or known)
                 else:
                     targets.setdefault(path, (False, ""))
     return targets
@@ -72,17 +95,28 @@ def declared_deliverables(params: object) -> list[str]:
 
 
 def _file_matches(path: Path, *, regular: bool, digest: str, workspace, boundary) -> bool:
+    return _file_state(path, regular=regular, digest=digest, workspace=workspace, boundary=boundary) == "match"
+
+
+# LLM: 只读核验：unresolved（无可信基准的相对声明）、digest_conflict（权威摘要不一致）、missing、
+#   mismatch（存在但摘要不符）、unverified（读不了或不在受理根下）与 match 互相区分。
+# 函数用途: 返回一个声明交付文件的核验状态。
+def _file_state(path: Path, *, regular: bool, digest: str, workspace, boundary) -> str:
+    if not path.is_absolute():
+        return "unresolved"
+    if digest == _CONFLICTING_DIGESTS:
+        return "digest_conflict"
     try:
         if not regular:
-            return path.exists()
+            return "match" if path.exists() else "missing"
         # 只读已受理根下的显式声明，历史无快照的任务沿用绝对路径。
         roots = (workspace.root, *workspace.roots) if workspace is not None else (path.parent,)
         root = next((entry for entry in roots if path != entry and path.is_relative_to(entry)), None)
         if workspace is not None:
             if not workspace.is_current():
-                return False
+                return "unverified"
             if root is not None and workspace.identity_for(root) is None:
-                return False
+                return "unverified"
             if root is None and isinstance(boundary, dict):
                 output = boundary.get("task_output_dir")
                 if isinstance(output, str):
@@ -90,12 +124,14 @@ def _file_matches(path: Path, *, regular: bool, digest: str, workspace, boundary
                     if output_root.is_absolute() and path != output_root and path.is_relative_to(output_root):
                         root = output_root
         if root is None:
-            return False
+            return "unverified"
         descriptor = open_workspace_delivery_file(root, path.relative_to(root).parts)
         with os.fdopen(descriptor, "rb") as stream:
-            return not digest or file_digest(stream, "sha256").hexdigest() == digest
+            return "match" if not digest or file_digest(stream, "sha256").hexdigest() == digest else "mismatch"
+    except FileNotFoundError:
+        return "missing"
     except (OSError, ValueError):
-        return False
+        return "unverified"
 
 
 def missing_deliverables(params: object) -> tuple[list[str], list[str]]:
@@ -150,31 +186,36 @@ def _apply_staged_version(agent, params, phase, target, declared_digest) -> dict
     if accepted is None:
         return {**receipt, "state": "not_accepted"}
     digest, budget = accepted
+    # 父任务声明摘要、已采用版本摘要、子任务暂存摘要三者独立；任一不一致都不写入、不算交付。
+    if declared_digest == _CONFLICTING_DIGESTS:
+        return {**receipt, "state": "digest_conflict", "accepted_digest": digest}
     if phase.get("sha256") != digest or (declared_digest and declared_digest != digest):
-        return {**receipt, "state": "digest_mismatch", "accepted_digest": digest}
+        return {**receipt, "state": "digest_mismatch", "accepted_digest": digest,
+                **({"declared_digest": declared_digest} if declared_digest else {})}
     try:
         payload = read_bytes_beneath(staging, relative, max_bytes=budget)
     except (OSError, ValueError) as error:
         return {**receipt, "state": "source_unverified", "error_code": type(error).__name__}
-    if payload is None:
-        return {**receipt, "state": "source_missing"}
-    receipt["source_digest"] = sha256(payload).hexdigest()
-    if receipt["source_digest"] != digest:
-        return {**receipt, "state": "digest_mismatch", "accepted_digest": digest}
+    if payload is not None:
+        receipt["source_digest"] = sha256(payload).hexdigest()
+        if receipt["source_digest"] != digest:
+            return {**receipt, "state": "digest_mismatch", "accepted_digest": digest}
     from ..tool_runtime_ledger import write_boundary_with_runtime_ledger
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
     with bind_cancellation_token(getattr(params, "cancellation_token", None) or current_cancellation_token()):
         if cancellation_requested():
             return {**receipt, "state": "cancelled"}
-        state, landed, code = land_accepted_workspace_file(agent.tools, boundary, target, payload, max_bytes=budget)
+        # 暂存已被清理时 payload=None：目标已持有采用摘要则只读确认 already_landed，缺失才需要暂存字节。
+        state, landed, code = land_accepted_workspace_file(agent.tools, boundary, target, payload, max_bytes=budget,
+                                                           accepted_digest=digest)
     receipt.update(state=state, landed_digest=landed)
     if code:
         receipt["error_code"] = code
     return receipt
 
 
-def _apply_receipts(params, agent, targets, workspace, adoption=None):
+def _apply_receipts(params, agent, targets, adoption=None):
     seen: set[Path] = set()
     for source in _sources(params, agent):
         phases = source.get("staged_deliverables")
@@ -184,8 +225,8 @@ def _apply_receipts(params, agent, targets, workspace, adoption=None):
             if adoption is not None and any(phase.get(key) != adoption.get(key)
                                             for key in ("space_id", "asset_id", "version_ref")):
                 continue
-            target = _declared_path(phase.get("destination"), workspace)
-            if target in targets and targets[target][0] and target not in seen:
+            target = _declared_path(phase.get("destination"), None)
+            if target in targets and target.is_absolute() and targets[target][0] and target not in seen:
                 seen.add(target)
                 yield _apply_staged_version(agent, params, phase, target, targets[target][1])
 
@@ -216,7 +257,7 @@ def adopted_delivery_receipts(agent, params, adoption: dict) -> list[dict[str, o
     if getattr(params, "context_scope", "") in _CHILD_SCOPES or current_subagent_run_id(agent):
         return []
     workspace = workspace_ref_from_boundary(getattr(params, "write_boundary", None))
-    return list(_apply_receipts(params, agent, _declared_files(params, agent), workspace, adoption)) if workspace else []
+    return list(_apply_receipts(params, agent, _declared_files(params, agent), adoption)) if workspace else []
 
 
 def deliverable_closeout_block(params: object, *, agent=None) -> str | None:
@@ -232,22 +273,31 @@ def deliverable_closeout_block(params: object, *, agent=None) -> str | None:
     staged_by_target = {row["destination"]: row for row in staged}
     receipts = []
     if agent is not None and not child_scope and not current_subagent_run_id(agent) and workspace is not None:
-        receipts = list(_apply_receipts(params, agent, targets, workspace))
+        receipts = list(_apply_receipts(params, agent, targets))
     receipts_by_target = {row["destination"]: row for row in receipts}
     landed = []
     missing = []
+    # 每个未交付目标的具体原因（missing/mismatch/unresolved/digest_conflict/unverified 或落地回执状态）。
+    outcomes: dict[str, str] = {}
     for path, (regular, digest) in targets.items():
         dest = str(path)
         receipt = receipts_by_target.get(dest)
         if receipt is not None and receipt["state"] not in {"landed", "already_landed"}:
-            missing.append(dest)
+            outcomes[dest] = receipt["state"]
         elif dest in staged_by_target:
-            if not staged_by_target[dest]["files_written"] or (digest and staged_by_target[dest]["sha256"] != digest):
-                missing.append(dest)
-        elif _file_matches(path, regular=regular, digest=digest or (receipt or {}).get("landed_digest", ""),
-                           workspace=workspace, boundary=boundary):
-            landed.append(dest)
+            row = staged_by_target[dest]
+            if not row["files_written"]:
+                outcomes[dest] = "missing"
+            elif digest == _CONFLICTING_DIGESTS or (digest and row["sha256"] != digest):
+                outcomes[dest] = "digest_conflict" if digest == _CONFLICTING_DIGESTS else "mismatch"
         else:
+            verdict = _file_state(path, regular=regular, digest=digest or (receipt or {}).get("landed_digest", ""),
+                                  workspace=workspace, boundary=boundary)
+            if verdict == "match":
+                landed.append(dest)
+            else:
+                outcomes[dest] = verdict
+        if dest in outcomes:
             missing.append(dest)
     if isinstance(state, dict):
         state[_REPORT_KEY] = {
@@ -255,6 +305,7 @@ def deliverable_closeout_block(params: object, *, agent=None) -> str | None:
                                   or any(row["source_digest"] for row in receipts)),
             "target_delivered": not missing and not staged,
             "missing": missing, "landed_files": landed, "staged_files": staged, "apply_receipts": receipts,
+            "file_outcomes": outcomes,
         }
     if receipts:
         _attach_apply_receipts(params, receipts)
@@ -264,7 +315,7 @@ def deliverable_closeout_block(params: object, *, agent=None) -> str | None:
     if attempts >= _MAX_DELIVERABLE_REPAIR_COUNT:
         return None
     state[_STATE_KEY] = attempts + 1
-    preview = "、".join(missing[:_MISSING_PREVIEW_COUNT])
+    preview = "、".join(f"{path}（{outcomes[path]}）" for path in missing[:_MISSING_PREVIEW_COUNT])
     suffix = "" if len(missing) <= _MISSING_PREVIEW_COUNT else f" 等 {len(missing)} 个"
     return (
         "[deliverable-closeout-blocked]\n"

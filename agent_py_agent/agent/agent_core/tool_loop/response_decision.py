@@ -1188,7 +1188,10 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             return ToolLoopResponseDecision("continue", None, [], request.counters)
         delivery = deliverable_report(request.params)
         if delivery and delivery["missing"] and not length_truncated:
-            preview = "、".join(delivery["missing"][:5])
+            outcomes = delivery.get("file_outcomes") or {}
+            # 每项附带具体核验结果（missing/mismatch/unresolved/digest_conflict 等），不只给路径。
+            preview = "、".join(f"{path}（{outcomes[path]}）" if path in outcomes else path
+                               for path in delivery["missing"][:5])
             final_response = fast_replace(
                 final_response, text=f"声明的交付文件未通过落盘核验（{len(delivery['missing'])} 项）。\n{preview}",
                 runtime_status="unfinished", runtime_reason="DECLARED_DELIVERABLE_MISSING",

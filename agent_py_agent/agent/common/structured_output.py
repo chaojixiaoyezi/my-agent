@@ -109,6 +109,24 @@ def json_objects_from_text(text: object) -> list[dict[str, Any]]:
     return objects
 
 
+# LLM: 只定位正文里第一个可完整解码的 JSON 对象位置，供“说明+对象”这类外层框架判定；字符串值里的
+# 代码围栏、花括号都在解码器内部消化，不会被当成外层标记。不做 schema 判断，也不授予解析结果任何协议效力。
+# 函数用途: 返回第一个完整 JSON 对象在正文中的 [start, end) 区间，没有时返回 None。
+def first_json_object_span(text: object) -> tuple[int, int] | None:
+    source = str(text or "")
+    decoder = json.JSONDecoder()
+    index = source.find("{")
+    while index >= 0:
+        try:
+            # 从 "{" 起解码成功必然是对象。
+            _payload, end = decoder.raw_decode(source, index)
+        except (json.JSONDecodeError, RecursionError):
+            index = source.find("{", index + 1)
+            continue
+        return index, end
+    return None
+
+
 def collect_structured_batches(request: StructuredBatchRequest[_Row, _Value]) -> StructuredBatchReport:
     """Generate structured values without allowing one truncation to erase a batch.
 
@@ -266,6 +284,7 @@ __all__ = [
     "StructuredBatchReport",
     "StructuredBatchRequest",
     "collect_structured_batches",
+    "first_json_object_span",
     "json_objects_from_text",
     "json_value_from_complete_response",
     "parse_structured_envelope",

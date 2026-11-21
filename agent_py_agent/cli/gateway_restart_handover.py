@@ -44,6 +44,7 @@ from ..agent.gateway_parts.restart_service import (
     restart_budget_options,
     restart_completed_path,
     restart_receipt,
+    restart_request_admitted,
     restart_startup_snapshot,
     run_restart_drain,
     submit_restart_request,
@@ -55,6 +56,8 @@ from .models import GatewayRunContext
 
 # 重启交接等待前任进程退出最多 60 秒，超时按异常处理
 PREDECESSOR_EXIT_WAIT_SECONDS = 60.0
+# 旧进程退出（或新进程号出现）后等待接班就绪的独立时限 120 秒，与排空预算分开计时。
+_STARTUP_WAIT_SECONDS = 120.0
 # 内部多进程滚动重启尚未实现，拒绝后保留当前服务。
 MULTIPROCESS_RESTART_ERROR_CODE = "GATEWAY_MULTIPROCESS_RESTART_UNSUPPORTED"
 
@@ -461,24 +464,49 @@ def safe_restart_from_cli(agent, paths) -> int | None:
         cooldown_seconds=float(getattr(config, "gateway_restart_cooldown_seconds", 30) or 0),
         config=config,
     )
+    if result.get("status") == "conflict":
+        _report_conflict(result)
+        return 2
     if result.get("status") in {"cooldown", "loop_guard"}:
         retry = result.get("retry_after_seconds")
         hint = f"刚完成过一次安全重启，请 {retry} 秒后再试" if retry is not None else "短时间内重启次数过多"
         print(f"{hint}；确需立即重启可加 --force 先停后起。", file=sys.stderr)
         return 2
+    if not restart_request_admitted(result):
+        print(f"重启请求未被受理（status={result.get('status')!r}），未等待任何请求。", file=sys.stderr)
+        return 2
     request_id = str((result.get("request") or {}).get("request_id") or "")
     receipt = result.get("restart_receipt") or restart_receipt(**restart_budget_options(config))
     print(f"已安排安全重启 request_id={request_id}。{render_restart_receipt(receipt)}", flush=True)
+    return _wait_for_cli_restart(paths, pid, request_id, _drain_wait_budget(receipt))
+
+
+# LLM: 等待策略只从本次请求的有效回执推导：排空模式 drain_seconds=0 是“不限时排空”，返回 None，
+# 终端不能自行换成固定时限；有限预算与快速模式沿原“回合等待+排空+接班”合计。
+# 函数用途: 计算终端等待排空阶段的总预算秒数，不限时返回 None。
+def _drain_wait_budget(receipt: dict) -> float | None:
     budgets = receipt["budgets"]
-    budget = budgets["turn_wait_seconds"] + (budgets["drain_seconds"] or 3600) + 120.0
-    return _wait_for_cli_restart(paths, pid, request_id, budget)
+    if receipt.get("mode") != "fast" and not budgets["drain_seconds"]:
+        return None
+    return budgets["turn_wait_seconds"] + budgets["drain_seconds"] + _STARTUP_WAIT_SECONDS
+
+
+# LLM: 冲突是写入前拒绝：在位请求原样保留，本次未登记发起方，也不等待在位请求的编号。
+# 函数用途: 告诉终端用户哪个操作在位、本次未产生副作用以及下一步。
+def _report_conflict(result: dict) -> None:
+    print(f"已有 {result.get('incumbent_operation')} 请求（{result.get('incumbent_request_id')}）在排队，"
+          f"本次未登记（{result.get('error_code')}，{result.get('side_effect_state')}）。{result.get('next_step')}",
+          file=sys.stderr)
 
 
 # LLM: 新PID只是候选；出生身份由宿主取得，ready必须同时匹配原代次和本次request_id。
+# budget=None 时排空阶段不限时，仍观察取消/收尾失败；旧进程退出或新 PID 出现后进入独立的 120 秒接班就绪时限。
 # 函数用途: 复用控制入口同一就绪判据等待接班，取消/失败/缺引用均返回明确失败。
-def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -> int:
-    deadline = time.monotonic() + budget
-    while time.monotonic() < deadline:
+def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float | None) -> int:
+    deadline = None if budget is None else time.monotonic() + budget
+    startup_deadline = None
+    while ((deadline is None or time.monotonic() < deadline)
+           and (startup_deadline is None or time.monotonic() < startup_deadline)):
         state = read_json_file(paths.state)
         drain = state.get("restart_drain") if isinstance(state.get("restart_drain"), dict) else {}
         if drain.get("request_id") == request_id and drain.get("phase") in {"cancelled", "cleanup_failed"}:
@@ -510,6 +538,10 @@ def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -
             if observation.state == "failed" or (state.get("pid") == new_pid and not state.get("restart_request_id")):
                 print("安全重启接班未通过同代就绪检查或缺少重启请求引用。", file=sys.stderr)
                 return 2
+        # 有限预算沿原合计时限；仅不限时排空需要在交接开始后另起接班时限。
+        if deadline is None and startup_deadline is None and ((new_pid and new_pid != old_pid)
+                                                              or not is_pid_alive(old_pid)):
+            startup_deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
         time.sleep(0.5)
     print("等待安全重启超时：Gateway 可能仍在排空，可用 my-agent gateway status 查看。", file=sys.stderr)
     return 2
@@ -533,14 +565,19 @@ def safe_stop_for_update(agent,paths,pid):
     original_identity = build_process_identity(pid)
     result=submit_restart_request(paths,target_pid=pid,requester={'kind':'cli'},reason='离线更新排空',
         cooldown_seconds=0,operation='stop_for_update',config=agent.config)
-    if result.get('status') not in {'scheduled','coalesced'}:
+    if result.get('status') == 'conflict':
+        _report_conflict(result)
+        return 2
+    if not restart_request_admitted(result):
         print('当前有其它重启/排空请求，请等待完成后更新。',file=sys.stderr)
         return 2
     request_id=result['request']['request_id']
-    budget=float(agent.config.gateway_restart_turn_wait_seconds)+float(agent.config.gateway_restart_drain_timeout_seconds or 3600)+120
-    deadline=time.monotonic()+budget
-    print('更新正在等待原回合和工具排空。' + render_restart_receipt(result.get("restart_receipt")), flush=True)
-    while time.monotonic()<deadline:
+    receipt = result.get("restart_receipt") or restart_receipt(operation='stop_for_update', **restart_budget_options(agent.config))
+    budget = _drain_wait_budget(receipt)
+    deadline = None if budget is None else time.monotonic() + budget
+    print('更新正在等待原回合和工具排空。' + render_restart_receipt(receipt), flush=True)
+    # 不限时排空只在原进程存活期间等待；进程退出、取消或收尾失败都会立即给出终局。
+    while deadline is None or time.monotonic() < deadline:
         state=read_json_file(paths.state)
         phase=state.get('restart_drain') or {}
         if phase.get('request_id')==request_id and phase.get('phase') in {'cancelled', 'cleanup_failed'}:
