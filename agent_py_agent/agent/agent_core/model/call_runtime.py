@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from weakref import ref
 
+from ...backends.errors import ProviderConfigurationError, ProviderModelCapabilityError
 from ...backends.request_budget import RequestTokenBudget, resolve_request_token_budget
 from ...contracts.model_call_ledger import (
     ModelCallActivityParams,
@@ -675,7 +678,58 @@ def request_budget_shared_window(agent: object) -> bool:
 # LLM: 只认现有订阅认证事实，与 Responses 去除 max_output_tokens 的线协议一致。
 # 函数用途: 标记服务端管理输出的调用，避免把本地预留宣称成线上封顶。
 def request_output_server_managed(agent: object) -> bool:
-    return (getattr(getattr(agent, "backend", None), "auth_ref", None) or {}).get("mode") == "chatgpt"
+    return _backend_output_server_managed(getattr(agent, "backend", None))
+
+
+def _backend_output_server_managed(backend: object) -> bool:
+    return (getattr(backend, "auth_ref", None) or {}).get("mode") == "chatgpt"
+
+
+class WorkflowProviderLimitUnavailable(ProviderConfigurationError):
+    error_code = ProviderModelCapabilityError.error_code
+    effect_outcome = "not_started"
+
+    def __init__(self, reason: str, token_limit: int | None):
+        self.reason = reason
+        self.details = {"effect_outcome": self.effect_outcome, "token_budget": token_limit,
+                        "reason": reason, "next_action": "select_a_provider_with_workflow_request_limits",
+                        "retry_same_configuration": False}
+        super().__init__(f"{self.error_code}: {reason}. This model request was not sent. "
+                         "Select a provider route that enforces the workflow request limits before retrying.")
+
+
+def workflow_provider_remaining(params: object) -> float | None:
+    boundary = getattr(params, "write_boundary", None)
+    if not isinstance(boundary, Mapping):
+        return None
+    deadline = boundary.get("deadline_at")
+    if (boundary.get("effect_policy") != "read_only" or type(deadline) not in (int, float)
+            or not math.isfinite(deadline)):
+        return None
+    from ...backends.request_scope import provider_request_timeout
+
+    try:
+        return max(0.0, min(deadline - time.time(), provider_request_timeout(float("inf"))))
+    except TimeoutError:
+        return 0.0
+
+
+def validate_workflow_provider(backend: object, params: object) -> int | None:
+    limit = _read_only_output_limit(params)
+    supports_options = getattr(backend, "supports_provider_request_options", False)
+    if limit is not None and (_backend_output_server_managed(backend) or not supports_options):
+        raise WorkflowProviderLimitUnavailable("workflow_output_limit_unavailable", limit)
+    if not supports_options:
+        raise WorkflowProviderLimitUnavailable("workflow_deadline_unavailable", None)
+    return limit
+
+
+def _read_only_output_limit(params: object) -> int | None:
+    boundary = getattr(params, "write_boundary", None)
+    if not isinstance(boundary, Mapping):
+        return None
+    limit = boundary.get("token_budget")
+    return limit if boundary.get("effect_policy") == "read_only" and type(limit) is int and limit > 0 else None
 
 
 # LLM: 当前配置可进一步收紧构造时天花板；缺失/无效字段不覆盖后端事实，不修改后端或按模型名推断。
@@ -693,14 +747,14 @@ def configured_output_ceiling(agent: object) -> int:
 
 # LLM: 输入由调用方按出站表面校准；未知或输入型元数据继续用旧上限，不新增元数据请求。
 # 函数用途: 为一次主请求冻结预算，重复调用可用于新投影但不能保存到共享后端。
-def model_request_token_budget(agent: object, *, input_tokens: int) -> RequestTokenBudget:
+def model_request_token_budget(agent: object, *, input_tokens: int, params: object = None) -> RequestTokenBudget:
     shared = request_budget_shared_window(agent)
     window = _request_budget_configured_window(agent)
     ceiling = configured_output_ceiling(agent) if shared else max_output_tokens(agent)
-    params = getattr(agent, "_current_run_params", None)
-    boundary = getattr(params, "write_boundary", None) or {}
-    limit = boundary.get("token_budget")
-    if boundary.get("effect_policy") == "read_only" and type(limit) is int and limit > 0:
+    if params is None:
+        params = getattr(agent, "_current_run_params", None)
+    limit = _read_only_output_limit(params)
+    if limit is not None:
         ceiling = min(ceiling, limit) if ceiling > 0 else limit
     return resolve_request_token_budget(input_tokens=input_tokens, context_window_tokens=window,
         output_ceiling=ceiling, shared_window=shared,

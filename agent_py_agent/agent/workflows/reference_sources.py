@@ -19,6 +19,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from functools import lru_cache
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,9 @@ from ..assets.workflow_store import (
     WorkflowStore,
     normalize_workflow_asset_id,
 )
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath, read_text_beneath
+from ..conversation.business_spaces import BusinessSpaceService
 from .business_scope import (
     WorkflowPolicyRefusal,
     WorkflowScopeService,
@@ -114,7 +117,10 @@ def _space_reference_row(space_id, space):
 
 
 def _binding_reference_row(binding):
-    if not isinstance(binding, dict):
+    if (not isinstance(binding, dict) or binding.get("state") not in ("bound", "unbound")
+            or not isinstance(binding.get("space_ids"), list)
+            or any(not isinstance(sid, str) or not sid for sid in binding["space_ids"])
+            or any(key in binding and not isinstance(binding[key], str) for key in ("asset_id", "ref"))):
         return None
     return {"unbound": binding.get("state") == "unbound", "asset_id": binding.get("asset_id", ""),
             "ref": binding.get("ref", ""), "space_ids": binding.get("space_ids", [])}
@@ -124,6 +130,54 @@ def _subscription_reference_row(identifier, row):
     if not isinstance(row, dict):
         return {"id": identifier, "parsed": False}
     return {"id": identifier, "parsed": True, "state": row.get("state"), "policy_ref": row.get("policy_ref")}
+
+
+def _reference_generation(snapshot):
+    return hashlib.sha256(json.dumps(
+        ["reference_projection.v1", snapshot], ensure_ascii=True, default=_space_record,
+    ).encode()).hexdigest()
+
+
+def _business_projection(catalog):
+    if not isinstance(catalog, dict):
+        raise ValueError("business reference catalog is invalid")
+    spaces, bindings, subscriptions = (catalog.get(name, {}) for name in ("spaces", "bindings", "subscriptions"))
+    if any(not isinstance(collection, dict) for collection in (spaces, bindings, subscriptions)):
+        raise ValueError("business reference collection is invalid")
+    space_rows = [_space_reference_row(key, spaces[key]) for key in sorted(spaces, key=str)]
+    binding_rows = [_binding_reference_row(bindings[key]) for key in sorted(bindings, key=str)]
+    subscription_rows = [_subscription_reference_row(key, subscriptions[key]) for key in sorted(subscriptions, key=str)]
+    return space_rows, binding_rows, subscription_rows
+
+
+def _prepare_owner_business_projection(service, identity):
+    catalog = service._read(allow_legacy_references=True)
+    if identity == (None, None):
+        raw = read_bytes_beneath(service.owner_root, ("business", "catalog.json"))
+        if raw is not None:
+            catalog = json.loads(raw)
+    rows = _business_projection(catalog)
+    states = {row["id"]: row["binding_state"] for row in rows[0]}
+    if service.reference_source_identity() != identity:
+        raise BlockingIOError("business reference source changed during projection")
+    return rows, states, _reference_generation(rows)
+
+
+@lru_cache
+def _cached_owner_business_projection(owner_home, owner_id, identity):
+    # Retain reference fields only, with the source identity as the cache key.
+    return _prepare_owner_business_projection(BusinessSpaceService(owner_home, owner_id=owner_id), identity)
+
+
+def _owner_business_projection(service):
+    identity = service.reference_source_identity()
+    if any(item is not None for item in identity) and all(
+            item is None or (item[2] is not None and cache_entry_trustworthy(item[0][3])) for item in identity):
+        result = _cached_owner_business_projection(service.owner_root, service.owner_id, identity)
+        if service.reference_source_identity() != identity:
+            raise BlockingIOError("business reference source changed before paging")
+        return result
+    return _prepare_owner_business_projection(service, identity)
 
 
 def _coverage_blocker(blockers, target, reason):
@@ -285,9 +339,11 @@ class WorkflowReferenceReader:
         space_store: Any = None,
         scheduler_repo: Any = None,
         session_task_store: Any = None,
+        owner_id: str | None = None,
     ) -> None:
         self.host = host_or_owner_home if not isinstance(host_or_owner_home, (str, Path)) else None
         self.owner_home = _extract_owner_home(host_or_owner_home)
+        self.owner_id = owner_id or getattr(getattr(self.host, "home_paths", None), "owner_id", None) or "local/main"
 
         # 1. WorkflowStore
         self.workflow_store = workflow_store
@@ -417,7 +473,7 @@ class WorkflowReferenceReader:
             result["coverage_generation"] = generations
         return result
 
-    def _source_page(self, source, target_id, snapshot, size, blockers, generations, scan):
+    def _source_page(self, source, target_id, snapshot, size, blockers, generations, scan, *, generation=None):
         """跨调用续扫同一份按身份排序的引用语义投影；成员、可解析性、删除态或有效目标变化才使旧覆盖与阻断项失效。"""
         if size <= _max_blockers_page:
             return scan(0, _max_blockers_page, blockers)
@@ -425,9 +481,7 @@ class WorkflowReferenceReader:
             scan(0, _max_blockers_page, blockers)
             return False
 
-        generation = hashlib.sha256(json.dumps(
-            ["reference_projection.v1", snapshot], ensure_ascii=True, default=_space_record,
-        ).encode()).hexdigest()
+        generation = generation or _reference_generation(snapshot)
         generations[source] = generation
         index = RunListIndex(self.owner_home)
         source_id = f"{source}:{target_id}"
@@ -568,9 +622,15 @@ class WorkflowReferenceReader:
             return False
 
     def _check_spaces(self, target_id: str, blockers: list[dict[str, str]], generations) -> bool:
-        catalog = None
         try:
-            if self.space_store is not None:
+            generation = None
+            if type(self.space_store) is BusinessSpaceService:
+                snapshot, states, generation = _owner_business_projection(self.space_store)
+            elif self.space_store is None and self.owner_home is not None:
+                service = BusinessSpaceService(self.owner_home, owner_id=self.owner_id)
+                snapshot, states, generation = _owner_business_projection(service)
+            elif self.space_store is not None:
+                catalog = None
                 if hasattr(self.space_store, "_read"):
                     catalog = self.space_store._read()
                 elif isinstance(self.space_store, dict):
@@ -580,53 +640,31 @@ class WorkflowReferenceReader:
                 elif hasattr(self.space_store, "list_spaces"):
                     spaces_list = self.space_store.list_spaces()
                     catalog = {"spaces": {getattr(s, "space_id", str(s)): s for s in spaces_list}}
-            elif self.owner_home is not None:
-                for parts in (("data", "business", "catalog.json"), ("business", "catalog.json")):
-                    cat_file = self.owner_home.joinpath(*parts)
-                    if cat_file.exists():
-                        raw = read_bytes_beneath(self.owner_home, parts, max_bytes=8 * 1024 * 1024)
-                        catalog = json.loads(raw)
-                        break
-
-            if catalog is None:
+                if catalog is None:
+                    return True
+                snapshot = _business_projection(catalog)
+                states = {row["id"]: row["binding_state"] for row in snapshot[0]}
+            else:
                 return True
 
-            if not isinstance(catalog, dict):
-                return False
-
-            spaces = catalog.get("spaces", {})
-            if not isinstance(spaces, dict):
-                return False
-
-            bindings = catalog.get("bindings", {})
-            subscriptions = catalog.get('subscriptions', {})
-            if not isinstance(subscriptions, dict):
-                return False
-            # 三类记录各按稳定键排序，只保留引用语义字段；其它字段的写入不改变覆盖代次。
-            space_rows = [_space_reference_row(key, spaces[key]) for key in sorted(spaces, key=str)]
-            binding_rows = ([_binding_reference_row(bindings[key]) for key in sorted(bindings, key=str)]
-                            if isinstance(bindings, dict) else [])
-            subscription_rows = [_subscription_reference_row(key, subscriptions[key])
-                                 for key in sorted(subscriptions, key=str)]
-            snapshot = (space_rows, binding_rows, subscription_rows)
-
             def scan(start, end, found):
-                return self._space_page(snapshot, target_id, found, start, end)
+                return self._space_page(snapshot, states, target_id, found, start, end)
 
             return self._source_page('business', target_id, snapshot, max(map(len, snapshot)),
-                                     blockers, generations, scan)
+                                     blockers, generations, scan, generation=generation)
         except (OSError, ValueError, KeyError):
             return False
         except Exception:
             return False
 
     @staticmethod
-    def _space_page(snapshot, target_id, blockers, start, end):
+    def _space_page(snapshot, space_states, target_id, blockers, start, end):
         space_rows, binding_rows, subscription_rows = snapshot
         complete = True
         for space in space_rows[start:end]:
             space_id = space["id"]
             if not space["parsed"]:
+                complete = False
                 continue
             if space["state"] in ("archived", "deleted"):
                 continue
@@ -661,9 +699,11 @@ class WorkflowReferenceReader:
 
         # bindings
         if binding_rows:
-            space_states = {row["id"]: row["binding_state"] for row in space_rows}
             for binding in binding_rows[start:end]:
-                if binding is None or binding["unbound"]:
+                if binding is None:
+                    complete = False
+                    continue
+                if binding["unbound"]:
                     continue
                 b_asset = normalize_workflow_asset_id(binding["asset_id"])
                 b_ref = normalize_workflow_asset_id(binding["ref"])
@@ -970,6 +1010,7 @@ def build_workflow_reference_reader(
     space_store: Any = None,
     scheduler_repo: Any = None,
     session_task_store: Any = None,
+    owner_id: str | None = None,
 ) -> Callable[[str], dict[str, Any]]:
     """Factory creating authoritative WorkflowReferenceReader callable."""
     return WorkflowReferenceReader(
@@ -979,6 +1020,7 @@ def build_workflow_reference_reader(
         space_store=space_store,
         scheduler_repo=scheduler_repo,
         session_task_store=session_task_store,
+        owner_id=owner_id,
     )
 
 
@@ -1002,7 +1044,7 @@ class WorkflowManagementService(WorkflowScopeService):
         engine_factory: Any = None,
     ) -> None:
         if reference_reader is None:
-            reference_reader = build_workflow_reference_reader(owner_home)
+            reference_reader = build_workflow_reference_reader(owner_home, owner_id=owner_id)
         if authorize is None:
             def _default_authorize(actor: Any, action: str, ref: str) -> bool:
                 return True

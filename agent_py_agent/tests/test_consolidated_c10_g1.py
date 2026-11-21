@@ -2547,9 +2547,11 @@ def test_tool_reply_repair_uses_calibrated_same_prefix(monkeypatch):
     source = CompactMessageSource(lambda: iter(request.messages), preserve_prefix=True)
     result = budget.generate_bounded_compact_response(replace(request, messages=None), message_source=source, calibration=_calibration())
     assert result.text == '事实' and len(calls) == 2
+    assert anthropic_tool_choice(calls[0].tool_choice or ToolChoice.auto()) == anthropic_tool_choice(
+        request.tool_choice or ToolChoice.auto())
+    assert anthropic_tool_choice(calls[1].tool_choice) == {'type': 'none'}
     for candidate in calls:
         assert candidate.tools == request.tools
-        assert anthropic_tool_choice(candidate.tool_choice or ToolChoice.auto()) == anthropic_tool_choice(request.tool_choice or ToolChoice.auto())
         assert candidate.messages == request.messages and candidate.system_instruction == request.system_instruction
 
 

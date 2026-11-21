@@ -152,7 +152,12 @@ class _BackgroundRunControl(LocalRunControl):
 # LLM: bind_background_run_params只组合原live来源；无scope同对象，control保resolved原回调；actual未结不释放预留。
 # 函数用途: 原样返回任意业务结果，并在关闭发布门后捕获本次control身份；未发布不回退输入身份。
 def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
+    from ..agent_core.model.call_runtime import (
+        WorkflowProviderLimitUnavailable,
+        workflow_provider_remaining,
+    )
     from ..agent_core.runtime.run_params import run_params_with_request_id
+    from ..backends.errors import ProviderTimeoutError
     from ..gateway_parts.multiprocess_background_execution import bind_background_run_params
 
     params, profile = _apply_session_task_profile(agent, params)
@@ -166,8 +171,15 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
             RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
         raise
-    except Exception:
+    except Exception as exc:
         _release_failed_attempt_inputs(agent, resolved.request_id, control.runtime_authority())
+        if profile is not None:
+            if isinstance(exc, WorkflowProviderLimitUnavailable):
+                _settle_profile_provider_failure(agent, params, exc.error_code, str(exc))
+            elif (isinstance(exc, ProviderTimeoutError) and exc.stage == "wall_clock"
+                  and workflow_provider_remaining(resolved) == 0):
+                _settle_profile_provider_failure(agent, params, "TOOL_TIMEOUT",
+                                                 "The read-only workflow deadline expired during model execution.")
         raise
     finally:
         control.finish()
@@ -178,6 +190,27 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     return result, replace(params, request_id=resolved.request_id,
         run_id=binding.get("run_id", ""), task_id=binding.get("task_id", ""),
         attempt_id=binding.get("attempt_id", ""))
+
+
+def _settle_profile_provider_failure(agent, params, code, summary):
+    from .authority import CONVERSATION_SESSION_TASK_ID_ATTR
+    from .session_tasks import (
+        SESSION_TASK_FAILED,
+        SESSION_TASK_TERMINAL_STATUSES,
+        SessionTaskUpdate,
+    )
+
+    task_id = (params.task_attributes or {}).get(CONVERSATION_SESSION_TASK_ID_ATTR) or params.task_id
+    tasks = agent.conversation_store.session_tasks
+    current = tasks.load(task_id)
+    if current is None or current.status in SESSION_TASK_TERMINAL_STATUSES:
+        return
+    try:
+        tasks.advance(task_id, SessionTaskUpdate(status=SESSION_TASK_FAILED, failure_code=code, summary=summary))
+    except ValueError:
+        current = tasks.load(task_id)
+        if current is None or current.status not in SESSION_TASK_TERMINAL_STATUSES:
+            raise
 
 
 def _apply_session_task_profile(agent, params):

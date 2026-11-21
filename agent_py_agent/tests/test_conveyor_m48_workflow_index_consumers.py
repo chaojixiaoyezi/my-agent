@@ -1,5 +1,7 @@
 import json
+import os
 import sqlite3
+import time
 from contextlib import closing, contextmanager
 from dataclasses import fields
 from pathlib import Path
@@ -7,11 +9,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.conversation.business_spaces import BusinessSpaceService
 from agent_py_agent.agent.gateway_parts import background_resource_report as report
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.parameter_registry import parameter_registry
+from agent_py_agent.agent.workflows.business_scope import WorkflowPolicyRefusal
 from agent_py_agent.agent.workflows.models import WorkflowRunRecord
-from agent_py_agent.agent.workflows.reference_sources import WorkflowReferenceReader
+from agent_py_agent.agent.workflows.reference_sources import (
+    WorkflowManagementService,
+    WorkflowReferenceReader,
+)
 from agent_py_agent.agent.workflows.run_list_index import RunListIndex
 from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
 
@@ -210,6 +217,116 @@ def test_business_runtime_fields_do_not_reset_but_bindings_do(tmp_path):
     final = read()
     assert final['coverage'] == 'complete'
     assert 'space-001' in {item['ref'] for item in final['blockers']}
+
+
+def _owner_catalog(tmp_path, *, count=2):
+    owner_id = 'local/main'
+    spaces = {f'space-{number:03}': {
+        'owner_id': owner_id, 'space_id': f'space-{number:03}', 'name': f'Space {number}',
+        'purpose': '', 'revision': 0, 'state': 'active', 'mounts': [], 'default_project_ref': None,
+    } for number in range(count)}
+    catalog = {'schema_version': 'business-catalog.v1', 'owner_id': owner_id, 'revision': 1,
+               'spaces': spaces, 'bindings': {}, 'assets': {}, 'receipts': {}}
+    path = tmp_path / 'data' / 'business' / 'catalog.json'
+    path.parent.mkdir(parents=True)
+    return path, catalog
+
+
+def _workflow_for_recycle(api, name, *, actor):
+    api.execute('workflows.create', {'definition': {'descriptor': {
+        'id': name, 'kind': 'workflow', 'name': name, 'access_targets': [], 'data_sources': [],
+        'credential_refs': [], 'io_contract': {}}, 'steps': []},
+        'scope': {'scope_mode': 'unassigned', 'space_ids': []}},
+        actor=actor, idempotency_key=f'create-{name}')
+
+
+def _recycle(api, name, *, actor):
+    return api.execute('workflows.recycle', {'workflow_ref': name}, actor=actor,
+                       expected_revision=api.store.get_workflow(name).descriptor.revision,
+                       idempotency_key=f'recycle-{name}')
+
+
+def test_large_owner_catalog_advances_to_late_reference(tmp_path, monkeypatch):
+    path, catalog = _owner_catalog(tmp_path, count=105)
+    catalog['spaces']['space-104']['mounts'] = [{
+        'package_ref': 'workflow:flow', 'enabled': True, 'position': 0, 'version_ref': None,
+        'availability': {'ref': 'workflow:flow', 'state': 'available',
+                         'reason_code': '', 'required_capabilities': []},
+    }]
+    catalog['receipts'] = {f'{number:064x}': {'fingerprint': f'{number:064x}', 'result': {'summary': 'x' * 8192}}
+                           for number in range(1100)}
+    path.write_text(json.dumps(catalog), encoding='utf-8')
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    assert path.stat().st_size > 8 * 1024 * 1024
+    reads = []
+    snapshot = BusinessSpaceService._read_snapshot
+
+    def count_snapshot(service, *, allow_missing=False, allow_legacy_references=False):
+        reads.append(service.state_path)
+        return snapshot(service, allow_missing=allow_missing, allow_legacy_references=allow_legacy_references)
+
+    monkeypatch.setattr(BusinessSpaceService, '_read_snapshot', count_snapshot)
+    first = WorkflowReferenceReader(tmp_path)('flow')
+    second = WorkflowReferenceReader(tmp_path)('flow')
+    assert first['coverage'] == 'unknown' and second['coverage'] == 'complete'
+    assert first['coverage_generation'] == second['coverage_generation']
+    assert {'ref': 'space-104', 'kind': 'space', 'reason_code': 'REFERENCED_BY_SPACE'} in second['blockers']
+    generation, cursor = RunListIndex(tmp_path).reference_cursor('business:flow')
+    assert generation == second['coverage_generation']['business']
+    assert json.loads(cursor)['offset'] == 105
+    actor = SimpleNamespace(owner_id='local/main')
+    api = WorkflowManagementService(tmp_path)
+    _workflow_for_recycle(api, 'flow', actor=actor)
+    _workflow_for_recycle(api, 'unused', actor=actor)
+    with pytest.raises(WorkflowPolicyRefusal) as blocked:
+        _recycle(api, 'flow', actor=actor)
+    assert blocked.value.code == 'WORKFLOW_CLEANUP_BLOCKED'
+    assert api.reference_reader('unused')['coverage'] == 'unknown'
+    assert _recycle(api, 'unused', actor=actor)['lifecycle'] == 'recycled'
+    assert reads == [path]
+
+
+@pytest.mark.parametrize('bindings', [[], {'invalid': None}])
+def test_malformed_owner_bindings_cannot_prove_absence(tmp_path, bindings):
+    path, catalog = _owner_catalog(tmp_path)
+    path.write_text(json.dumps({**catalog, 'bindings': bindings}), encoding='utf-8')
+    result = WorkflowReferenceReader(tmp_path)('flow')
+    assert result['coverage'] == 'unknown'
+    assert 'BUSINESS_REFERENCE_SOURCE_INCOMPLETE' in {item['reason_code'] for item in result['blockers']}
+    actor = SimpleNamespace(owner_id='local/main')
+    api = WorkflowManagementService(tmp_path)
+    _workflow_for_recycle(api, 'flow', actor=actor)
+    with pytest.raises(WorkflowPolicyRefusal) as refused:
+        _recycle(api, 'flow', actor=actor)
+    assert refused.value.code == 'REFERENCE_COVERAGE_UNKNOWN'
+
+
+def test_committed_business_journal_invalidates_completed_reference_page(tmp_path):
+    path, catalog = _owner_catalog(tmp_path, count=105)
+    path.write_text(json.dumps(catalog), encoding='utf-8')
+    assert WorkflowReferenceReader(tmp_path)('flow')['coverage'] == 'unknown'
+    completed = WorkflowReferenceReader(tmp_path)('flow')
+    assert completed['coverage'] == 'complete' and completed['blockers'] == []
+
+    catalog['revision'] += 1
+    catalog['receipt_rows'] = True
+    catalog['spaces']['space-104']['mounts'] = [{
+        'package_ref': 'workflow:flow', 'enabled': True, 'position': 0, 'version_ref': None,
+        'availability': {'ref': 'workflow:flow', 'state': 'available',
+                         'reason_code': '', 'required_capabilities': []},
+    }]
+    journal = path.with_name('.catalog-transaction.json')
+    journal.write_text(json.dumps({'schema': 'business-catalog-transaction.v1', 'owner_id': 'local/main',
+        'state': catalog, 'key': 'a' * 64, 'receipt': {'fingerprint': 'b' * 64, 'result': {}}}), encoding='utf-8')
+    expected_catalog = path.read_bytes()
+    pending = WorkflowReferenceReader(tmp_path)('flow')
+    assert pending['coverage'] == 'unknown'
+    assert pending['coverage_generation']['business'] != completed['coverage_generation']['business']
+    result = WorkflowReferenceReader(tmp_path)('flow')
+    assert result['coverage'] == 'complete'
+    assert [row['ref'] for row in result['blockers']] == ['space-104']
+    assert path.read_bytes() == expected_catalog and journal.is_file()
 
 
 def test_gateway_settled_sweeps_forward_the_loaded_config(tmp_path, monkeypatch):

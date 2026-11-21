@@ -48,6 +48,8 @@ from .model.call_runtime import (
     record_model_call_timeout,
     record_model_provider_attempt,
     start_model_call_record,
+    validate_workflow_provider,
+    workflow_provider_remaining,
 )
 from .model.call_runtime import (
     effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
@@ -352,7 +354,7 @@ def _freeze_model_request_budget(request: ModelGenerateParams) -> ModelGenerateP
         return request
     binding = capture_context_usage_binding(request.agent, request.params)
     snapshot = model_visible_context_snapshot(request.agent, request.params, request.prompt, usage_binding=binding)
-    budget = (model_request_token_budget(request.agent, input_tokens=snapshot.current_tokens)
+    budget = (model_request_token_budget(request.agent, input_tokens=snapshot.current_tokens, params=request.params)
               if max_output_tokens(request.agent) > 0 else None)
     return replace(request, token_budget=budget, context_snapshot=snapshot, budget_input_identity=identity)
 
@@ -681,7 +683,7 @@ def _retry_once_after_timeout(
     # first_event/stream_idle 属于 response-stream reconnect：交给外层统一的
     # 会话运行时 退避链，确保有 1/5...5/5 可见进度，也避免这里先静默多打一枪
     # 造成总尝试数多于配置。外层仍会用同一 typed guidance guard 拒绝歧义重放。
-    if exc.stage in {"first_event", "stream_idle"}:
+    if exc.stage in {"first_event", "stream_idle"} or workflow_provider_remaining(request.params) == 0:
         return None
     if active_turn_input_has_unconfirmed_delivery(
         getattr(request.params, "live_archive_state", None)
@@ -1635,9 +1637,12 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
         cache_diagnostics=True,
         previous_message_count=previous_message_count,
     ):
-        with global_llm_admission_slot(), owner_model_activity_scope(state.agent):
+        profile_wait, _ = _workflow_request_limits(backend, state.params)
+        admission_options = {"wait_timeout": profile_wait} if profile_wait is not None else {}
+        with global_llm_admission_slot(**admission_options), owner_model_activity_scope(state.agent):
             llm_inflight(1)
             try:
+                _workflow_request_limits(backend, state.params)
                 _register_call_before_send(backend, prompt, state)
                 response = _do_backend_generate(backend, prompt, state)
             except ModelCallAbandonedError:
@@ -1827,7 +1832,16 @@ def _publish_tool_input_progress(
 #   强制工具选择；其余情况按本轮智能程度（request_reasoning_options，与自动选模投影同一函数）决定关思考或档位。
 #   后端未声明支持 typed options 或没有任何控制项时返回 None，保持旧调用形态。
 # 函数用途: 组装一次模型请求的 typed 选项（system 指令、思考开关、档位、首包预算）。
+def _workflow_request_limits(backend, params):
+    remaining = workflow_provider_remaining(params)
+    if remaining == 0:
+        raise ProviderTimeoutError("The read-only workflow deadline expired before send.", stage="wall_clock")
+    limit = validate_workflow_provider(backend, params) if remaining is not None else None
+    return remaining, limit
+
+
 def _provider_request_options(backend, state: _ModelGenerationState, *, forced: bool) -> ProviderRequestOptions | None:
+    remaining, output_limit = _workflow_request_limits(backend, getattr(state, "params", None))
     if not bool(getattr(backend, "supports_provider_request_options", False)):
         return None
     from ..settings.reasoning_effort import request_reasoning_options
@@ -1841,15 +1855,20 @@ def _provider_request_options(backend, state: _ModelGenerationState, *, forced: 
     thinking_disabled, effort = request_reasoning_options(
         getattr(state, "agent", None), getattr(state, "params", None), backend, forced=forced,
     )
+    token_budget = getattr(state, "token_budget", None)
+    if output_limit is not None and token_budget is not None and token_budget.output_tokens > output_limit:
+        token_budget = replace(token_budget, output_tokens=output_limit)
     if not (system_instruction or thinking_disabled or effort or first_event_timeout is not None
-            or getattr(state, "token_budget", None) is not None):
+            or token_budget is not None or remaining is not None):
         return None
     return ProviderRequestOptions(
         system_instruction=system_instruction,
         thinking_disabled=thinking_disabled,
         first_event_timeout_seconds=first_event_timeout,
         reasoning_effort=effort,
-        token_budget=getattr(state, "token_budget", None),
+        token_budget=token_budget,
+        max_output_tokens=output_limit if token_budget is None else None,
+        total_deadline_seconds=remaining,
     )
 
 
@@ -1918,9 +1937,16 @@ def _generate_and_remember(backend, prompt: str, state: _ModelGenerationState, k
         liveness.bind_display_waiter(waiter)
     try:
         result = backend.generate(prompt, **kwargs)
+    except ProviderTimeoutError as exc:
+        if exc.stage != "wall_clock" and workflow_provider_remaining(getattr(state, "params", None)) == 0:
+            raise ProviderTimeoutError("The read-only workflow deadline expired during model execution.",
+                                       stage="wall_clock") from exc
+        raise
     finally:
         if waiter is not None:
             waiter.close()
+    if workflow_provider_remaining(getattr(state, "params", None)) == 0:
+        raise ProviderTimeoutError("The read-only workflow deadline expired during model execution.", stage="wall_clock")
     remember_model_call(getattr(state, "params", None), result, kwargs)
     return result
 
