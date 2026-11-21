@@ -20,6 +20,7 @@ from agent_py_agent.agent.workflows import batching, dag_scheduler
 from agent_py_agent.agent.workflows.batching import ForeachInvalid
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
 from agent_py_agent.agent.workflows.models import StepExecutionRecord
+from agent_py_agent.tests.test_v13_rework_workflow_claim_lifecycle import native  # noqa: F401
 
 
 def _flow(steps, **options):
@@ -1019,3 +1020,170 @@ def test_cancelled_queued_dag_leaf_does_not_need_a_host_grant(tmp_path, monkeypa
         assert active.result(timeout=5).status == "succeeded"
     assert small.resume_workflow_run(workflow_run_id).status == "succeeded"
     assert effects == ["effect"]
+
+
+def test_sequential_subworkflow_leaf_uses_the_host_grant(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from agent_py_agent.tests.test_conveyor_m57_subworkflow_obligation import _save_workflow
+
+    monkeypatch.setattr(batching, "_configured_host_parallel", 1)
+    original_submit = batching._WORKFLOW_DISPATCH.submit
+    occupied, release, child_waiting, child_entered = Event(), Event(), Event(), Event()
+
+    def submit(key, fn, *args):
+        future = original_submit(key, fn, *args)
+        if key[0] == str(tmp_path / "nested"):
+            child_waiting.set()
+        return future
+
+    monkeypatch.setattr(batching._WORKFLOW_DISPATCH, "submit", submit)
+
+    def independent(*_):
+        occupied.set()
+        assert release.wait(10)
+        return {"value": "independent"}
+
+    def analyze(*_):
+        child_entered.set()
+        child_waiting.set()
+        return {"value": "child"}
+
+    engine = WorkflowEngine(tmp_path / "nested", analysis_handler=analyze)
+    _save_workflow(engine, "child", WorkflowStepSpec("work", "work", "llm_skill_analysis"))
+    parent = _flow([{"step_id": "child", "mode": "subworkflow", "subworkflow_ref": "workflow:child"}],
+                   execution_mode="dag")
+    busy = _flow([{"step_id": "busy", "mode": "llm_skill_analysis"}], execution_mode="dag")
+    with ThreadPoolExecutor(2) as callers:
+        active = callers.submit(WorkflowEngine(tmp_path / "independent", analysis_handler=independent).run_workflow, busy)
+        try:
+            assert occupied.wait(10)
+            nested = callers.submit(engine.run_workflow, parent)
+            assert child_waiting.wait(10)
+            assert not child_entered.is_set()
+        finally:
+            release.set()
+        assert active.result(timeout=10).status == "succeeded"
+        result = nested.result(timeout=10)
+    assert result.status == "succeeded"
+    assert child_entered.is_set()
+
+
+@pytest.mark.parametrize("dag", [False, True], ids=["sequential-retry", "dag"])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_verified_agent_settlement_releases_original_claim(native, dag, outcome):  # noqa: F811
+    from agent_py_agent.tests.test_v13_rework_workflow_claim_lifecycle import _definition, _start
+
+    definition = _definition()
+    definition["steps"][-1]["retry_policy"] = {"max_attempts": 2}
+    if dag:
+        definition["steps"][-1]["depends_on"] = ["prefix"]
+    run = native.engine.run_workflow(definition, owner_id="alice", business_context=native.context,
+                                     workflow_run_id="original", concurrency_policy="skip_if_running")
+    assert run.status == "waiting_for_agent"
+    assert _start(native, "contender", delegated=False)["status"] == "skipped"
+    task_id = run.steps[-1].escalation_result["task_id"]
+    original_claim = native.engine.store._read(run.workflow_run_id, "run.json")["concurrency_claim"]["record"]
+
+    if outcome == "cancelled":
+        assert native.engine.cancel_workflow_run(run.workflow_run_id, expected_revision=run.revision,
+                                                 operation_key="cancel") == []
+        expected_status = "cancelled"
+    else:
+        native.agents.completion_reader = lambda task_id, **identity: {
+            **identity, "task_id": task_id, "status": outcome,
+            "completion_ref": "canonical-completion", "output": {"answer": 1},
+        }
+        expected_status = "succeeded" if outcome == "completed" else "failed"
+        resumed = native.engine.resume_workflow_run(run.workflow_run_id)
+        assert resumed.status == expected_status
+
+    settled = native.engine.store.load_run(run.workflow_run_id)
+    assert settled.status == expected_status
+    assert settled.steps[-1].escalation_result["effect_outcome"] == ("confirmed" if outcome == "completed" else "failed")
+    claim = native.engine.store._read(run.workflow_run_id, "run.json")["concurrency_claim"]
+    assert claim["phase"] == "released"
+    assert claim["record"] == original_claim
+    assert _start(native, "successor", delegated=False).status == "succeeded"
+    tasks, errors = native.store.session_tasks.list_report(limit=0)
+    assert not errors and [task.task_id for task in tasks] == [task_id]
+    assert native.calls == ["prefix", "prefix"]
+
+
+@pytest.mark.parametrize("lose_control_ack", [False, True])
+def test_terminal_agent_receipt_is_rechecked_without_replaying_suffix(native, monkeypatch, lose_control_ack):  # noqa: F811
+    from agent_py_agent.agent.workflows.governance import WorkflowOperationRecovery
+    from agent_py_agent.tests.test_v13_rework_workflow_claim_lifecycle import _definition, _start
+
+    definition = _definition()
+    definition["steps"][-1]["retry_policy"] = {"max_attempts": 2}
+    run = native.engine.run_workflow(definition, owner_id="alice", business_context=native.context,
+                                     workflow_run_id="legacy", concurrency_policy="skip_if_running")
+    old = native.engine.store.load_run(run.workflow_run_id)
+    old.status = "succeeded"
+    old.effect_outcome = "confirmed"
+    step = old.steps[-1]
+    step.status = "succeeded"
+    step.output_snapshot = {"preserved": True}
+    step.escalation_result.update(completion_ref="canonical-completion", effect_state="unknown", effect_outcome="unknown")
+    native.engine.store.save_run(old)
+    reader_calls = []
+
+    def complete(task_id, **identity):
+        reader_calls.append((task_id, identity["attempt_id"]))
+        return {**identity, "task_id": task_id, "status": "completed",
+                "completion_ref": "canonical-completion", "output": {"answer": 1}}
+
+    native.agents.completion_reader = complete
+    native.engine.run_authorizer = WorkflowOperationRecovery(None).require_effect
+    if lose_control_ack:
+        def fail_ack(*args, **kwargs):
+            raise OSError("simulated control acknowledgement error")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(native.engine.store, "complete_control", fail_ack)
+            with pytest.raises(OSError, match="acknowledgement"):
+                native.engine.resume_workflow_run(old.workflow_run_id, operation_key="proof-only",
+                                                  expected_revision=old.revision)
+    repaired = native.engine.resume_workflow_run(old.workflow_run_id, operation_key="proof-only",
+                                                  expected_revision=old.revision)
+
+    assert repaired.status == "succeeded" and repaired.steps[-1].output_snapshot == {"preserved": True}
+    assert repaired.steps[-1].escalation_result["effect_outcome"] == "confirmed"
+    assert reader_calls == [(step.escalation_result["task_id"], step.escalation_result["attempt_id"])]
+    assert _start(native, "successor", delegated=False).status == "succeeded"
+    assert native.calls == ["prefix", "prefix"]
+
+
+@pytest.mark.parametrize("evidence", ["pending_cancel", "outstanding_refs", "foreign_attempt"])
+def test_agent_claim_stays_held_without_complete_original_evidence(native, evidence):  # noqa: F811
+    from agent_py_agent.tests.test_v13_rework_workflow_claim_lifecycle import _definition, _start
+
+    definition = _definition()
+    definition["steps"][-1]["retry_policy"] = {"max_attempts": 2}
+    run = native.engine.run_workflow(definition, owner_id="alice", business_context=native.context,
+                                     workflow_run_id="original", concurrency_policy="skip_if_running")
+    task_id = run.steps[-1].escalation_result["task_id"]
+    if evidence == "pending_cancel":
+        native.agents.cancel_handler = lambda *args, **kwargs: {"state": "pending", "outstanding_refs": [task_id]}
+        assert native.engine.cancel_workflow_run(run.workflow_run_id, expected_revision=run.revision,
+                                                 operation_key="cancel") == [task_id]
+        expected_status = "cancelling"
+    else:
+        def incomplete(task_id, **identity):
+            if evidence == "foreign_attempt":
+                identity["attempt_id"] = "foreign-attempt"
+            return {**identity, "task_id": task_id, "status": "completed", "completion_ref": "completion",
+                    "output": {}, "outstanding_refs": [task_id] if evidence == "outstanding_refs" else []}
+
+        native.agents.completion_reader = incomplete
+        with pytest.raises(ValueError, match="WORKFLOW_AGENT_COMPLETION_"):
+            native.engine.resume_workflow_run(run.workflow_run_id)
+        expected_status = "waiting_for_agent"
+
+    persisted = native.engine.store.load_run(run.workflow_run_id)
+    assert persisted.status == expected_status
+    assert persisted.steps[-1].escalation_result["effect_outcome"] == "unknown"
+    assert _start(native, "contender", delegated=False)["status"] == "skipped"
+    assert native.calls == ["prefix"]

@@ -95,6 +95,20 @@ def _predecessor_fingerprint(owner_home, parts):
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
+def _is_earlier_checkpoint(existing, *, workflow_id, step_id, scope_key, attempt_started_at):
+    """A published predecessor must already have existed when this attempt began."""
+    updated = existing.get('updated_at')
+    started = existing.get('attempt_started_at', 0)
+    revision = existing.get('revision')
+    return (existing.get('schema_version') == 'workflow-step-watermark.v1'
+            and existing.get('workflow_id') == workflow_id and existing.get('step_id') == step_id
+            and existing.get('scope_key', '') == scope_key
+            and bool(existing.get('last_run_id')) and bool(existing.get('attempt_id'))
+            and type(revision) is int and revision > 0
+            and type(updated) in (int, float) and type(started) in (int, float)
+            and math.isfinite(attempt_started_at) and 0 <= started <= updated < attempt_started_at and updated > 0)
+
+
 def save_workflow_step_watermark(
     owner_home: str | Path,
     workflow_id: str,
@@ -108,6 +122,7 @@ def save_workflow_step_watermark(
     operation_id: str = '',
     expected_revision: int | None = None,
     expected_predecessor: str | None = None,
+    recover_predecessor: bool = False,
     attempt_started_at: float = 0,
 ) -> dict[str, Any]:
     """保存特定工作流特定步骤的持久化水位检查点 (WF-10)。
@@ -128,7 +143,8 @@ def save_workflow_step_watermark(
 
     with locked_json_path(target_path):
         prev_rev = 0
-        guarded = expected_revision is not None or expected_predecessor is not None
+        guarded = expected_revision is not None or expected_predecessor is not None or recover_predecessor
+        observed = _predecessor_fingerprint(owner_home, relative_parts) if recover_predecessor else None
         raw = read_text_beneath(owner_home, relative_parts)
         if raw is not None:
             try:
@@ -149,6 +165,15 @@ def save_workflow_step_watermark(
             if (attempt_started_at and type(published_attempt) in (int, float)
                     and published_attempt >= attempt_started_at):
                 raise _WatermarkConflict()
+        if recover_predecessor:
+            if raw is None:
+                if observed != 'absent':
+                    raise _WatermarkConflict()
+            elif observed == 'absent' or not _is_earlier_checkpoint(
+                    existing, workflow_id=workflow_id, step_id=step_id, scope_key=scope_key,
+                    attempt_started_at=attempt_started_at):
+                raise _WatermarkConflict()
+            expected_predecessor, expected_revision = observed, prev_rev
         if expected_predecessor is not None and (
             not expected_predecessor or _predecessor_fingerprint(owner_home, relative_parts) != expected_predecessor
         ):
@@ -264,11 +289,14 @@ def commit_verified_watermark(
         # Freeze the exact leaf before reading the contents. A later successful read
         # may supply its revision only while that same predecessor still occupies the slot.
         parts = _watermark_parts(safe_asset_id(workflow_id), safe_asset_id(step.step_id), scope_key)
-        facts['watermark_predecessor'] = ''
+        facts['watermark_predecessor'] = None
         try:
-            facts['watermark_predecessor'] = _predecessor_fingerprint(owner_home, parts)
-            base = load_workflow_step_watermark(owner_home, workflow_id, step.step_id, scope_key=scope_key, strict=True)
-            facts['watermark_base_revision'] = int((base or {}).get('revision', 0))
+            target = Path(owner_home).joinpath(*parts)
+            ensure_private_dir(target.parent, canonical_root=owner_home)
+            with locked_json_path(target):
+                facts['watermark_predecessor'] = _predecessor_fingerprint(owner_home, parts)
+                base = load_workflow_step_watermark(owner_home, workflow_id, step.step_id, scope_key=scope_key, strict=True)
+                facts['watermark_base_revision'] = int((base or {}).get('revision', 0))
         except (OSError, TypeError, ValueError) as error:
             facts['watermark_base_revision'] = None
             observation_error = error
@@ -283,9 +311,9 @@ def commit_verified_watermark(
             owner_home, workflow_id, step.step_id, step.watermark, run_id=run_id,
             step_attempt_id=attempt_id, effect_id=effect_id, scope_key=scope_key, operation_id=operation_id,
             expected_revision=facts.get('watermark_base_revision'),
-            expected_predecessor=(facts.get('watermark_predecessor', '')
-                                  if store is not None and facts.get('watermark_base_revision') is None
-                                  else facts.get('watermark_predecessor')),
+            expected_predecessor=facts.get('watermark_predecessor') or None,
+            recover_predecessor=store is not None and facts.get('watermark_base_revision') is None
+                and not facts.get('watermark_predecessor'),
             attempt_started_at=getattr(step, 'started_at', 0),
         )
     except (OSError, RuntimeError, ValueError, TypeError) as error:

@@ -451,3 +451,110 @@ def test_baseline_recovery_preserves_predecessor_identity(tmp_path, monkeypatch,
     else:
         assert (saved["revision"], saved["watermark"]) == (1, {"cursor": 2})
         assert publication["state"] == "published"
+
+
+@pytest.mark.parametrize("predecessor", ["absent", "earlier", "rival", "legacy"])
+def test_first_watermark_identity_error_is_repairable_with_cas(tmp_path, monkeypatch, predecessor):
+    from time import time
+
+    write = step_watermarks.save_workflow_step_watermark
+    if predecessor == "earlier":
+        write(tmp_path, "dag-flow", "w", {"cursor": 1}, run_id="earlier",
+              step_attempt_id="earlier-attempt", attempt_started_at=time() - 1)
+    elif predecessor == "legacy":
+        target = tmp_path / "data" / "workflow_watermarks" / "dag-flow" / "w.json"
+        target.parent.mkdir(parents=True)
+        rival = {"watermark": {"cursor": 1}}
+        target.write_text(json.dumps(rival), encoding="utf-8")
+    calls = []
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *_: calls.append(1) or {"watermark": {"cursor": 2}})
+    flow = _flow([{"step_id": "w", "mode": "llm_skill_analysis"}])
+
+    def unreadable(*args, **kwargs):
+        raise OSError("simulated initial identity error")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(step_watermarks, "_predecessor_fingerprint", unreadable)
+        run = engine.run_workflow(flow)
+    assert run.steps[0].escalation_result["watermark_publication"]["state"] == "repair"
+    if predecessor == "rival":
+        rival = write(tmp_path, "dag-flow", "w", {"cursor": 99}, run_id="rival",
+                      step_attempt_id="rival-attempt", attempt_started_at=time())
+
+    for _ in range(2):
+        repaired = engine.resume_workflow_run(run.workflow_run_id)
+    saved = step_watermarks.load_workflow_step_watermark(tmp_path, "dag-flow", "w")
+    if predecessor in ("rival", "legacy"):
+        assert saved == rival
+        assert repaired.steps[0].escalation_result["watermark_publication"]["state"] == "repair"
+    else:
+        assert repaired.steps[0].escalation_result["watermark_publication"]["state"] == "published"
+        assert (saved["revision"], saved["watermark"]) == (1 + (predecessor == "earlier"), {"cursor": 2})
+    assert calls == [1]
+
+
+def test_rotated_attempt_is_bound_before_cold_reserved_recovery(tmp_path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.workflows.governance import WorkflowEffectPhase
+
+    engine = WorkflowEngine(tmp_path)
+    original = StepExecutionRecord("effect", "effect", "tool_call", "running", 1, 0, 0, False,
+                                   escalation_result={"attempt_id": "first", "effect_state": "reserved", "effect_reservation_id": "dispatch"})
+    run = WorkflowRunRecord("run", "dag-flow", "alice", "manual", "paused_for_resume", 1, 2, 0,
+                            steps=(original,), effect_outcome="unknown")
+    engine.store.save_run(run, _flow([{"step_id": "effect", "mode": "tool_call"}]))
+    worker_step = replace(original, escalation_result=dict(original.escalation_result))
+    worker = dag_scheduler._worker_with_effect_admission(engine, run.workflow_run_id, worker_step)
+    worker_step.escalation_result["attempt_id"] = "rotated"
+    worker._authorize_run(run, WorkflowEffectPhase("effect"))
+
+    recovered = WorkflowRunStore(tmp_path).load_run(run.workflow_run_id)
+    assert recovered.steps[0].escalation_result["attempt_id"] == "first"
+    assert recovered.steps[0].escalation_result["effect_outcome"] == recovered.effect_outcome == "unknown"
+
+
+def test_retry_foreach_persists_each_batch_before_the_next_batch_runs(tmp_path):
+    observed = []
+
+    def analyze(spec, context, skills):
+        run = WorkflowRunStore(tmp_path).load_run("foreach-run")
+        observed.append([(row["index"], row["status"]) for row in run.steps[0].batches])
+        return {"batch": context.step_inputs["batch"]}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+    flow = _flow([{"step_id": "batch", "mode": "llm_skill_analysis",
+                   "retry_policy": {"max_attempts": 2},
+                   "foreach": {"from": "inputs.items", "as": "batch", "batch_size": 1, "max_parallel": 1}}])
+
+    result = engine.run_workflow(flow, {"items": ["first", "second"]}, workflow_run_id="foreach-run")
+
+    assert result.status == "succeeded"
+    assert observed == [[(0, "running"), (1, "pending")], [(0, "succeeded"), (1, "running")]]
+    assert result.steps[0].output_snapshot == [{"batch": ["first"]}, {"batch": ["second"]}]
+
+
+def test_retry_foreach_interruption_preserves_the_completed_batch(tmp_path):
+    calls = []
+
+    def analyze(spec, context, skills):
+        value, = context.step_inputs["batch"]
+        calls.append(value)
+        if value == "interrupted":
+            raise InterruptedError("simulated interruption in a running batch")
+        return {"value": value}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+    flow = _flow([{"step_id": "batch", "mode": "llm_skill_analysis",
+                   "retry_policy": {"max_attempts": 2},
+                   "foreach": {"from": "inputs.items", "as": "batch", "batch_size": 1, "max_parallel": 1}}])
+
+    with pytest.raises(InterruptedError):
+        engine.run_workflow(flow, {"items": ["completed", "interrupted"]}, workflow_run_id="interrupted-run")
+
+    cold = WorkflowRunStore(tmp_path).load_run("interrupted-run")
+    assert cold.status == "paused_for_resume" and cold.effect_outcome == "unknown"
+    first, second = cold.steps[0].batches
+    assert (first["status"], first["output"]) == ("succeeded", {"value": "completed"})
+    assert (second["status"], bool(second["attempt_id"])) == ("running", True)
+    assert calls == ["completed", "interrupted"]

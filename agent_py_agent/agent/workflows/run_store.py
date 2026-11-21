@@ -226,6 +226,37 @@ def settle_step_effect(step, *, marker, interrupted=False, drain_failed=False):
     facts.update(effect_outcome=outcome, effect_state=state, effect_started=state != 'not_started')
 
 
+def settle_agent_terminal_effect(step, *, completion=None, cancelled=False):
+    """Settle the exact agent obligation after its host port has verified the evidence."""
+    facts = step.escalation_result
+    if (step.mode != 'agent_task' or facts.get('cleanup_error') or facts.get('outstanding_refs')
+            or facts.get('effect_outcome') == 'partial'):
+        return False
+    if completion is not None:
+        status = completion.get('status')
+        if (status not in ('completed', 'failed', 'cancelled') or not completion.get('completion_ref')
+                or completion.get('outstanding_refs') or completion.get('cleanup_error')
+                or completion.get('effect_outcome') in ('unknown', 'partial')):
+            return False
+        outcome = 'confirmed' if status == 'completed' else 'failed'
+    elif cancelled:
+        if (not facts.get('task_id') and facts.get('submission_state') == 'not_started'
+                and facts.get('reconciliation_state') == 'absent'):
+            settle_step_effect(step, marker=False)
+            return True
+        receipt = facts.get('cancellation_receipt')
+        if (not facts.get('task_id') or not isinstance(receipt, dict) or receipt.get('state') != 'completed'
+                or receipt.get('outstanding_refs') != [] or receipt.get('cleanup_error')
+                or receipt.get('effect_outcome') in ('unknown', 'partial')):
+            return False
+        outcome = 'failed'
+    else:
+        return False
+    facts['effect_outcome'] = outcome
+    settle_step_effect(step, marker=True)
+    return True
+
+
 def _non_agent_step_settled(step, result):
     """判断非 agent_task 步骤在 effect_started=True 后是否已有终态确定证明。"""
     if step.status in ('succeeded', 'escalated_recovered', 'skipped'):
@@ -252,9 +283,25 @@ def _is_blocking_workflow_run(record):
             or not _concurrency_settled(record, terminal_statuses=_TERMINAL_OBLIGATION_STATUSES))
 
 
+def agent_step_settled(step):
+    facts = step.escalation_result
+    if (facts.get('cleanup_error') or facts.get('outstanding_refs')
+            or facts.get('effect_state') in ('reserved', 'unknown')
+            or facts.get('effect_outcome') in ('unknown', 'partial')):
+        return False
+    cancellation = facts.get('cancellation_receipt')
+    if cancellation is not None:
+        return (isinstance(cancellation, dict) and cancellation.get('state') == 'completed'
+                and cancellation.get('outstanding_refs') == [] and not cancellation.get('cleanup_error')
+                and cancellation.get('effect_outcome') not in ('unknown', 'partial'))
+    return bool(facts.get('completion_ref') or facts.get('submission_state') == 'not_started'
+                and facts.get('reconciliation_state') == 'absent')
+
+
 def _concurrency_settled(record, *, terminal_statuses=_TERMINAL_RUN_STATUSES):
     """终态标签不等于义务消失；只消费原步骤上的完成、取消或未提交证明。"""
-    if record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling') or getattr(record, 'outstanding_refs', ()):
+    if (record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling')
+            or record.effect_outcome == 'partial' or getattr(record, 'outstanding_refs', ())):
         return False
     for step in record.steps:
         result = step.escalation_result
@@ -266,11 +313,7 @@ def _concurrency_settled(record, *, terminal_statuses=_TERMINAL_RUN_STATUSES):
             obligation = (step.status == 'waiting_for_agent' or result.get('task_id')
                 or 'session_task_dispatch' in result or result.get('submission_state') == 'unknown'
                 or result.get('effect_started') and result.get('submission_state') != 'not_started')
-            cancellation = result.get('cancellation_receipt', {})
-            settled = (bool(result.get('completion_ref')) or cancellation.get('state') == 'completed'
-                and cancellation.get('outstanding_refs') == [] or result.get('submission_state') == 'not_started'
-                and result.get('reconciliation_state') == 'absent')
-            if obligation and not settled:
+            if obligation and not agent_step_settled(step):
                 return False
         elif result.get('effect_started') and record.status != 'cancelled' and not _non_agent_step_settled(step, result):
             return False
@@ -393,8 +436,23 @@ class WorkflowRunStore:
         return ('data', 'workflow_runs', run_id, 'attempts', f'{step_id}.{attempt}.admitted')
 
     def admit_step_effect(self, workflow_run_id, step):
-        """只发布本次尝试的排他标记；仍由协调线程写运行账。"""
-        parts = self._admission_parts(workflow_run_id, step)
+        """Record the reservation admission before publishing the individual attempt."""
+        reservation = step.escalation_result.get('effect_reservation_id')
+        if reservation is not None:
+            try:
+                self._write_admission_marker(self._reservation_parts(workflow_run_id, step, reservation))
+            except FileExistsError:
+                if not self.reservation_effect_marker(workflow_run_id, step):
+                    raise
+        self._write_admission_marker(self._admission_parts(workflow_run_id, step))
+
+    def _reservation_parts(self, workflow_run_id, step, reservation):
+        run_id = safe_path_part(workflow_run_id)
+        step_id = safe_path_part(step.step_id)
+        reservation = safe_path_part(reservation)
+        return ('data', 'workflow_runs', run_id, 'attempts', f'{step_id}.{reservation}.dispatch-admitted')
+
+    def _write_admission_marker(self, parts):
         descriptor = create_private_file_beneath(self.owner_home, parts)
         try:
             if not _supports_dir_fd():
@@ -414,16 +472,29 @@ class WorkflowRunStore:
         marker = read_bytes_beneath(self.owner_home, parts, max_bytes=0)
         return marker is not None
 
-    def _recover_reserved_effects(self, record):
+    def reservation_effect_marker(self, workflow_run_id, step, *, legacy_can_rotate=False):
+        reservation = step.escalation_result.get('effect_reservation_id')
+        if reservation is not None:
+            return read_bytes_beneath(self.owner_home, self._reservation_parts(
+                workflow_run_id, step, reservation), max_bytes=0) is not None
+        if self.step_effect_marker(workflow_run_id, step):
+            return True
+        return None if legacy_can_rotate or step.max_attempts > 1 else False
+
+    def _recover_reserved_effects(self, record, definition):
         # 活动运行可能刚发布预约，未见标记不能被读线程当作未执行证明。
         if record.status not in ('paused_for_resume', 'failed', 'cancelled'):
             return record
         recovered = False
+        retry_steps = None
         for step in record.steps:
             if step.escalation_result.get('effect_state') != 'reserved':
                 continue
+            if 'effect_reservation_id' not in step.escalation_result and retry_steps is None:
+                retry_steps = {spec['step_id'] for spec in (definition or {}).get('steps', ()) if spec.get('retry_policy')}
             try:
-                marker = self.step_effect_marker(record.workflow_run_id, step)
+                marker = self.reservation_effect_marker(record.workflow_run_id, step,
+                                                        legacy_can_rotate=step.step_id in (retry_steps or ()))
             except (OSError, ValueError):
                 marker = None
             settle_step_effect(step, marker=marker, interrupted=True)
@@ -716,7 +787,8 @@ class WorkflowRunStore:
                 return None
             return self.save_step_result(workflow_run_id, step)
 
-    def begin_control(self, workflow_run_id, *, action, operation_key, expected_revision, intent=None):
+    def begin_control(self, workflow_run_id, *, action, operation_key, expected_revision, intent=None,
+                      terminal_agent_reconciliation=False):
         """恢复/取消沿原 run.json 记同键意图，不能用 updated_at 或第二任务账当版本。"""
         if not isinstance(operation_key, str) or not 0 < len(operation_key.encode()) <= 256:
             raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
@@ -736,6 +808,8 @@ class WorkflowRunStore:
                 raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
             operations[operation_key] = {'action': action, 'intent': fingerprint,
                                         'expected_revision': expected_revision, 'state': 'pending'}
+            if terminal_agent_reconciliation:
+                operations[operation_key]['terminal_agent_reconciliation'] = True
             data['revision'] = data.get('revision', 0) + 1
             _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
             return False, self.load_run(workflow_run_id)
@@ -1022,8 +1096,8 @@ class WorkflowRunStore:
             if latest['workflow_run_id'] != workflow_run_id:
                 raise ValueError('运行身份与目录不匹配')
             if latest.get('revision', 0) == data.get('revision', 0):
-                return self._recover_reserved_effects(_decode_run(data))
-        return self._recover_reserved_effects(_decode_run(latest))
+                return self._recover_reserved_effects(_decode_run(data), data.get('workflow_snapshot'))
+        return self._recover_reserved_effects(_decode_run(latest), latest.get('workflow_snapshot'))
 
     # LLM: 只加载run.json登记的步骤，不消费额外叶子，不把磁盘文件名当新的执行指令。
     # 函数用途: 按运行定义顺序返回恢复后的步骤记录。
