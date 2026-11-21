@@ -31,7 +31,9 @@ from .io import (
     read_json_file_report,
     update_json_file_atomic,
 )
-from .multiprocess_execution import check_worker_transition, current_worker_execution
+from .multiprocess_coordinator_execution import current_coordinator_execution
+from .multiprocess_execution import _EXECUTION as _WORKER_EXECUTION
+from .multiprocess_execution import check_worker_transition
 from .owner_retention import gateway_terminal_exists
 from .paths import (
     gateway_paths_from_root,
@@ -368,6 +370,14 @@ class GatewayTaskBindingWriter:
         return updated
 
 
+_get_worker_execution = _WORKER_EXECUTION.get
+
+
+def _capture_turn_execution():
+    """Capture the worker or coordinator context without doing an import per turn."""
+    return _get_worker_execution() or current_coordinator_execution()
+
+
 # LLM: This callback is the Gateway adaptation of 会话运行时's active_turn mutex. It validates the
 # immutable execution attempt under T before runtime may reserve input or cross the provider edge.
 # 类用途: 将补充消息认领和模型提交与同一精确 Gateway 回合的结束、停止串行化。
@@ -377,7 +387,7 @@ class GatewayActiveTurnTransition:
     request_path: Path
     request_id: str
     execution_attempt_id: str
-    _worker_execution: object = field(default_factory=current_worker_execution, init=False, repr=False, compare=False)
+    _worker_execution: object = field(default_factory=_capture_turn_execution, init=False, repr=False, compare=False)
 
     # LLM: Caller supplies only an in-memory mailbox operation. This method owns T, re-reads the
     # exact hot request, and applies phase-specific admission: reserve/submit require open, while

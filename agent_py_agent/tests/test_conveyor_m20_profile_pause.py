@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import builtins
 import pickle
 import time
 from copy import copy
 from dataclasses import FrozenInstanceError, asdict, fields, make_dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from weakref import ref
 
 import pytest
@@ -17,6 +19,14 @@ from agent_py_agent.agent.conversation.wake_attempt_tracking import (
     wake_attempt_waiting,
 )
 from agent_py_agent.agent.gateway_parts import request_binding, request_worker
+from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_execution import (
+    coordinator_execution_scope,
+    current_coordinator_execution,
+)
+from agent_py_agent.agent.gateway_parts.multiprocess_execution import (
+    current_worker_execution,
+    worker_execution_scope,
+)
 from agent_py_agent.agent.settings.model_profiles import (
     execute_model_profile_operation,
     model_profiles_path,
@@ -158,6 +168,36 @@ def test_fast_frozen_matches_plain_dataclass(cls, args):
         setattr(dto, fields(cls)[0].name, None)
     if cls.__module__ == request_worker.__name__:
         assert ref(dto)() is dto
+
+
+def test_active_turn_captures_execution_without_a_runtime_import(monkeypatch):
+    original_import = builtins.__import__
+    coordinator_imports = []
+
+    def observe_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "multiprocess_coordinator_execution" and level == 1:
+            coordinator_imports.append(name)
+        return original_import(name, globals, locals, fromlist, level)
+
+    def capture(expected):
+        with monkeypatch.context() as patch:
+            patch.setattr(builtins, "__import__", observe_import)
+            transition = request_binding.GatewayActiveTurnTransition(_REQUEST_PATH, "request", "attempt")
+        assert transition._worker_execution is expected
+        return transition
+
+    capture(None)
+    with coordinator_execution_scope(SimpleNamespace(count=0), object(), object()):
+        coordinator = current_coordinator_execution()
+        coordinator_transition = capture(coordinator)
+        with worker_execution_scope(object(), object()):
+            worker = current_worker_execution()
+            worker_transition = capture(worker)
+        capture(coordinator)
+    capture(None)
+    assert coordinator_transition._worker_execution is coordinator
+    assert worker_transition._worker_execution is worker
+    assert not coordinator_imports
 
 
 def g1_case_inflight_wake_attempt():
