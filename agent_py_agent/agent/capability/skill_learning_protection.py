@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import json
 import math
+import sqlite3
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from ..conversation.models import THREAD_TASK_LINK_INACTIVE_STATUSES
 from ..memory_store.retention_scan_budget import RetentionScanBudget
+from ..runtime_errors import RecoverableRuntimeError
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
 
@@ -116,10 +118,6 @@ def _path_identity(path):
     except FileNotFoundError:
         return None
     return [info.st_dev, info.st_ino]
-
-
-def _rolling_refs(state):
-    return set(state.get('done') or ()) | set(state.get('refs') or ())
 
 
 class _ListingSource:
@@ -231,50 +229,37 @@ class _SchedulerStoreSource:
         return appended <= protected
 
 
-class _RollingSource:
-    """目录与恢复索引不保证新条目落在续点之后：整轮读完后从头再滚一轮，上一整轮的引用在新一轮完成前继续有效。
+class _PagedGenerationSource:
+    """A durable keyset and all its reference pages belong to one source generation."""
 
-    复核时在新预算内从头完整读一轮，新出现的引用必须已在保护名单内。
-    """
-
-    def __init__(self, identity, page, start, prepare=None):
-        self.identity, self.page, self.start, self.prepare = identity, page, start, prepare
+    def __init__(self, generation, page, start, prepare=None):
+        self.generation, self.page, self.start, self.prepare = generation, page, start, prepare
 
     def advance(self, state, budget):
         if self.prepare is not None:
             self.prepare()
-        identity = self.identity()
-        if state.get('identity') != identity:
+        before = self.generation()
+        if state.get('generation') != before:
             state.clear()
+        if state.get('complete'):
+            return True
         refs = set(state.get('refs') or ())
         cursor = self.page(state.get('after') or self.start, budget, refs)
-        if cursor is None:
-            state.update(done=sorted(refs), refs=[], after=self.start)
-        else:
-            state.update(after=cursor, refs=sorted(refs))
-        state['identity'] = identity
-        return state.get('done') is not None
+        if self.generation() != before:
+            state.clear()
+            return False
+        state.update(generation=before, after=cursor, refs=sorted(refs), complete=cursor is None)
+        return cursor is None
 
     def refs(self, state):
-        return _rolling_refs(state)
+        return set(state.get('refs') or ())
 
     def recheck(self, state, protected, budget):
-        if self.prepare is not None:
-            self.prepare()
-        if state.get('identity') != self.identity():
-            return False
-        refs, cursor = set(), self.start
-        while True:
-            before = cursor
-            cursor = self.page(cursor, budget, refs)
-            if cursor is None:
-                return refs <= protected
-            if cursor == before or budget.exhausted():
-                return False
+        return state.get('complete') is True and state.get('generation') == self.generation()
 
 
 class _RuntimeSource:
-    """运行库：库文件身份与 schema 代次决定重来；任务运行按 (created_at, task_run_id) 键集续读。"""
+    """Use the repository's transactional generation to validate the database prefix."""
 
     def __init__(self, agent, repo, tasks):
         self.agent, self.repo, self.tasks = agent, repo, tasks
@@ -286,11 +271,10 @@ class _RuntimeSource:
         return set(state.get('refs') or ())
 
     def recheck(self, state, protected, budget):
-        # 证明跨了多个窗口时，更早窗口里已读任务运行的变化（新 attempt、元数据新增引用）不在最后窗口的逐组核对里，
-        # 而一片预算读不完全部窗口：此时按证明过期处理，只会少置换，不会多置换。
-        if state.get('after') not in (None, [0, '']):
-            return False
-        return _runtime_window_current(self.agent, self.repo, self.tasks, state)
+        generation = state.get('generation')
+        return (bool(state.get('scan_complete')) and generation is not None
+                and _active_stamps_current(self.agent, state)
+                and self.repo.skill_reference_generation() == generation)
 
 
 class _UnpagedTaskSource:
@@ -341,8 +325,8 @@ def _protection_sources(agent, store):
     else:
         scheduler_source = _SchedulerStoreSource(scheduler)
 
-    proposal_source = None if store is None else _RollingSource(
-        lambda: [_path_identity(store.directory / name) for name in ('proposals', 'proposals_overflow')],
+    proposal_source = None if store is None else _PagedGenerationSource(
+        lambda: _proposal_generation(store),
         lambda after, budget, refs: _proposal_refs_page(store, after, budget, refs), {},
     )
 
@@ -354,9 +338,9 @@ def _protection_sources(agent, store):
             if not state['complete'] or state['pending']:
                 raise ValueError('subagent_index_incomplete')
 
-        child_source = _RollingSource(
-            lambda: _path_identity(index.path),
-            lambda after, budget, refs: _child_refs_page(persistence, None, after, budget, refs), '', prepare,
+        child_source = _PagedGenerationSource(
+            lambda: [_path_identity(index.path), index.skill_reference_generation()],
+            lambda after, budget, refs: _child_refs_page(persistence, after, budget, refs), '', prepare,
         )
     else:
         reader = getattr(subagents, 'list_recovery_runs_report', None) or getattr(subagents, 'list_runs_report', None)
@@ -397,38 +381,45 @@ def _include_task_refs(refs, task):
         _include_refs(refs, task.to_dict() if hasattr(task, 'to_dict') else dict(task))
 
 
+def _proposal_generation(store):
+    from .skill_learning_proposals import _ACTIVE, _INTENT, _OVERFLOW
+
+    # Canonical proposal changes publish by replacing or removing a directory entry.
+    # The intent also participates in the reader's logical view of an interrupted rotation.
+    return [_path_stamp(store.directory / folder) for folder in (_ACTIVE, _OVERFLOW)] + [
+        _path_stamp(store.directory.joinpath(*_INTENT)),
+    ]
+
+
 def _proposal_refs_page(store, after, budget, refs):
     from .skill_learning_proposals import learning_proposal_page
 
-    if store is None:
-        return None
-    # 页游标仅在所有行完成核对以后提交。
-    rows, errors, cursor = learning_proposal_page(store, after=after, limit=budget.max_entries - budget.entries)
-    page_budget = replace(budget)
-    page_refs = set()
-    if _page_rows(rows, errors, 0, page_budget, _include_proposal_refs, page_refs) is not None:
-        # 大页超过字节/墙钟预算时按逐行页推进，避免在同一续点重试同一大页。
-        single, errors, cursor = learning_proposal_page(store, after=after, limit=1)
-        if _page_rows(single, errors, 0, budget, _include_proposal_refs, refs) is not None:
-            return after
-    else:
-        budget.charge(entries=page_budget.entries - budget.entries, size=page_budget.size - budget.size)
-        refs.update(page_refs)
-    return cursor
+    initial_entries = budget.entries
+    while budget.entries < budget.max_entries and budget.size < budget.max_bytes:
+        if budget.entries != initial_entries and budget.exhausted():
+            break
+        rows, errors, cursor = learning_proposal_page(store, after=after, limit=1)
+        if _page_rows(rows, errors, 0, budget, _include_proposal_refs, refs) is not None:
+            break
+        if cursor is None:
+            return None
+        if not rows:
+            budget.charge(entries=1)
+        if cursor == after:
+            break
+        after = cursor
+    return after
 
 
-def _child_refs_page(persistence, child_rows, after, budget, refs):
-    if persistence is None or child_rows is not None:
-        return _page_rows(*(child_rows or ([], [])), after or 0, budget, _include_child_refs, refs)
+def _child_refs_page(persistence, after, budget, refs):
     ids, cursor = persistence.run_index.recovery_ids(
         after=after or '', limit=budget.max_entries - budget.entries,
     )
     report = persistence.list_runs_by_ids_report(ids)
-    children = {child.run_id: child for child in report.runs}
-    rows = [{'status': children[run_id].status, 'attributes': children[run_id].attributes or {}}
-            for run_id in ids if run_id in children]
-    if report.load_errors or len(rows) != len(ids):
+    children = {child.id: child for child in report.runs}
+    if report.load_errors or len(children) != len(report.runs) or children.keys() != set(ids):
         raise ValueError('subagent_protection_source_unreadable')
+    rows = [{'status': children[run_id].status, 'attributes': children[run_id].attributes} for run_id in ids]
     remaining = _page_rows(rows, [], 0, budget, _include_child_refs, refs)
     if remaining is not None:
         return ids[remaining - 1] if remaining else after
@@ -447,7 +438,10 @@ def _include_proposal_refs(protected, proposal):
 
 def _include_child_refs(protected, child):
     if not task_status_in(child['status'], SUBAGENT_ENDED_STATUSES):
-        _include_refs(protected, child['attributes'])
+        attrs = child['attributes']
+        if attrs is not None and not isinstance(attrs, Mapping):
+            raise ValueError('subagent_protection_attributes_unreadable')
+        _include_refs(protected, {} if attrs is None else attrs)
 
 
 # LLM: 四个 canonical 活跃索引来源共享有界配额与墙钟预算；严禁调用 threads.list_report(limit=0)。
@@ -462,7 +456,8 @@ def learning_protection_for_agent(agent, *, scan_limit=1000):
             budget.max_entries = min(budget.max_entries, scan_limit)
         return budget
 
-    failures = (OSError, ValueError, TypeError, KeyError, AttributeError, SkillLearningStoreError)
+    failures = (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError,
+                sqlite3.Error, RecoverableRuntimeError, SkillLearningStoreError)
     budget = slice_budget()
     home = getattr(agent, 'home_paths', None)
     try:
@@ -494,7 +489,8 @@ def learning_protection_for_agent(agent, *, scan_limit=1000):
                 complete = False
         protected.update(source.refs(state))
     current = {'schema': _PROGRESS_SCHEMA, 'sources': states}
-    generation = _signature({name: states[name].get('identity') for name in _SOURCE_NAMES})
+    generation = _signature({name: states[name].get('generation', states[name].get('identity'))
+                             for name in _SOURCE_NAMES})
     proven = frozenset(protected)
 
     def recheck():
@@ -514,7 +510,7 @@ def learning_protection_for_agent(agent, *, scan_limit=1000):
                 complete = _save_protection_scan(store, previous, current) and complete
     except failures:
         complete = False
-    return _ProtectionSnapshot(protected, complete, generation, recheck)
+    return _ProtectionSnapshot(protected, complete, generation, recheck if complete else lambda: False)
 
 
 def _load_protection_scan(store):
@@ -685,29 +681,6 @@ def _runtime_task_ref_snapshot(repo, tasks, *, limit, max_bytes, after=(0, '')):
     return groups, signatures, complete
 
 
-def _runtime_identity(repo):
-    """库文件身份加 schema 代次：重建或换库才变；WAL 大小、心跳与新行都不改变它。"""
-    from ..runtime_db.schema import runtime_db_identity
-
-    identity = runtime_db_identity(Path(repo.db_path))
-    with repo._runtime_connection() as conn:
-        present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone()
-        row = conn.execute("SELECT value FROM metadata WHERE key='schema_generation'").fetchone() if present else None
-    return None if identity is None else [*identity, None if row is None else row[0]]
-
-
-def _runtime_window_current(agent, repo, tasks, state):
-    """复核已完成的运行库证明：身份、在途链接文件与最后窗口逐组一致，窗口之后也没有新任务运行。"""
-    if (state.get('identity') != _runtime_identity(repo) or not _active_stamps_current(agent, state)
-            or type(state.get('limit')) is not int or type(state.get('max_bytes')) is not int):
-        return False
-    _, signatures, complete = _runtime_task_ref_snapshot(
-        repo, tasks, limit=state['limit'], max_bytes=state['max_bytes'], after=state.get('after') or [0, ''],
-    )
-    return complete and state.get('complete') and signatures == state.get('signatures') \
-        and state.get('cursor') == len(signatures)
-
-
 def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progress=None):
     """只缓存有界保护投影续点；每次重核canonical树与准确文件指纹，新任务/新attempt立即废弃旧证明。"""
     from ..runtime_db.executor_liveness import executor_exit_reason
@@ -715,9 +688,15 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progres
     from ..runtime_db.repository import _QUIESCENT_ATTEMPT_STATUSES
 
     previous = getattr(agent, '_skill_task_protection_scan', {}) if progress is None else progress
-    identity = _runtime_identity(repo)
-    if previous.get('identity') != identity or not _active_stamps_current(agent, previous):
+    repo.prepare_skill_reference_generation()
+    generation = repo.skill_reference_generation()
+    if generation is None:
+        return False
+    if previous.get('generation') != generation or not _active_stamps_current(agent, previous):
         previous = {}
+    if previous.get('scan_complete'):
+        protected.update(previous['refs'])
+        return repo.skill_reference_generation() == generation
     after = previous.get('after') or [0, '']
     limit = budget.max_entries
     groups, signatures, source_complete = _runtime_task_ref_snapshot(
@@ -829,11 +808,15 @@ def _collect_runtime_task_refs(agent, repo, tasks, protected, budget, *, progres
     updated = {
         'signatures': signatures, 'cursor': cursor, 'refs': sorted(refs), 'complete': complete,
         'active_stamps': active_stamps, 'thread_stamps': thread_stamps, 'after': after, 'prefix_refs': prefix,
-        'identity': identity, 'limit': limit, 'max_bytes': budget.max_bytes,
+        'generation': generation, 'scan_complete': verified_complete,
     }
+    if repo.skill_reference_generation() != generation or not _active_stamps_current(agent, updated):
+        updated = {'refs': sorted(refs)}
+        verified_complete = False
     if progress is None:
         agent._skill_task_protection_scan = updated
     else:
+        progress.clear()
         progress.update(updated)
     return verified_complete
 

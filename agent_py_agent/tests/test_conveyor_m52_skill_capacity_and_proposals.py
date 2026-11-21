@@ -17,6 +17,7 @@ from agent_py_agent.tests.test_wave7_autonomous_learning_closure import decision
 
 def _host(tmp_path, jobs):
     return SimpleNamespace(
+        config=SimpleNamespace(retention_scan_slice_ms=60_000),
         home_paths=SimpleNamespace(owner_home_dir=tmp_path, owner_skill_learning_dir=tmp_path / "learning"),
         conversation_store=SimpleNamespace(tasks=SimpleNamespace(unsettled_report=lambda: ([], []))),
         scheduler_repository=SimpleNamespace(list_jobs=lambda **_: (jobs, [])),
@@ -260,9 +261,10 @@ def _discovered(home, jobs):
     return snapshot
 
 
+@pytest.mark.parametrize("source", ["scheduler", "runtime"])
 @pytest.mark.parametrize("referenced", [True, False])
 @pytest.mark.parametrize("path", ["restore", "usage_receipt", "cap_enforcement"])
-def test_candidate_referenced_after_discovery_is_not_displaced(tmp_path, monkeypatch, path, referenced):
+def test_candidate_referenced_after_discovery_is_not_displaced(tmp_path, monkeypatch, path, referenced, source):
     from agent_py_agent.agent.capability import skill_learning_protection
     from agent_py_agent.agent.capability.skill_learning_maintenance import (
         _select_cap_victim_locked,
@@ -283,13 +285,24 @@ def test_candidate_referenced_after_discovery_is_not_displaced(tmp_path, monkeyp
             store._transition_archive_locked(store.load_registry(), "target")
         _publish(store, "victim")
     jobs = []
-    snapshot = _discovered(home, jobs)
+    if source == "runtime":
+        agent, _ = _scheduled_runtime_host(tmp_path / "sources", 0)
+        agent.home_paths = home
+        earlier, *_ = _settled_task_runs(agent.runtime_db, ["first", "second", "third"], first_created_at=101)
+        snapshot = _complete_protection(agent, scan_limit=2)
+    else:
+        snapshot = _discovered(home, jobs)
     registry = store.load_registry()
     managed = store.managed_records(registry, include_archived=False)
     victim = _select_cap_victim_locked(store, registry, managed, protected=set(snapshot["protected_ids"]))
     if referenced:
-        # 发现完成之后才出现的监控引用：保护名单里没有它，只有置换前的复核能看到。
-        jobs.append({"allowed_skills": [f"owner:{victim}"]})
+        if source == "runtime":
+            with agent.runtime_db.transaction() as conn:
+                conn.execute("UPDATE task_runs SET metadata_json=? WHERE task_run_id=?", (
+                    json.dumps({"allowed_skills": [f"owner:{victim}"]}), earlier["task_run_id"],
+                ))
+        else:
+            jobs.append({"allowed_skills": [f"owner:{victim}"]})
 
     if path == "restore":
         def restore():
@@ -315,7 +328,7 @@ def test_candidate_referenced_after_discovery_is_not_displaced(tmp_path, monkeyp
         )
     else:
         result = maintain_learning(
-            store, mode="autonomous", max_skills=1, protected_ids=snapshot["protected_ids"],
+            store, mode="autonomous", max_skills=1, batch_ms=60_000, protected_ids=snapshot["protected_ids"],
             protection_complete=snapshot["protection_complete"],
             usage_loader=lambda _store: {"coverage": {"lifetime_summary": "complete"}, "by_skill": {}},
         )
@@ -325,3 +338,147 @@ def test_candidate_referenced_after_discovery_is_not_displaced(tmp_path, monkeyp
     assert (states[victim] == "archived") is not referenced
     if path != "cap_enforcement":
         assert (states["target"] == "archived") is referenced
+
+
+def _complete_protection(agent, *, scan_limit=128):
+    for index in range(48):
+        snapshot = learning_protection_for_agent(agent, scan_limit=scan_limit)
+        if snapshot["protection_complete"]:
+            assert index > 0, "the source must span multiple scans"
+            return snapshot
+    pytest.fail("protection discovery did not finish")
+
+
+def _publish_at_capacity(store, snapshot):
+    return publish_learned_skill(store, PublishRequest(
+        decision("replacement"), max_skills=1, protection_provider=lambda: snapshot,
+    ))
+
+
+def test_quiet_runtime_windows_authorize_displacement(tmp_path):
+    agent, _ = _scheduled_runtime_host(tmp_path, 0)
+    _settled_task_runs(agent.runtime_db, [f"runtime-{i}" for i in range(129)], first_created_at=101)
+    store = SkillLearningStore.for_home(agent.home_paths)
+    publish_learned_skill(store, PublishRequest(decision("victim"), max_skills=1))
+    snapshot = _complete_protection(agent)
+    assert len(snapshot["protected_ids"]) == 130
+    _publish_at_capacity(store, snapshot)
+    assert store.load_registry().skills["victim"].maintenance["state"] == "archived"
+
+
+def test_large_proposal_windows_authorize_displacement(tmp_path, monkeypatch):
+    agent = _host(tmp_path, [])
+    store = SkillLearningStore.for_home(agent.home_paths)
+    publish_learned_skill(store, PublishRequest(decision("victim"), max_skills=1))
+    body = decision().body + "\n" + "Check the resulting CSV files.\n" * 18_000
+    for i in range(16):
+        draft = replace(decision(f"proposal-{i}"), body=body)
+        proposals.propose_learning(store, PublishRequest(draft, {"request_key": f"large-{i}"},
+                                                           expected_sha256="a" * 64))
+    assert sum(path.stat().st_size for path in (store.directory / "proposals").glob("*.json")) > 8 * 1024 * 1024
+    snapshot = _complete_protection(agent)
+    assert set(snapshot["protected_ids"]) == {f"owner:proposal-{i}" for i in range(16)}
+
+    def no_proposal_body_read(*args, **kwargs):
+        pytest.fail("admission reopened proposal bodies")
+
+    monkeypatch.setattr(proposals, "learning_proposal_page", no_proposal_body_read)
+    _publish_at_capacity(store, snapshot)
+    assert store.load_registry().skills["victim"].maintenance["state"] == "archived"
+
+
+def _indexed_children(tmp_path):
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    agent = _host(tmp_path, [])
+    agent.subagents = SubAgentManager(tmp_path / "runs")
+    children = [agent.subagents.create_run(goal="Check output", attributes={"skill_refs": [
+        {"stable_id": f"owner:child-{i}"},
+    ]}) for i in range(3)]
+    return agent, sorted(children, key=lambda child: child.id)
+
+
+def test_indexed_children_use_canonical_id_and_authorize_displacement(tmp_path):
+    agent, children = _indexed_children(tmp_path)
+    store = SkillLearningStore.for_home(agent.home_paths)
+    publish_learned_skill(store, PublishRequest(decision("victim"), max_skills=1))
+    snapshot = _complete_protection(agent, scan_limit=2)
+    assert set(snapshot["protected_ids"]) == {f"owner:child-{i}" for i in range(len(children))}
+    _publish_at_capacity(store, snapshot)
+    assert store.load_registry().skills["victim"].maintenance["state"] == "archived"
+
+
+
+def test_earlier_runtime_change_during_discovery_restarts_the_prefix(tmp_path):
+    agent, _ = _scheduled_runtime_host(tmp_path, 0)
+    earlier, *_ = _settled_task_runs(agent.runtime_db, ["first", "second", "third"], first_created_at=101)
+    prior = learning_protection_for_agent(agent, scan_limit=2)
+    assert not prior["protection_complete"]
+    assert "owner:first" in prior["protected_ids"]
+    with agent.runtime_db.transaction() as conn:
+        conn.execute("UPDATE task_runs SET metadata_json=? WHERE task_run_id=?", (
+            json.dumps({"allowed_skills": ["owner:victim"]}), earlier["task_run_id"],
+        ))
+    result = _complete_protection(agent, scan_limit=2)
+    assert result.recheck()
+    assert "owner:victim" in result["protected_ids"]
+    assert "owner:first" not in result["protected_ids"]
+
+
+def test_new_proposal_after_multiwindow_discovery_blocks_displacement(tmp_path):
+    agent = _host(tmp_path, [])
+    store = SkillLearningStore.for_home(agent.home_paths)
+    publish_learned_skill(store, PublishRequest(decision("victim"), max_skills=1))
+    for i in range(3):
+        proposals.propose_learning(store, PublishRequest(decision(f"draft-{i}"), expected_sha256="a" * 64))
+
+    snapshot = _complete_protection(agent, scan_limit=2)
+    assert snapshot.recheck()
+    proposals.propose_learning(store, PublishRequest(decision("victim"), expected_sha256="a" * 64))
+    with pytest.raises(SkillLearningGateError) as error:
+        _publish_at_capacity(store, snapshot)
+    assert error.value.detail["reason"] == "protection_generation_changed"
+    refreshed = _complete_protection(agent, scan_limit=2)
+    assert refreshed.recheck() and "owner:victim" in refreshed["protected_ids"]
+    assert store.load_registry().skills["victim"].maintenance["state"] != "archived"
+
+
+def test_earlier_child_reference_change_invalidates_completed_proof(tmp_path):
+    agent, children = _indexed_children(tmp_path)
+    store = SkillLearningStore.for_home(agent.home_paths)
+    publish_learned_skill(store, PublishRequest(decision("victim"), max_skills=1))
+    snapshot = _complete_protection(agent, scan_limit=2)
+    first = children[0]
+    first.attributes["heartbeat_probe"] = 1
+    agent.subagents.persistence.save(first)
+    assert snapshot.recheck()
+    first.attributes["skill_refs"].append({"stable_id": "owner:victim"})
+    agent.subagents.persistence.save(first)
+    with pytest.raises(SkillLearningGateError) as error:
+        _publish_at_capacity(store, snapshot)
+    assert error.value.detail["reason"] == "protection_generation_changed"
+    refreshed = _complete_protection(agent, scan_limit=2)
+    assert refreshed.recheck() and "owner:victim" in refreshed["protected_ids"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "mismatched_id"])
+def test_indexed_child_page_cannot_certify_unreadable_or_mismatched_rows(tmp_path, monkeypatch, failure):
+    agent, children = _indexed_children(tmp_path)
+    persistence = agent.subagents.persistence
+    first = children[0]
+    if failure == "missing":
+        (persistence.workspace / first.id / "task.json").unlink()
+    else:
+        original = persistence.list_runs_by_ids_report
+
+        def wrong_identity(ids):
+            report = original(ids)
+            for child in report.runs:
+                if child.id == first.id:
+                    child.id = "unexpected-child"
+            return report
+
+        monkeypatch.setattr(persistence, "list_runs_by_ids_report", wrong_identity)
+    result = learning_protection_for_agent(agent)
+    assert not result["protection_complete"]
+    assert not result.recheck()
