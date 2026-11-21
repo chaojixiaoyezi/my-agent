@@ -108,6 +108,8 @@ def test_tree_larger_than_one_slice_reclaims_orphan_after_cached_progress_is_los
     if loss == "eviction":
         _capacity(monkeypatch, 1)
         _, other_service, other = runtime(tmp_path / "other")
+        # The peer must reach the cache on every slice even when the host is busy.
+        other.config = _config()
         other_service.observe(_user_observation())
 
     slices = 0
@@ -305,3 +307,80 @@ def test_damaged_mark_shard_fails_closed_and_keeps_the_current_tree(tmp_path, da
     else:
         pytest.fail("collection did not complete after the damaged checkpoint was abandoned")
     assert report.scan_cursor[KEY]["mark"]["epoch"] != epoch
+
+
+@pytest.mark.parametrize("marks_per_shard, corrupt", [(4096, False), (10_000, False), (10_000, True)])
+def test_cold_sweep_resumes_dense_membership_proofs_within_byte_budget(tmp_path, monkeypatch, marks_per_shard, corrupt):
+    home, path = _ledger(tmp_path, 1)
+    directory = _records(path)
+    orphan = _orphan(directory, "orphan-in-dense-shard")
+    prefix = orphan.name[:2]
+    reachable = orphan.with_name(prefix + "a" * 62 + ".json")
+    reachable.write_bytes(b"current node")
+    newly_created = orphan.with_name(prefix + "b" * 62 + ".json")
+    newly_created.write_bytes(b"new node")
+    mark_files = candidate_node_maintenance
+    epochs = ("1" * 32, "2" * 32)
+    digests = []
+    for epoch, start in zip(epochs, (0, marks_per_shard), strict=True):
+        index = list(mark_files.EMPTY_INDEX)
+        raw = mark_files.encode_marks([reachable.name] + [
+            f"{prefix}{number:062x}.json" for number in range(start, start + marks_per_shard - 1)
+        ])
+        assert mark_files.append_marks(home, epoch, {prefix: (0, raw)}) == set()
+        index[int(prefix, 16)] = (marks_per_shard, hashlib.sha256(raw).digest())
+        digests.append(mark_files.write_index(home, epoch, index))
+    now = datetime.now(timezone.utc).timestamp()
+    file_clock_ns = (orphan.stat().st_ctime_ns + newly_created.stat().st_ctime_ns) // 2
+    assert orphan.stat().st_ctime_ns < newly_created.stat().st_ctime_ns
+    proof = retention_scan._CandidateNodeProof(
+        now - 2 * 86400, file_clock_ns, mark_files.ShardedMarks(epochs[1], digests[1]),
+        epochs[1], marks_per_shard, digests[1],
+    )
+    mark = retention_scan._CandidateNodeMark(
+        (1, 2), epochs[0], previous=proof, shard_prefix=prefix, marked=marks_per_shard,
+        marks=mark_files.ShardedMarks(epochs[0], digests[0]), root_page={"complete": True},
+    )
+    progress = {"removed": 0}
+    config = SimpleNamespace(retention_scan_slice_bytes=256 * 1024, retention_scan_slice_ms=60_000)
+    read_marks = mark_files.read_marks
+    physical_bytes = 0
+
+    def measure_read(owner, name, size, *, offset=0):
+        nonlocal physical_bytes
+        raw = read_marks(owner, name, size, offset=offset)
+        physical_bytes += len(raw or b"")
+        return raw
+
+    monkeypatch.setattr(mark_files, "read_marks", measure_read)
+    for step in range(16):
+        physical_bytes = 0
+        budget = retention_scan.RetentionScanBudget.default(config)
+        errors = []
+        try:
+            complete = retention_scan._sweep_candidate_nodes(
+                home, directory, mark, budget, now, int(now * 1e9), progress, errors,
+            )
+        except mark_files.MarkCheckpointUnavailable:
+            assert corrupt and progress["removed"] == 0
+            assert reachable.exists() and newly_created.exists() and orphan.exists()
+            return
+        assert not errors
+        assert physical_bytes == budget.size <= budget.max_bytes
+        assert reachable.exists() and newly_created.exists()
+        if complete:
+            assert not corrupt
+            break
+        if corrupt and step == 0:
+            assert progress["removed"] == 0
+            checkpoint = mark_files.workspace(home) / mark_files.shard_name(epochs[0], prefix)
+            with checkpoint.open("r+b") as raw:
+                raw.seek(1)
+                first = raw.read(1)
+                raw.seek(1)
+                raw.write(bytes([first[0] ^ 1]))
+        entry, previous = retention_scan._candidate_mark_cursor(mark)
+        mark = retention_scan._resume_candidate_mark(entry, previous, mark.records)
+    else:
+        pytest.fail("cold sweep stalled on a dense shard")
+    assert progress["removed"] == 1 and not orphan.exists()

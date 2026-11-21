@@ -152,7 +152,7 @@ class _CandidateNodeMark:
             self.marks = candidate_node_maintenance.ShardedMarks(self.epoch)
 
 
-def _candidate_page(directory, page, budget):
+def _load_candidate_page(directory, page, budget):
     """用原生目录续点读取一页，未处理的名字保存在当前切片状态。"""
     names = page.setdefault("names", [])
     if type(names) is not list or len(names) > RETENTION_SCAN_SLICE_ENTRIES or any(type(name) is not str for name in names):
@@ -166,9 +166,15 @@ def _candidate_page(directory, page, budget):
             directory.parent, (directory.name,), checkpoint, limit, require_dir_fd=False,
         )
         names.reverse()
+        page.pop("membership", None)
         page.update(names=names, checkpoint=checkpoint, complete=complete)
         if not names:
             budget.charge(entries=max(1, checkpoint.get("last_scanned", 0)))
+    return names
+
+
+def _candidate_page(directory, page, budget):
+    names = _load_candidate_page(directory, page, budget)
     while names and not budget.exhausted():
         budget.charge(entries=1)
         yield names.pop()
@@ -436,19 +442,34 @@ def _commit_candidate_mark(home, path, mark, progress, errors):
     _remember_candidate_mark(path, mark)
 
 
-def _candidate_shards_ready(home, mark, shard, now, budget):
-    """清扫一个前缀前读回本周期该分片；旧证明已满宽限、可能授权回收时再读回其同一分片，失败则放弃该证明。"""
-    force = budget.size == 0  # 片首两份分片一起读回：每片都从游标重建时清扫仍能前进。
-    if not mark.marks.ensure(home, shard, budget, force=force):
-        return False
-    proof = mark.previous
-    if proof is None or proof.reachable is None or proof.observed_at > now - _CANDIDATE_NODE_GRACE_SECONDS:
-        return True
-    try:
-        return proof.reachable.ensure(home, shard, budget, force=force)
-    except candidate_node_maintenance.MarkCheckpointUnavailable:
-        mark.previous = None
-        return True
+def _candidate_page_membership(home, mark, shard, page, names, now, budget):
+    """Bind both membership lookups to the head, generations, shard and exact queued names."""
+    prior = mark.previous
+    earlier = (prior.reachable
+               if prior is not None and prior.observed_at <= now - _CANDIDATE_NODE_GRACE_SECONDS else None)
+    generation = [mark.head, mark.epoch, mark.marks.digest, shard,
+                  None if earlier is None else [earlier.epoch, earlier.digest]]
+    state = page.get("membership")
+    if (not isinstance(state, dict) or state.get("generation") != generation
+            or not names.issubset(state.get("names", ()))):
+        state = page["membership"] = {"generation": generation, "names": sorted(names), "current": {}, "previous": {}}
+    # Retain the original sample on retries, even after part of the directory page was swept.
+    sample = set(state["names"])
+    current = mark.marks.membership(home, shard, sample, budget, state["current"])
+    if current is None:
+        return None
+    previous = None
+    if earlier is not None:
+        try:
+            if [earlier.epoch, earlier.digest] == generation[1:3]:
+                previous = current
+            else:
+                previous = earlier.membership(home, shard, sample, budget, state["previous"])
+            if previous is None:
+                return None
+        except candidate_node_maintenance.MarkCheckpointUnavailable:
+            mark.previous = None
+    return current, previous
 
 
 def _retire_candidate_checkpoints(home, path, progress, budget, errors):
@@ -470,8 +491,9 @@ def _retire_candidate_checkpoints(home, path, progress, budget, errors):
         errors.append(_candidate_node_issue("清理检查点", candidate_node_maintenance.workspace(home), exc))
 
 
-def _sweep_candidate_node(directory, name, mark, now, authority_ns):
-    if name in mark.marks:
+def _sweep_candidate_node(directory, name, mark, membership, now, authority_ns):
+    current, previous = membership
+    if name in current:
         return False
     with _Directory(directory) as source:
         try:
@@ -485,8 +507,7 @@ def _sweep_candidate_node(directory, name, mark, now, authority_ns):
         proof = mark.previous
         # 较新的无关清单不会重置旧孤儿的宽限。重新采用的节点必经新写或更新时间。
         old_enough = max(file_ns, authority_ns) / 1e9 <= cutoff or (
-            proof is not None and proof.reachable is not None and proof.observed_at <= cutoff
-            and name not in proof.reachable and file_ns < proof.file_clock_ns
+            previous is not None and name not in previous and file_ns < proof.file_clock_ns
         )
         if not old_enough:
             return False
@@ -508,29 +529,39 @@ def _candidate_node_issue(stage, path, exc):
 def _sweep_candidate_nodes(home, directory, mark, budget, now, authority_ns, progress, errors):
     while not budget.exhausted():
         prefix = mark.shard_prefix
-        if prefix and not _candidate_shards_ready(home, mark, prefix, now, budget):
-            return False
         current = directory / prefix
         page = mark.shard_page if prefix else mark.root_page
         try:
-            with closing(_candidate_page(current, page, budget)) as names:
-                for name in names:
-                    if candidate_node_name(name) and name.startswith(prefix):
-                        if not prefix and not _candidate_shards_ready(home, mark, name[:2], now, budget):
-                            page["names"].append(name)  # 根层旧节点：下一片先读回其分片再判定。
-                            return False
-                        try:
-                            progress["removed"] += _sweep_candidate_node(current, name, mark, now, authority_ns)
-                        except OSError as exc:
-                            errors.append(_candidate_node_issue("回收", current / name, exc))
-                    elif not prefix and len(name) == 2 and all(ch in "0123456789abcdef" for ch in name):
-                        mark.shard_prefix = name
-                        break
+            names = _load_candidate_page(current, page, budget)
         except OSError as exc:
             if not prefix:
                 raise
             errors.append(_candidate_node_issue("枚举", current, exc))
             page.update(names=[], complete=True)
+            names = []
+        membership = None
+        if prefix:
+            sample = {name for name in names if name.startswith(prefix) and candidate_node_name(name)}
+            if sample:
+                membership = _candidate_page_membership(home, mark, prefix, page, sample, now, budget)
+                if membership is None:
+                    return False
+        while names and not budget.exhausted():
+            name = names[-1]
+            if candidate_node_name(name) and name.startswith(prefix):
+                if not prefix:
+                    membership = _candidate_page_membership(home, mark, name[:2], page, {name}, now, budget)
+                    if membership is None or budget.exhausted():
+                        return False
+                try:
+                    progress["removed"] += _sweep_candidate_node(current, name, mark, membership, now, authority_ns)
+                except OSError as exc:
+                    errors.append(_candidate_node_issue("回收", current / name, exc))
+            names.pop()
+            budget.charge(entries=1)
+            if not prefix and len(name) == 2 and all(ch in "0123456789abcdef" for ch in name):
+                mark.shard_prefix = name
+                break
         if prefix and _candidate_page_done(page):
             mark.shard_prefix = ""
             mark.shard_page = {}
@@ -791,6 +822,8 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
         if continuation:
             context.errors.extend(pin_errors)
             discovered = [action for action in context.discovery_actions if _reference_action_allowed(protection, action)]
+            if not _discovery_pending(context.scan_cursor):
+                discovered.extend(_curator_restore_actions(protection[0], context.errors))
             return discovered if _finish_pin_cycle(context) else []
     discovered = context.discovery_actions
     task_actions, selected_task_roots = _task_actions(
@@ -808,8 +841,8 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     actions.extend(_protected_runtime_actions(context, selected_task_roots))
     # 保留原类别错误顺序：任务权威错误在前，统一来源错误只发表一次。
     context.errors.extend(pin_errors)
-    pins = protection[0]
-    actions.extend(_curator_restore_actions(pins, context.errors))
+    if not _discovery_pending(context.scan_cursor):
+        actions.extend(_curator_restore_actions(protection[0], context.errors))
     actions.extend(_aged_file_actions(context, selected_task_roots, protection))
     actions.extend(_context_bundle_actions(context) if context.scan_budget is None else discovered)
     actions.extend(
@@ -1271,7 +1304,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 raise ValueError("candidate identity index mismatches")
             yield candidate.to_record()
 
-    def _rows(self, path, *, required=False, jsonl=None, strict_lines=False):
+    def _rows(self, path, *, required=False, jsonl=None, strict_lines=False, allow_torn_tail=False):
         if not (path.suffix == ".jsonl" if jsonl is None else jsonl):
             raw = yield from self._read(path)
             if raw is None:
@@ -1301,10 +1334,15 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     yield row
             del pending[:start]
         if pending and (strict_lines or pending.strip()):
-            row = json.loads(pending.decode("utf-8"))
-            if not isinstance(row, dict):
-                raise ValueError("pin source contains non-object rows")
-            yield row
+            try:
+                row = json.loads(pending.decode("utf-8"))
+                if not isinstance(row, dict):
+                    raise ValueError("pin source contains non-object rows")
+            except (ValueError, RecursionError):
+                if not allow_torn_tail:
+                    raise
+            else:
+                yield row
 
     def _verify_directory_leaf(self, path, member):
         expected = self.sources.get(path)
@@ -1701,8 +1739,6 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 yield nested if directory else None
 
     def _curator_dependencies(self, pins, state_path, state):
-        from .retired_thread_journal import _validate_row, retired_thread_state
-
         switch = read_live_extraction_switch(self.home, self.config)
         pins.curator_switch = switch
         pins.curator_sources[state_path] = self.sources[state_path][0]
@@ -1726,37 +1762,67 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             ranges.append((state.last_processed_audit_event_id, ""))
         if ranges:
             yield from self._curator_audit_dependencies(pins, ranges)
-        if switch.state != "enabled" and not pins.curator_threads:
-            return
+        yield from self._curator_retired_tombstones(pins)
+        if pins.curator_threads or pins.curator_retirements:
+            yield from self._curator_retired_journal(pins)
+
+    def _curator_retired_journal(self, pins):
+        from .retired_thread_journal import _validate_row, retired_thread_state
+
         journal = Path(self.home.owner_data_dir) / "retention" / "retired_threads.jsonl"
-        for row in self._rows(journal):
+        pending = set(pins.curator_retirements)
+        # A failed append can leave an incomplete terminal record. The append
+        # writer seals that tail on repair; complete receipts still prevent duplicates.
+        for row in self._rows(journal, allow_torn_tail=True):
+            yield 1
             if row is None:
-                yield 1
                 continue
             try:
                 _validate_row(row)
             except (ValueError, TypeError):
-                yield 1
                 continue
-            thread_id = row["thread_id"]
-            status = retired_thread_state(self.home, row)
-            if status == "purged" and thread_id in pins.curator_threads:
-                pins.curator_unresolved.add(thread_id)
-            elif status == "waiting":
-                root = pins.home / row["conversation_root"]
-                container = pins.home / row["trash_container"]
-                if root in self.roots and container.is_relative_to(Path(self.home.owner_trash_dir) / "retention"):
-                    tombstone = container / "tombstone.json"
-                    for meta in self._rows(tombstone):
-                        yield 1
-                        if meta is None or not _retired_conversation_matches(pins.home, row, container, meta):
-                            continue
-                        needed = _trash_curator_dependency(pins, container, meta, self.config, self.budget)
-                        if needed == "needed":
-                            pins.curator_retirements[container] = row
-            yield 1
-        if journal in self.sources:
-            pins.curator_recovery_source = (journal, self.sources[journal][0])
+            container = pins.home / row["trash_container"]
+            if pins.curator_retirements.get(container) == row:
+                pending.discard(container)
+            if row["thread_id"] in pins.curator_threads and retired_thread_state(self.home, row) == "purged":
+                pins.curator_unresolved.add(row["thread_id"])
+        pins.curator_unpublished = pending
+        pins.curator_journal_source = (journal, self.sources[journal][0])
+
+    def _curator_retired_tombstones(self, pins):
+        from .retired_thread_journal import retired_thread_row
+
+        trash = Path(self.home.owner_trash_dir) / "retention" / "conversation"
+        # The existing pin iterator budgets directory pages and tombstone bytes. The
+        # journal is a historical receipt; committed trash is the recovery authority.
+        with closing(self._entries(trash)) as entries:
+            for container, directory in entries:
+                yield 1
+                if not directory:
+                    continue
+                for meta in self._rows(container / "tombstone.json"):
+                    yield 1
+                    if meta is None or not isinstance(meta.get("source_path"), str):
+                        continue
+                    source = Path(meta["source_path"])
+                    root = source.parent.parent
+                    if root not in self.roots or not root.is_relative_to(pins.home):
+                        continue
+                    try:
+                        row = retired_thread_row(
+                            self.home, thread_id=source.stem, conversation_root=root,
+                            action_id=meta.get("action_id"), trash_container=container,
+                            retired_at=_timestamp(meta.get("moved_at")),
+                        )
+                        moved_at = datetime.fromisoformat(meta["moved_at"])
+                    except (TypeError, ValueError):
+                        continue
+                    if (container != _trash_destination(self.home, category="conversation", path=source, now=moved_at)
+                            or not _retired_conversation_matches(pins.home, row, container, meta)):
+                        continue
+                    if (_curator_restore_started(container, row, meta)
+                            or _trash_curator_dependency(pins, container, meta, self.config, self.budget) == "needed"):
+                        pins.curator_retirements[container] = row
 
     def _curator_audit_dependencies(self, pins, ranges):
         from .curator_audit_cursor import AuditRead, _reuse_cursor
@@ -3864,7 +3930,8 @@ def _trash_actions(
         if moved is None:
             errors.append(_state_error("MEMORY_RETENTION_TOMBSTONE_INVALID", tombstone))
             continue
-        if report.payload.get("status") != "trashed" or _trash_transaction_pending(tombstone.parent):
+        if (report.payload.get("status") != "trashed" or "restore" in report.payload
+                or _trash_transaction_pending(tombstone.parent)):
             continue
         # 旧记忆与Compact回收副本仍须可恢复；最终移除留给D-173-RESTORE，不能继续按龄清除。
         if report.payload.get("category") in {"daily", "curator_run", "compact"}:
@@ -4129,12 +4196,14 @@ def _tree_member_material(root: Path, item: Path) -> str:
 
 # LLM: 多路径摘要仅组合真实有效文件hash；任何坏成员都使外层无效。
 # 函数用途: 安全计算一组精确文件的稳定指纹。
-def paths_fingerprint(paths: tuple[Path, ...]) -> str:
+def paths_fingerprint(paths: tuple[Path, ...], *, member_fingerprints: dict[Path, str] | None = None) -> str:
     material = []
     for path in sorted(paths, key=str):
         digest = file_fingerprint(path)
         if not valid_fingerprint(digest):
             return "unreadable"
+        if member_fingerprints is not None:
+            member_fingerprints[path] = digest
         material.append(f"{path}:{digest}")
     return hashlib.sha256("\n".join(material).encode("utf-8")).hexdigest()
 
@@ -4248,7 +4317,8 @@ class _RetentionPins:
     curator_switch: ExtractionSwitchRead | None = None
     curator_sources: dict[Path, tuple | None] = field(default_factory=dict)
     curator_retirements: dict[Path, dict] = field(default_factory=dict)
-    curator_recovery_source: tuple[Path, tuple | None] | None = None
+    curator_unpublished: set[Path] = field(default_factory=set)
+    curator_journal_source: tuple[Path, tuple | None] | None = None
     curator_unresolved: set[str] = field(default_factory=set)
     target_rebuild: Any = field(default=None, repr=False)
     verified_targets: set[Path] = field(default_factory=set, repr=False)
@@ -4490,7 +4560,21 @@ def _retired_conversation_matches(owner, row, container, meta):
             and meta.get("payload_path") == str(container / "payload")
             and meta.get("action_id") == row["action_id"]
             and _timestamp(meta.get("moved_at")) == row["retired_at"]
-            and not _trash_transaction_pending(container))
+            and (not _trash_transaction_pending(container) or _curator_restore_started(container, row, meta)))
+
+
+def _curator_restore_started(container, row, meta):
+    if "restore" in meta:
+        return True
+    if not _trash_transaction_pending(container):
+        return False
+    action_id = retention_action_id(category="trash", operation="conversation_restore",
+                                    path=container, record_id=row["thread_id"])
+    expected = (action_id + "\n").encode("ascii")
+    try:
+        return read_bytes_beneath(container, (_TRASH_COMMIT_PENDING,), max_bytes=len(expected)) == expected
+    except (OSError, ValueError):
+        return False
 
 
 def _trash_curator_dependency(pins, container, meta, config=None, budget=None):
