@@ -104,10 +104,21 @@ def _agent_task_obligation(step):
         or result.get('effect_started') and result.get('submission_state') != 'not_started')
 
 
-# LLM: 公共准入与引擎路由共用原任务义务；只选择原生对账，不授予重提或后缀副作用许可。
-# 函数用途: 判断恢复是否必须先交回原 Agent 任务完成链。
+def _agent_effect_needs_repair(step):
+    facts = step.escalation_result
+    return (step.mode == 'agent_task' and facts.get('task_id') and facts.get('attempt_id')
+            and (facts.get('effect_state') in ('unknown', 'reserved') or facts.get('effect_outcome') == 'unknown')
+            and (facts.get('completion_ref') or isinstance(facts.get('cancellation_receipt'), dict)))
+
+
+def _terminal_agent_repair_steps(record):
+    if record.status not in ('succeeded', 'failed', 'cancelled'):
+        return ()
+    return tuple(step for step in record.steps if _agent_effect_needs_repair(step))
+
+
 def _requires_native_agent_resume(record):
-    return record.status == 'waiting_for_agent' or any(
+    return record.status == 'waiting_for_agent' or bool(_terminal_agent_repair_steps(record)) or any(
         has_subworkflow_obligation(step)
         or (_agent_task_obligation(step) and not step.escalation_result.get('completion_ref'))
         for step in record.steps)
@@ -379,6 +390,20 @@ class _WorkflowRunLifecycle:
         original_policy = ((frozen.get('concurrency_claim') or {}).get('record') or {}).get('policy', 'allow')
         if original_policy != 'allow':
             concurrency_policy = original_policy
+        from .run_store import _decode_run
+        decoded = _decode_run(frozen)
+        previous_operation = (frozen.get('control_operations') or {}).get(operation_key, {})
+        proof_only = bool(_terminal_agent_repair_steps(decoded)
+                          or previous_operation.get('terminal_agent_reconciliation') is True)
+        if proof_only:
+            options['terminal_agent_reconciliation'] = True
+            if options['expected_revision'] is None and concurrency_policy != 'allow':
+                options['expected_revision'] = decoded.revision
+            try:
+                return callback()
+            finally:
+                if original_policy != 'allow':
+                    _reconcile_workflow_claim(self.owner_home, decoded.workflow_id, workflow_run_id)
         if concurrency_policy == 'allow':
             return callback()
         if options['expected_revision'] is None:
@@ -386,8 +411,6 @@ class _WorkflowRunLifecycle:
         self._require_workflow_enabled(definition)
         # G5a-R3：非allow策略的dispatch会先绑定claim改写run.json或写排队票据；先对同一快照做只读当前业务预检
         #   （与回调内preflight同门，不论有无operation_key），拒绝时原运行与claim/队列证据不变；回调内与每次副作用前仍复核。
-        from .run_store import _decode_run
-        decoded = _decode_run(frozen)
         self._authorize_run(decoded, 'preflight')
         fingerprint = None
         intent = None
@@ -435,7 +458,8 @@ class _WorkflowRunLifecycle:
     # 函数用途: 在原运行排他锁内验证和执行一次显式恢复。
     def _resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
                             resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False,
-                            expected_revision=None, operation_key='', control_intent=None):
+                            expected_revision=None, operation_key='', control_intent=None,
+                            terminal_agent_reconciliation=False):
         if type(allow_script_drift) is not bool:
             raise ValueError('allow_script_drift必须为布尔值')
         if resolution_origin is not None and resolution_origin not in ('user', 'agent', 'system'):
@@ -450,13 +474,30 @@ class _WorkflowRunLifecycle:
                 self._authorize_run(record, 'preflight')
             # 必须先于begin_control的耐久写入，以及原生任务恢复/副作用准入；拒绝不改原证据。
             validate_definition_eligibility(definition)
+            proof_steps = _terminal_agent_repair_steps(record)
+            proof_only = terminal_agent_reconciliation or bool(proof_steps)
+            if proof_only and any(option is not None for option in (
+                    from_step_id, patched_step_output, updated_data_sources)):
+                raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
             if operation_key:
                 intent = self._resume_control_intent(control_intent, from_step_id, patched_step_output,
                                                      updated_data_sources, resolution_origin, allow_script_drift)
                 replay, record = self.store.begin_control(workflow_run_id, action='resume', operation_key=operation_key,
-                                                          expected_revision=expected_revision, intent=intent)
+                                                          expected_revision=expected_revision, intent=intent,
+                                                          **({'terminal_agent_reconciliation': True} if proof_only else {}))
                 if replay:
                     return record
+            proof_steps = _terminal_agent_repair_steps(record)
+            if proof_only:
+                if record.status not in ('succeeded', 'failed', 'cancelled'):
+                    raise ValueError('WORKFLOW_AGENT_COMPLETION_UNRESOLVED')
+                if proof_steps and self._authorize_run(record, 'resume') is not None:
+                    raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
+                if proof_steps:
+                    record = self._repair_terminal_agent_effects(record, proof_steps)
+                else:
+                    self._authorize_run(record, 'preflight')
+                return self.store.complete_control(workflow_run_id, operation_key) if operation_key else record
             if record.status in ('cancelled', 'cancelling'):
                 raise ValueError('WORKFLOW_CANCELLED')
             admission = self._authorize_run(record, 'resume')
@@ -694,6 +735,35 @@ class _WorkflowRunLifecycle:
 
     # LLM: 仅显式恢复在原执行锁和授权门后发表；每次写入都携带恢复意图，普通晚到写仍受终态守卫拒绝。
     # 函数用途: 找回原任务或继续已证明未开始的原提交，不重放成功前缀或在恢复这一拍执行后缀。
+    def _verify_agent_terminal_effect(self, record, step):
+        from .run_store import settle_agent_terminal_effect
+
+        if self.agent_steps is None:
+            raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
+        reference = step.escalation_result.get('completion_ref')
+        completion = self.agent_steps.completion(record, step)
+        if completion is not None:
+            if reference:
+                if (completion.get('completion_ref') == reference and step.status in ('succeeded', 'failed')
+                        and (step.status == 'succeeded') == (completion.get('status') == 'completed')
+                        and settle_agent_terminal_effect(step, completion=completion)):
+                    return
+            elif (record.status == 'cancelled' and not completion.get('outstanding_refs')
+                    and not completion.get('cleanup_error') and completion.get('effect_outcome') not in ('unknown', 'partial')
+                    and settle_agent_terminal_effect(step, cancelled=True)):
+                return
+        raise ValueError('WORKFLOW_AGENT_COMPLETION_UNRESOLVED')
+
+    def _repair_terminal_agent_effects(self, record, steps):
+        from .run_store import _concurrency_settled
+
+        for step in steps:
+            self._verify_agent_terminal_effect(record, step)
+        if record.effect_outcome in ('', 'running', 'unknown') and _concurrency_settled(record):
+            execution_receipt(record, effect_outcome='confirmed' if record.status == 'succeeded' else 'failed')
+        self.store.save_run(record)
+        return record
+
     def _resume_agent(self, record, definition):
         """继续核对原步骤，不因暂停/失败重新分配attempt或执行成功前缀。"""
         validate_definition_eligibility(definition)
@@ -706,7 +776,10 @@ class _WorkflowRunLifecycle:
                 and step.escalation_result.get('completion_ref') and step.status in ('succeeded', 'failed')), None)
             if completed is None:
                 raise ValueError('WORKFLOW_AGENT_COMPLETION_UNRESOLVED')
-            # 独立步骤快照先于run.json发表；这一拍只弥合崩溃窗口，不调用完成端口或执行后缀。
+            # A recovered step leaf can precede the run update. Repair its
+            # effect evidence and leave suffix dispatch to a later resume.
+            if _agent_effect_needs_repair(completed):
+                self._verify_agent_terminal_effect(record, completed)
             record = replace_run_record(record, dict(status='running' if completed.status == 'succeeded' else 'failed',
                 needs_repair=completed.needs_repair, failed_step_id=completed.step_id if completed.needs_repair else '',
                 current_step_id=completed.step_id, breakpoint=None))
@@ -744,17 +817,30 @@ class _WorkflowRunLifecycle:
                 record.status = 'waiting_for_agent'
                 self.store.save_run(record, resuming=True)
             return record
+        from .run_store import _concurrency_settled, settle_agent_terminal_effect
+
+        if not settle_agent_terminal_effect(step, completion=completion):
+            raise ValueError('WORKFLOW_AGENT_COMPLETION_UNRESOLVED')
         step.status = 'succeeded' if completion['status'] == 'completed' else 'failed'
         step.llm_involved = True
         step.output_snapshot = redact_sensitive_value(payload(completion.get('output', {})))
         step.escalation_result.update({name: completion.get(name) for name in ('completion_ref', 'result_ref', 'run_id')})
         step.error_code = '' if step.status == 'succeeded' else completion.get('error_code', 'WORKFLOW_AGENT_FAILED')
         step.needs_repair, step.ended_at = step.status == 'failed', time.time()
-        record = replace_run_record(record, dict(status='running' if step.status == 'succeeded' else 'failed',
-            needs_repair=step.needs_repair, failed_step_id=step.step_id if step.needs_repair else '', breakpoint=None))
+        pending = next((item for item in record.steps if _agent_task_obligation(item)
+                        and not item.escalation_result.get('completion_ref')), None)
+        failed = next((item for item in record.steps if item.status == 'failed' and item.needs_repair), None)
+        status = 'failed' if failed else 'running'
+        if pending and not failed:
+            status = 'failed' if record.status == 'failed' else 'waiting_for_agent'
+        record = replace_run_record(record, dict(status=status, needs_repair=bool(failed),
+            failed_step_id=failed.step_id if failed else '', current_step_id=(failed or pending or step).step_id,
+            breakpoint=None))
+        if status == 'failed' and _concurrency_settled(record):
+            execution_receipt(record, phase='terminal', effect_outcome='failed')
         self.store.save_run(record, resuming=True)
         self._step_progress(record, step, {'seq': record.progress_seq})
-        if step.status == 'failed':
+        if status != 'running':
             return record
         return self._drive(record, definition, index + 1)
 
@@ -785,7 +871,11 @@ class _WorkflowRunLifecycle:
     # 函数用途: 取消原运行或确认它已经结束，不改写已结清的历史结果。
     def _cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
         """原执行锁内逐条清理结构化派发责任；只有全部确认才完成原控制回执。"""
-        from .run_store import _concurrency_settled
+        from .run_store import (
+            _concurrency_settled,
+            agent_step_settled,
+            settle_agent_terminal_effect,
+        )
 
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
@@ -794,6 +884,8 @@ class _WorkflowRunLifecycle:
                                                       expected_revision=expected_revision)
             if replay:
                 return []
+            if proof_steps := _terminal_agent_repair_steps(record):
+                record = self._repair_terminal_agent_effects(record, proof_steps)
             if (record.status in ('succeeded', 'failed', 'skipped', 'cancelled') and _concurrency_settled(record)
                     and not any(has_subworkflow_obligation(step) for step in record.steps)):
                 # 已结清终态只确认本次控制，不经过 cancelling，也不覆盖原成功或失败。
@@ -804,7 +896,7 @@ class _WorkflowRunLifecycle:
             outstanding = []
             obligations = []
             for step in record.steps:
-                if _agent_task_obligation(step):
+                if _agent_task_obligation(step) and not agent_step_settled(step):
                     previous = payload(step.escalation_result)
                     reconcile = getattr(self.agent_steps, 'reconcile', None)
                     checked = reconcile(record, step) if callable(reconcile) else self.agent_steps is not None
@@ -814,7 +906,8 @@ class _WorkflowRunLifecycle:
             # 所有身份先核验；恢复的canonical ID已在同一原run/step落盘，之后才能取消。
             for step, checked in obligations:
                 previous = payload(step.escalation_result)
-                if not checked or not self.agent_steps.cancel(record, step):
+                if (not checked or not self.agent_steps.cancel(record, step)
+                        or not settle_agent_terminal_effect(step, cancelled=True)):
                     outstanding.append(step.escalation_result.get('task_id') or step.escalation_result.get('attempt_id') or step.step_id)
                 if previous != step.escalation_result:
                     record = self.store.save_step_result(workflow_run_id, step)
@@ -830,6 +923,9 @@ class _WorkflowRunLifecycle:
                     if previous != payload(step):
                         record = self.store.save_step_result(workflow_run_id, step)
             record.status = 'cancelling' if outstanding else 'cancelled'
+            if _concurrency_settled(record):
+                outcome = 'failed' if any(s.escalation_result.get('effect_started') for s in record.steps) else 'not_started'
+                execution_receipt(record, phase='terminal', effect_outcome=outcome)
             self.store.save_run(record)
             if not outstanding:
                 self.store.complete_control(workflow_run_id, operation_key)
@@ -1259,9 +1355,15 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         from .dag_scheduler import _run_step_worker, settle_batch_work
         from .step_retry import RetryWake, start_retry, wait_for_retry, wait_for_workflow_completion
 
+        def persist_batch(batch_step):
+            nonlocal record
+            record = self.store.save_step_result(record.workflow_run_id, batch_step)
+            state['record'] = record
+
         while True:
             waiting = pending_retry(step)
             step.escalation_result.setdefault('effect_state', 'reserved')
+            step.escalation_result['effect_reservation_id'] = uuid.uuid4().hex
             if waiting:
                 state.update(record=record, phase='retry_backoff', started=any(
                     item.escalation_result.get('effect_started') for item in record.steps
@@ -1309,6 +1411,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 return record, step, interruption
             if not isinstance(result, RetryWake):
                 if isinstance(result, BatchContinuation):
+                    result.bind_persistence(persist_batch)
                     step, result = settle_batch_work(result)
                 return record, step, result
             current = self.store.reserve_step_retry(
@@ -1365,7 +1468,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                     mark_condition_indeterminate(step, error)
                 else:
                     if matched:
-                        if spec.get('retry_policy'):
+                        if spec.get('retry_policy') or record.parent_workflow_run_id and step.mode != 'subworkflow':
                             record, step, interrupted = self._run_sequential_retry(
                                 step, spec, outputs, definition, record, state,
                             )
@@ -1722,6 +1825,12 @@ class WorkflowEngine(_WorkflowRunLifecycle):
 
         # LLM: 所有写只发生在协调线程，原Store返回的最新revision随即同步。
         # 函数用途: 发表当前逐批账本及进度摘要。
+        coordinator_persist = None
+
+        def bind_persistence(callback):
+            nonlocal coordinator_persist
+            coordinator_persist = callback
+
         def persist():
             record.batches_summary = batch_summary(record.batches)
             # 重算而非粘住旧阻断：恢复修好失败批后，旧健康也必须随账本更新。
@@ -1731,7 +1840,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.escalation_result['query_health'] = payload((blocked or healths)[0])
             else:
                 record.escalation_result.pop('query_health', None)
-            if not run.ephemeral_debug and not getattr(run, '_batch_worker', False):
+            if coordinator_persist is not None:
+                coordinator_persist(record)
+            elif not run.ephemeral_debug and not getattr(run, '_batch_worker', False):
                 published = self.store.save_step_result(run.workflow_run_id, record)
                 run.revision, run.effect_outcome = published.revision, 'unknown'
 
@@ -1796,11 +1907,17 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             persist()
             return status in ('failed', 'blocked')
 
+        def release_unstarted(index):
+            row = record.batches[index]
+            row.update(status='pending', started_at=0)
+            row.pop('attempt_id', None)
+            persist()
+
         persist()
         indices = [row['index'] for row in record.batches if row['status'] != 'succeeded']
         dispatcher = BatchDispatch(
             indices, execute, publish, prepare=prepare, max_parallel=config['max_parallel'],
-            fail_fast=config['on_batch_error'] == 'fail_fast',
+            fail_fast=config['on_batch_error'] == 'fail_fast', release_unstarted=release_unstarted,
             submit=lambda fn, index: submit_workflow_step(self, run, fn, index, coordinator=record.mode == 'subworkflow'),
         )
 
@@ -1814,7 +1931,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.error_message = '批处理未完成，见逐批账本' if record.needs_repair else ''
 
         if getattr(run, '_defer_foreach', False):
-            raise BatchContinuation(dispatcher, finish)
+            raise BatchContinuation(dispatcher, finish, bind_persistence)
         dispatch_batches(dispatcher)
         finish()
 

@@ -378,11 +378,12 @@ def submit_workflow_step(engine, run, fn, *args, coordinator=False):
 class BatchDispatch:
     """Advance a foreach fan-in on the run coordinator as batch futures settle."""
 
-    def __init__(self, indices, execute, publish, *, submit, prepare, max_parallel, fail_fast):
+    def __init__(self, indices, execute, publish, *, submit, prepare, max_parallel, fail_fast, release_unstarted=None):
         self._remaining = iter(indices)
         self._execute, self._publish = execute, publish
         self._submit, self._prepare = submit, prepare
         self._max_parallel, self._fail_fast = max_parallel, fail_fast
+        self._release_unstarted = release_unstarted
         self.active = {}
         self._stopped = False
 
@@ -408,14 +409,22 @@ class BatchDispatch:
             for future in self.active:
                 future.cancel()
         wait(future for future in self.active if not future.cancelled())
+        for future in sorted(self.active, key=self.active.__getitem__):
+            index = self.active.pop(future)
+            if future.cancelled():
+                if self._release_unstarted is not None:
+                    self._release_unstarted(index)
+            elif future.exception() is None:
+                self._publish(index, future.result())
 
 
 class BatchContinuation(Exception):
     """Return a prepared foreach to its existing run coordinator."""
 
-    def __init__(self, dispatch, finish):
+    def __init__(self, dispatch, finish, bind_persistence):
         super().__init__()
         self.dispatch, self.finish = dispatch, finish
+        self.bind_persistence = bind_persistence
 
 
 def dispatch_batches(dispatch):

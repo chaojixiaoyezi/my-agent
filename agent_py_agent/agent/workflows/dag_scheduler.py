@@ -15,7 +15,6 @@ from dataclasses import replace
 from heapq import heapify, heappop, heappush
 from itertools import count
 from threading import Lock
-from types import SimpleNamespace
 from typing import Any
 
 from ..assets.workflow_store import (
@@ -244,13 +243,8 @@ def _run_effect_observed(record):
 
 
 def _settle_worker_effect(engine, run_id, step, *, interrupted=False):
-    # 未启动须证明本次执行无任何尝试被准入：当前或更早已准入尝试留有标记都按已准入裁决。
-    current = step.escalation_result.get('attempt_id')
-    earlier = getattr(engine, '_admitted_attempts', tuple)()
-    probes = [step, *(SimpleNamespace(step_id=step.step_id, escalation_result={'attempt_id': attempt})
-                      for attempt in earlier if attempt != current)]
     try:
-        marker = any(engine.store.step_effect_marker(run_id, probe) for probe in probes)
+        marker = engine.store.reservation_effect_marker(run_id, step)
     except (OSError, ValueError):
         marker = None
     settle_step_effect(step, marker=marker, interrupted=interrupted)
@@ -262,6 +256,7 @@ def _worker_with_effect_admission(engine, run_id, step):
     worker = copy(engine)
     guard = Lock()
     admitted = set()
+    reservation = step.escalation_result.get('effect_reservation_id')
 
     def authorize(run, phase, *, definition=None):
         result = engine._authorize_run(run, phase, definition=definition)
@@ -272,17 +267,14 @@ def _worker_with_effect_admission(engine, run_id, step):
             _check_stop()
             attempt = step.escalation_result.get('attempt_id')
             if attempt not in admitted:
+                if reservation is not None:
+                    step.escalation_result['effect_reservation_id'] = reservation
                 engine.store.admit_step_effect(run_id, step)
                 step.escalation_result.update(effect_state='admitted', effect_started=True)
                 admitted.add(attempt)
         return result
 
-    def admitted_attempts():
-        with guard:
-            return tuple(admitted)
-
     worker._authorize_run = authorize
-    worker._admitted_attempts = admitted_attempts
     return worker
 
 
@@ -562,7 +554,8 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 elif not pending_review:
                     step.escalation_result['attempt_id'] = uuid.uuid4().hex
                 step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
-                step.escalation_result.update(effect_state='reserved', effect_started=False)
+                step.escalation_result.update(effect_state='reserved', effect_started=False,
+                                              effect_reservation_id=uuid.uuid4().hex)
                 step.escalation_result.pop('effect_outcome', None)
 
                 state.update(record=record, phase='step_publish')
