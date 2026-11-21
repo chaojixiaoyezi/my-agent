@@ -21,6 +21,7 @@ from .lessons import (
     lesson_heat_rows,
 )
 from .project_bindings import resolve as resolve_project_bindings
+from .scope_contract import canonical_scope_key
 
 
 # LLM: 活跃范围来自宿主范围和精确项目身份，词面相似度只用于范围内的排序。
@@ -67,9 +68,9 @@ def dream_relocation_attributes(record: MemoryRecord) -> dict:
     """旧 Dream 记录沿原 USER.md 迁移出处恢复 personal 范围。"""
     attributes = record.attributes if isinstance(record.attributes, dict) else {}
     source = attributes.get("relocated_from")
-    if (record.source == "user-profile-dream" and record.action != "remove"
-            and isinstance(source, str) and source.startswith("USER.md#") and source.removeprefix("USER.md#")
-            and attributes.get("scope_type") in (None, "") and attributes.get("scope_key") in (None, "")):
+    if (isinstance(source, str) and source.startswith("USER.md#") and source.removeprefix("USER.md#")
+            and attributes.get("scope_type") in (None, "") and attributes.get("scope_key") in (None, "")
+            and getattr(record, "source", "") == "user-profile-dream" and getattr(record, "action", "") != "remove"):
         return {**attributes, "scope_type": "personal", "scope_key": "personal"}
     return attributes
 
@@ -204,6 +205,17 @@ def runtime_recall_predicate(scope: MemoryRecallScope, query: str, *,
         return not query_tokens.isdisjoint(tokenize(index_text(str(getattr(record, "content", "") or ""),
                                                                 record.attributes)))
 
+    # The SQL index canonicalizes legacy typed aliases. The predicate still checks the record itself.
+    index_scopes = set()
+    for raw_kind, key in scope.keys:
+        scope_type = str(raw_kind).strip().lower()
+        if not scope_type or not key:
+            continue
+        try:
+            index_scopes.add((scope_type, canonical_scope_key(scope_type, key)))
+        except ValueError:
+            continue
+    matches.index_scopes = frozenset(index_scopes)
     return matches
 
 

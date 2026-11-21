@@ -178,3 +178,29 @@ def test_empty_add_reports_exact_content_conflicts_without_all(tmp_path, monkeyp
     result = service.promote(candidate.candidate_id, automatic=True)
     assert result.reason_code == "LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH"
     assert service.candidates.get(candidate.candidate_id).conflicts_with == ["existing"]
+
+
+def test_semantic_curator_keeps_exact_lexical_hits_after_candidate_limit(tmp_path, monkeypatch):
+    from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
+
+    memory = JsonlMemory(tmp_path / "memory" / "long_term" / "memory.jsonl")
+    unrelated = [_fact(f"a-current-{i:04}", f"ordinary procedure {i}") for i in range(1000)]
+    exact = [_fact(f"z-current-{i}", f"quasarneedle procedure {i}") for i in range(5)]
+    _seed_index(memory, [*unrelated, *exact])
+    source = FormalMemorySource(memory, LessonRepository(tmp_path / "lessons", tmp_path / "INDEX.md"),
+                                HotRuleRepository(tmp_path / "memory-hot.md"))
+    scopes = frozenset({("project", "project:current")})
+    assert {row.authority_id for row in source.read(query="quasarneedle", scopes=scopes)} == {
+        record.entry_id for record in exact
+    }
+    empty_keyword = source.read(query="", scopes=scopes)
+    monkeypatch.setattr(memory, "_embedder", LocalHashingEmbedder())
+    monkeypatch.setattr("agent_py_agent.agent.memory_store.jsonl._queue_vector_backfill", lambda *_args: None)
+    window = source.read(query="quasarneedle", scopes=scopes)
+    assert {row.authority_id for row in window} == {record.entry_id for record in exact}
+    assert any(row["code"] == "FORMAL_MEMORY_COVERAGE_PARTIAL"
+               and "candidate_window_limited" in row["detail"] and "vectors_missing" in row["detail"]
+               for row in window.errors)
+    empty = source.read(query="", scopes=scopes)
+    assert 0 < len(empty) <= 32 and empty == empty_keyword and empty.errors == ()
+    assert memory._pending_access == {}

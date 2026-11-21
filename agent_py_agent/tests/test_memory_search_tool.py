@@ -211,3 +211,47 @@ def test_switch_is_a_boundary_the_model_cannot_flip(tmp_path):
                            origin=ChangeOrigin("model"))
     assert report["ok"] is False and report["code"] == "PARAMETER_BOUNDARY"
     assert user_config.read_text(encoding="utf-8") == ""
+
+
+def test_explicit_project_search_retains_hits_beyond_global_candidate_limit(tmp_path):
+    from agent_py_agent.tests.test_conveyor_m51_read_index_scope_subject import _fact, _seed_index
+
+    agent = _agent(tmp_path)
+    outside = [_fact(f"a-outside-{i:04}", f"deploy {i}", scope_key="project:outside") for i in range(1000)]
+    expected = [_fact(f"z-current-{i}", f"deploy {i} " + "independent operational details " * 10,
+                      scope_key="task:current") for i in range(5)]
+    _seed_index(agent.memory, [*outside, *expected])
+    result = _call(agent, {"project": "current", "query": "deploy"})
+    assert {row["entry_id"] for row in result["entries"]} == {row.entry_id for row in expected}
+    assert agent.memory._pending_access == {}
+
+
+def test_current_and_previous_turn_use_scope_before_candidate_limits(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams, RuntimeContextRequest
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _prepare_runtime_context
+    from agent_py_agent.agent.backends.base import EchoBackend
+    from agent_py_agent.agent.conversation.models import PreviousUserTurn
+    from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
+    from agent_py_agent.tests.test_conveyor_m51_read_index_scope_subject import _fact, _seed_index
+
+    agent = _agent(tmp_path)
+    agent.backend = EchoBackend()
+    outside = [_fact(f"a-outside-{i:04}", f"quasarneedle {i}", scope_key="project:outside") for i in range(1000)]
+    target = _fact("z-current", "quasarneedle " + "independent operational details " * 10, scope_key="task:current")
+    _seed_index(agent.memory, [*outside, target])
+    selected = MemoryRecallScope.from_runtime(task_attributes={"project_id": "current"})
+    request_id = "scoped-turn"
+    previous = PreviousUserTurn(
+        preview="quasarneedle", owner_id=agent.home_paths.owner_id, thread_id="thread-1", request_id=request_id,
+    )
+
+    def prepare(query, *, history=None):
+        agent._current_run_params = RunParams(memory_recall_scope=selected, request_id=request_id,
+                                             conversation_history_seed=history)
+        prepared = _prepare_runtime_context(agent, RuntimeContextRequest(
+            query, [], False, allowed_tools=[], request_id=request_id, save=False,
+        ))
+        return [row.entry_id for row in prepared.memories]
+
+    assert prepare("quasarneedle") == [target.entry_id]
+    assert prepare("another matter", history=SimpleNamespace(previous_user_turn=previous)) == [target.entry_id]

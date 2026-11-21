@@ -236,6 +236,10 @@ def _relevant_long_term_items(
         scope_filter = {"scopes": scopes} if scopes is not None else {}
         records, facts = search(query, limit, visible, latency_safe=True, **scope_filter)
         coverages = [facts.get("coverage") if isinstance(facts, dict) else None]
+        semantic = facts.get("semantic_coverage") if isinstance(facts, dict) else None
+        if isinstance(semantic, dict) and semantic.get("partial"):
+            errors.append({"code": "FORMAL_MEMORY_COVERAGE_PARTIAL",
+                           "detail": "semantic=" + ",".join(semantic.get("reasons", ()))})
     partial = next((row for row in coverages if isinstance(row, dict) and row.get("partial")), None)
     if partial is not None:
         errors.append({

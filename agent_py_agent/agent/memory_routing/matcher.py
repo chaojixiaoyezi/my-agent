@@ -4,10 +4,14 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..common.text_norm import fold_key
 from ..common.value_parsing import dedupe_strings
 from .models import MemoryPathResolution, MemoryReadReceipt, MemoryRoute, MemoryRouteMatch
+
+if TYPE_CHECKING:
+    from ..memory_store.recall import MemoryRecallScope
 
 VALID_MODES = {"soft", "strict"}
 
@@ -17,16 +21,26 @@ def match_routes(
     routes: list[MemoryRoute],
     *,
     limit: int | None = 5,
+    recall_scope: MemoryRecallScope | None = None,
 ) -> list[MemoryRouteMatch]:
     normalized_query = _normalize(query)
 
     hits = [
         match
         for route in routes
-        if (match := _match_one_route(normalized_query, route)) is not None
+        if route_in_recall_scope(route, recall_scope)
+        and (match := _match_one_route(normalized_query, route)) is not None
     ]
     hits.sort(key=lambda item: (-item.score, -item.route.priority, item.route.route_id))
     return _limit_matches(hits, limit)
+
+
+def route_in_recall_scope(route: MemoryRoute, recall_scope: MemoryRecallScope | None) -> bool:
+    """Match generated type:key scopes and the legacy unqualified global scope."""
+    if recall_scope is None:
+        return True
+    kind, separator, key = route.scope.partition(":")
+    return recall_scope.allows(kind, key if separator else kind)
 
 
 def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[str], list[str]]:

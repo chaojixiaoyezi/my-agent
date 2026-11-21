@@ -97,13 +97,15 @@ def removal_cleanup_phase(*, formal_memory_changed: bool, enabled: bool = True):
 class JsonlMemoryIndexMixin:
     # LLM: 索引缺失/未追平返回None供权威降级，错误不能伪装完整零命中。
     # 函数用途: 查询本代冷热索引并回读当前分片，返回真实coverage。
-    def _search_tier_index(self, query, top_k, *, scopes=None):
+    def _search_tier_index(self, query, top_k, *, scopes=None, include_semantic=False):
         from .read_index import MemoryReadIndex, MemoryReadIndexGenerationConflict
 
         index = MemoryReadIndex(self.path)
         try:
-            scope_filter = {"scopes": scopes} if scopes is not None else {}
-            candidates, coverage = index.query(query, limit=min(1000, max(1, top_k)), **scope_filter)
+            options = {"scopes": scopes} if scopes is not None else {}
+            if include_semantic:
+                options["include_semantic"] = True
+            candidates, coverage = index.query(query, limit=min(1000, max(1, top_k)), **options)
             if coverage["status"] != "complete":
                 return None, coverage
             return index.resolve(candidates, operation_id=coverage["operation_id"]), coverage

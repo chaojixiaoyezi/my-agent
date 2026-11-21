@@ -847,9 +847,10 @@ class _JsonlMemorySearchMixin:
         query: str,
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
-        *, latency_safe: bool = False,
+        *, latency_safe: bool = False, scopes: frozenset[tuple[str, str]] | None = None,
     ) -> list[MemoryRecord]:
-        return self._search_scoped(query, top_k, predicate, record_access=True, latency_safe=latency_safe)[0]
+        return self._search_scoped(query, top_k, predicate, record_access=True,
+                                   latency_safe=latency_safe, scopes=scopes)[0]
 
     # LLM: 候选检索复用正式 allowlist 与混合排序，但候选尚未注入上下文，不能写访问信号。
     # LLM: 候选可显式latency_safe，默认保持同步嵌入合同。
@@ -859,9 +860,10 @@ class _JsonlMemorySearchMixin:
         query: str,
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
-        *, latency_safe: bool = False,
+        *, latency_safe: bool = False, scopes: frozenset[tuple[str, str]] | None = None,
     ) -> list[MemoryRecord]:
-        return self._search_scoped(query, top_k, predicate, record_access=False, latency_safe=latency_safe)[0]
+        return self._search_scoped(query, top_k, predicate, record_access=False,
+                                   latency_safe=latency_safe, scopes=scopes)[0]
 
     # LLM: 与 search_scoped_candidates 同一检索（同 allowlist、同排序、不写访问信号），另返回本次检索的结构化事实：
     #   mode（semantic/keyword/none）、fallback_reason、scoped_entries 与存储层 semantic_recall 状态。只读工具据此
@@ -885,8 +887,11 @@ class _JsonlMemorySearchMixin:
         query: str,
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
+        *,
+        scopes: frozenset[tuple[str, str]] | None = None,
     ) -> list[MemoryRecord]:
-        return self._search_scoped(query, top_k, predicate, record_access=False, lexical_only=True)[0]
+        return self._search_scoped(query, top_k, predicate, record_access=False,
+                                   lexical_only=True, scopes=scopes)[0]
 
     # LLM: 已入选身份经本代坐标回读并点查永久屏障；索引未追平只走原有界权威，不能经all枚举删除历史。
     #   核对原scope/完整版本及渲染门；保序映射只确认每个ID一次，隔离/撤销/替换项不得touch。
@@ -1167,14 +1172,17 @@ class _JsonlMemorySearchMixin:
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         if top_k <= 0:
             return [], _scoped_retrieval_facts(None, 0, self._semantic_status)
-        embedder = None if lexical_only else self._embedder
-        if scopes is not None:
-            # 并行语义臂也只读该范围，保留没有词面交集的语义候选。
-            projected, coverage = self._search_tier_index(query if embedder is None else "", 1000, scopes=scopes)
-        elif embedder is None:
-            projected, coverage = self._search_tier_index(query, 1000)
-        else:
-            projected, coverage = None, {"status": "semantic_full_scan"}
+        if scopes is None and isinstance(hint := getattr(predicate, "index_scopes", None), frozenset):
+            scopes = hint
+        if scopes is not None and not scopes:
+            return [], {**_scoped_retrieval_facts(None, 0, self._semantic_status),
+                        "coverage": {"status": "complete", "result_truncated": False}}
+
+        embedder = None if lexical_only or not str(query or "").strip() else self._embedder
+        options = {"scopes": scopes} if scopes is not None else {}
+        if embedder is not None:
+            options["include_semantic"] = True
+        projected, coverage = self._search_tier_index(query, _AUTHORITY_SCAN_MAX_RECORDS, **options)
         if projected is None:
             from ._jsonl_indexing import bounded_authority_records
 
@@ -1198,7 +1206,7 @@ class _JsonlMemorySearchMixin:
             # embedding 臂本就跨语言(mean centering 实证),两臂互补。
             # 索引文本必须与缓存键用同一口径（index_text），否则写入键与清理键不一致。
             docs = [(record.entry_id, index_text(record.content, record.attributes)) for record in active]
-            cached = {} if lexical_only else self._cached_vectors_for(docs)
+            cached = {} if embedder is None else self._cached_vectors_for(docs)
             retriever = HybridRetriever(embedder)
             ranked = retriever.rank(
                 query,
@@ -1209,15 +1217,14 @@ class _JsonlMemorySearchMixin:
                 vector_min_score=0.30,
                 cached_vectors=cached,
                 **({"latency_safe": True, "cached_query_vector": _query_vector(self, query)}
-                   if latency_safe and not lexical_only else {}),
+                   if latency_safe and embedder is not None else {}),
             )
-            if lexical_only:
-                pass
-            elif latency_safe:
-                _queue_vector_backfill(self, query, active, cached)
-            else:
-                _query_vector(self, query, retriever.last_query_vector)
-                self._remember_cached_vectors(docs, retriever, cached)
+            if embedder is not None:
+                if latency_safe:
+                    _queue_vector_backfill(self, query, active, cached)
+                else:
+                    _query_vector(self, query, retriever.last_query_vector)
+                    self._remember_cached_vectors(docs, retriever, cached)
             by_id = {record.entry_id: record for record in active}
             order = [entry_id for entry_id, _score in ranked]
             # 词面臂不设门槛，RRF 却会把只在词面臂靠前、向量臂低于门槛的条目挤出候选或压到候选末尾；
@@ -1235,8 +1242,16 @@ class _JsonlMemorySearchMixin:
         if record_access:
             for record in selected:
                 self._note_access(record.entry_id)
-        facts = _scoped_retrieval_facts(retriever, len(active), self._semantic_status)
-        return selected, {**facts, "coverage": coverage}
+        facts = {**_scoped_retrieval_facts(retriever, len(active), self._semantic_status),
+                 "coverage": coverage}
+        if embedder is not None:
+            reasons = []
+            if coverage.get("semantic_window_truncated") or coverage.get("partial"):
+                reasons.append("candidate_window_limited")
+            if facts["fallback_reason"]:
+                reasons.append(facts["fallback_reason"])
+            facts["semantic_coverage"] = {"partial": bool(reasons), "reasons": reasons}
+        return selected, facts
 
     # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
     #   先用权威向量库 memory_vectors.json 里已有的向量（_stored_vectors_for：身份对上、文本完全一致），剩下的才查正文哈希缓存；
