@@ -22,6 +22,7 @@ from ..backends.errors import ProviderTimeoutError
 from ..backends.request_budget import RequestBudgetExceeded, RequestTokenBudget
 from ..backends.tool_ir import AssistantTurn, ToolResult
 from ..common.cancellation import raise_if_cancelled
+from ..common.fast_dataclass import fast_replace
 from ..concurrency.interrupt import (
     is_interrupted,
     register_interrupt_callback,
@@ -1857,7 +1858,7 @@ def _provider_request_options(backend, state: _ModelGenerationState, *, forced: 
     )
     token_budget = getattr(state, "token_budget", None)
     if output_limit is not None and token_budget is not None and token_budget.output_tokens > output_limit:
-        token_budget = replace(token_budget, output_tokens=output_limit)
+        token_budget = fast_replace(token_budget, output_tokens=output_limit)
     if not (system_instruction or thinking_disabled or effort or first_event_timeout is not None
             or token_budget is not None or remaining is not None):
         return None
