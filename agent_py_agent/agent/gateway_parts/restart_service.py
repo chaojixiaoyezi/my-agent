@@ -48,6 +48,10 @@ CANCELLED_EVENT_TYPE = "gateway_restart_cancelled"
 _POLL_SECONDS = 0.25
 # 排空期间待处理请求上的结构化等待原因（admission_wait_reason），客户端据等待事实续期。
 RESTART_DRAIN_HOLD_REASON = "gateway_restart_draining"
+# 只有这两种提交结果代表请求已受理；conflict 表示同一进程已有不同操作在位。
+RESTART_ADMITTED_STATUSES = frozenset({"scheduled", "coalesced"})
+# 不同操作在位时复用已登记的状态冲突合同（先读最新状态再决定，不原样重放）。
+RESTART_CONFLICT_ERROR_CODE = "RUNTIME_CONFLICT"
 
 _phase_lock = threading.Lock()
 _phase: dict[str, object] = {"phase": "idle", "request_id": "", "since": 0.0}
@@ -290,10 +294,22 @@ def submit_restart_request(
         }
 
     payload = update_json_file_atomic(restart_request_path(paths), updater)
+    if outcome.get("status") == "conflict":
+        # 在位请求原样保留、未登记本次发起方；回执只描述在位操作，入口不得把它渲染成本次受理。
+        return {"status": "conflict", "error_code": RESTART_CONFLICT_ERROR_CODE, "side_effect_state": "not_started",
+                "requested_operation": operation, "incumbent_operation": str(payload.get("operation") or "restart"),
+                "incumbent_request_id": str(payload.get("request_id") or ""), "request": payload,
+                "next_step": "等在位排空完成或取消后再提交；用 my-agent gateway status 查看在位请求进度，不要原样重试。"}
     if outcome.get("status") == "scheduled":
         _record_recent_request(paths, requester, current)
     return {"status": outcome.get("status", "scheduled"), "request": payload,
             "restart_receipt": payload.get("restart_receipt") or planned}
+
+
+# LLM: 各入口共用的受理判据：只有新排队或同操作合并算受理；冲突、冷却、防循环都是未开始的拒绝。
+# 函数用途: 判断一次重启/停机提交结果是否已被受理。
+def restart_request_admitted(result: dict[str, object]) -> bool:
+    return str(result.get("status") or "") in RESTART_ADMITTED_STATUSES
 
 
 def _cooldown_or_loop_refusal(
@@ -661,6 +677,8 @@ __all__ = [
     "CONTINUATION_EVENT_TYPE",
     "HOSTING_GATEWAY_PID_ENV",
     "REQUEST_SCHEMA",
+    "RESTART_ADMITTED_STATUSES",
+    "RESTART_CONFLICT_ERROR_CODE",
     "RESTART_DRAIN_HOLD_REASON",
     "append_restart_cancellation",
     "append_restart_continuations",
@@ -674,6 +692,7 @@ __all__ = [
     "restart_completed_path",
     "restart_draining",
     "restart_phase",
+    "restart_request_admitted",
     "restart_request_path",
     "restart_state_path",
     "run_restart_drain",

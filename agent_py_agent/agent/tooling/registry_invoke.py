@@ -529,9 +529,13 @@ def _with_effective_registry_workspace(
 # or private-network field must be applied to a shallow copy; Terminal also needs its nested
 # ShellTool copied so one request cannot mutate another request's permissions.
 # 函数用途: 为本次工具调用复制带可变权限字段的 handler，避免单 Gateway 并发串目录或私网授权。
-def land_accepted_workspace_file(registry, boundary, destination, payload: bytes, *,
-                                 max_bytes: int) -> tuple[str, str, str]:
-    """经本轮普通写边界发布已核验的字节，遇到其它内容时不覆盖。"""
+def land_accepted_workspace_file(registry, boundary, destination, payload: bytes | None, *,
+                                 max_bytes: int, accepted_digest: str) -> tuple[str, str, str]:
+    """经本轮普通写边界发布已核验的字节，遇到其它内容时不覆盖。
+
+    目标已存在时只按同一受保护解析结果读回并比对已采用摘要（只读 already_landed / conflict），
+    不需要暂存字节；目标缺失时才要求 payload（已核验与 accepted_digest 一致），否则返回 source_missing。
+    """
     from ._filesystem_write import _atomic_write_bytes, _system_ledger_write_error
     from ._persona_write_guard import _persona_approval_write_error, _persona_injection_write_error
 
@@ -566,6 +570,8 @@ def land_accepted_workspace_file(registry, boundary, destination, payload: bytes
     try:
         present = read_bytes_beneath(root, relative.parts, max_bytes=max_bytes)
         if present is None:
+            if payload is None:
+                return "source_missing", "", ""
             if _system_ledger_write_error(target):
                 return "scope_blocked", "", "WRITE_FORBIDDEN"
             if _persona_approval_write_error(target, tool.protected_persona_root):
@@ -578,24 +584,26 @@ def land_accepted_workspace_file(registry, boundary, destination, payload: bytes
                         return "scope_blocked", "", "PATH_OUTSIDE_WORKSPACE"
                     _atomic_write_bytes(target, payload, create_only=True, expected_version="absent")
             except (FileExistsError, StaleFileVersionError):
-                return _existing_workspace_file(root, relative.parts, payload, max_bytes=max_bytes)
+                return _existing_workspace_file(root, relative.parts, accepted_digest, max_bytes=max_bytes)
             actual = read_bytes_beneath(root, relative.parts, max_bytes=max_bytes)
             if actual == payload:
                 return "landed", sha256(payload).hexdigest(), ""
             return "conflict", sha256(actual).hexdigest() if actual is not None else "", ""
-        return ("already_landed" if present == payload else "conflict"), sha256(present).hexdigest(), ""
+        present_digest = sha256(present).hexdigest()
+        return ("already_landed" if present_digest == accepted_digest else "conflict"), present_digest, ""
     except ManagedFileReadLimitExceeded:
         return "conflict", "", ""
     except (OwnerQuotaExceeded, OwnerQuotaUnavailable, OSError, ValueError, RuntimeError) as error:
         return "landing_unverified", "", type(error).__name__
 
 
-def _existing_workspace_file(root: Path, parts: tuple[str, ...], payload: bytes, *,
+def _existing_workspace_file(root: Path, parts: tuple[str, ...], accepted_digest: str, *,
                              max_bytes: int) -> tuple[str, str, str]:
     content = read_bytes_beneath(root, parts, max_bytes=max_bytes)
     if content is None:
         return "landing_unverified", "", "FileNotFoundError"
-    return ("already_landed" if content == payload else "conflict"), sha256(content).hexdigest(), ""
+    digest = sha256(content).hexdigest()
+    return ("already_landed" if digest == accepted_digest else "conflict"), digest, ""
 
 
 def _request_local_tool_for_invocation(

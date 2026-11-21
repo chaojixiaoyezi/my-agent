@@ -2887,8 +2887,34 @@ class _RegisterBusinessToolsBusinessAcceptTool(BaseTool):
                     if row['destination'] == phase['destination'] and row['files_written']), None)
         if row is None:
             raise PermissionError('未找到子任务清单中已写入的对应暂存文件')
-        remember({**request['params'], **{key: row[key] for key in (
-            'child_run_id', 'staging_ref', 'destination', 'sha256')}})
+        intent = {**request['params'], **{key: row[key] for key in (
+            'child_run_id', 'staging_ref', 'destination', 'sha256')}}
+        remember(intent, is_accepted=self._intent_accepted)
+        return intent
+
+    # LLM: 只按原资产账判断旧意图的精确版本是否已被采用；读不到原账时抛 PermissionError，由绑定方拒绝替换。
+    # 函数用途: 为同目标的新采用意图提供原采用结果核对。
+    def _intent_accepted(self, intent):
+        keys = ('space_id', 'asset_id', 'version_ref')
+        if any(not isinstance(intent.get(key), str) or not intent[key] for key in keys):
+            return False
+        return self.accepted_workspace_version(**{key: intent[key] for key in keys}) is not None
+
+    # LLM: 仅在原采用确认未产生副作用（not_started）后释放本次意图，且原资产账未显示该版本已被采用；
+    #   释放失败只保留旧意图，下一次登记会按原资产账协调，不改变本次拒绝回执。
+    # 函数用途: 让被确认拒绝的采用意图不再占住目标或投影为交付义务。
+    def _release_rejected_delivery(self, intent):
+        from .request_errors import ConversationPersistenceError
+
+        binder = getattr(self._business_host._current_run_params, 'conversation_task_binding_callback', None)
+        release = getattr(binder, 'release_staged_delivery', None)
+        if not callable(release):
+            return
+        try:
+            if not self._intent_accepted(intent):
+                release(intent)
+        except (PermissionError, ConversationPersistenceError):
+            return
 
     def accepted_workspace_version(self, *, space_id, asset_id, version_ref):
         """从原业务账核对当前已采用版本，返回原内容哈希和上传预算。"""
@@ -2939,20 +2965,24 @@ class _RegisterBusinessToolsBusinessAcceptTool(BaseTool):
         )
         if rejected is not None:
             return rejected
+        intent = None
         if 'staged_file' in params:
             try:
-                self._remember_staged_delivery(params, invocation)
+                intent = self._remember_staged_delivery(params, invocation)
             except (PermissionError, ConversationPersistenceError) as error:
                 return ToolHandlerOutcome(self.model_spec.name, False,
                     f'暂存清单未登记，原采用未执行。{error}。请核对子任务回执及工作区后重新发起。',
                     error_code='CAPABILITY_DENIED', effect_outcome='not_started')
-        return _execute_registered_business_request(
+        outcome = _execute_registered_business_request(
             self._business_host,
             self.model_spec.name,
             self._ready_specs[0],
             native_request,
             invocation,
         )
+        if intent is not None and not outcome.ok and outcome.effect_outcome == 'not_started':
+            self._release_rejected_delivery(intent)
+        return outcome
 
 
 def register_business_tools(agent):

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -236,8 +237,51 @@ class GatewayTaskBindingWriter:
             self.request_path, self.request_id, self.execution_attempt_id,
         )("bind_runtime_authority", persist)
 
-    def remember_staged_delivery(self, phase: dict[str, str]) -> None:
-        """原工具通过审批后，在采用前把目标和精确版本记入原请求绑定。"""
+    # LLM: 同一目标只保留一条采用意图。已有不同意图时先在锁外按原资产账核对：已被采用的精确版本保持绑定；
+    #   确认未被采用（被拒或从未生效）的旧意图由新意图替换；核对不了（PermissionError）不替换。
+    #   锁内按整行比对确认旧意图未变（CAS），不在文件锁内读业务账。
+    # 函数用途: 原工具通过审批后，在采用前把目标和精确版本记入原请求绑定，并协调被拒旧意图。
+    def remember_staged_delivery(self, phase: dict[str, str], *,
+                                 is_accepted: Callable[[dict], bool] | None = None) -> None:
+        transition = GatewayActiveTurnTransition(self.request_path, self.request_id, self.execution_attempt_id)
+        incumbent = next((row for row in self._staged_rows() if row["destination"] == phase["destination"]), None)
+        superseded = None
+        if incumbent is not None and incumbent != phase:
+            try:
+                accepted = is_accepted is not None and is_accepted(incumbent)
+            except PermissionError as error:
+                raise ConversationPersistenceError(
+                    f"原请求已为该目标绑定另一份暂存清单，且无法核对其采用结果（{error}）") from error
+            if is_accepted is None or accepted:
+                raise ConversationPersistenceError("原请求已为该目标绑定另一份已采用的暂存清单")
+            superseded = incumbent
+
+        def persist():
+            def update(current):
+                authority = gateway_runtime_authority(current, self.request_id)
+                if not authority or authority["gateway_execution_attempt_id"] != self.execution_attempt_id:
+                    raise ConversationPersistenceError("暂存清单与当前请求执行绑定不一致")
+                previous = authority.get("staged_deliverables", [])
+                kept = []
+                for row in previous:
+                    if row["destination"] == phase["destination"]:
+                        if row == phase:
+                            return current
+                        if row != superseded:
+                            raise ConversationPersistenceError("原请求已为该目标绑定另一份暂存清单")
+                        continue
+                    kept.append(row)
+                return {**current, "runtime_authority": {**authority, "staged_deliverables": [*kept, phase]}}
+
+            saved = update_json_file_atomic(self.request_path, update, require_existing=True)
+            if isinstance(self.request, dict):
+                self.request["runtime_authority"] = saved["runtime_authority"]
+
+        transition("bind_staged_delivery", persist)
+
+    # LLM: 只在原采用确认写入前被拒（not_started）后调用；只移除整行相同的本次意图，其它行与已换代意图不动。
+    # 函数用途: 释放被确认拒绝的采用意图，使其不再投影为本请求的交付义务。
+    def release_staged_delivery(self, phase: dict[str, str]) -> None:
         transition = GatewayActiveTurnTransition(self.request_path, self.request_id, self.execution_attempt_id)
 
         def persist():
@@ -246,25 +290,30 @@ class GatewayTaskBindingWriter:
                 if not authority or authority["gateway_execution_attempt_id"] != self.execution_attempt_id:
                     raise ConversationPersistenceError("暂存清单与当前请求执行绑定不一致")
                 previous = authority.get("staged_deliverables", [])
-                for row in previous:
-                    if row["destination"] == phase["destination"]:
-                        if row != phase:
-                            raise ConversationPersistenceError("原请求已为该目标绑定另一份暂存清单")
-                        return current
-                return {**current, "runtime_authority": {**authority, "staged_deliverables": [*previous, phase]}}
+                if phase not in previous:
+                    return current
+                kept = [row for row in previous if row != phase]
+                return {**current, "runtime_authority": {**authority, "staged_deliverables": kept}}
 
             saved = update_json_file_atomic(self.request_path, update, require_existing=True)
             if isinstance(self.request, dict):
                 self.request["runtime_authority"] = saved["runtime_authority"]
 
-        transition("bind_staged_delivery", persist)
+        transition("release_staged_delivery", persist)
+
+    def _staged_rows(self) -> list[dict]:
+        current = read_json_file_report(self.request_path, context="gateway.staged_delivery.read").payload
+        authority = gateway_runtime_authority(current, self.request_id) if isinstance(current, dict) else {}
+        rows = (authority or {}).get("staged_deliverables")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
     def staged_delivery_contract(self) -> dict | None:
         authority = gateway_runtime_authority(self.request, self.request_id) if self.request is not None else {}
         rows = authority.get("staged_deliverables")
         if not rows:
             return None
-        return {"required_file_refs": [{"path": row["destination"], "sha256": row["sha256"]} for row in rows],
+        # 只投影路径义务；子任务暂存摘要留在 staged_deliverables 作为独立证据，不能顶替父任务声明的摘要。
+        return {"required_file_refs": [{"path": row["destination"]} for row in rows],
                 "staged_deliverables": rows}
 
     # LLM: 只读：audit_records 工具经当前运行参数找到本写入器调用；队列目录来自本写入器的请求路径（原 Gateway 队列），

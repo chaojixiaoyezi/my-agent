@@ -28,7 +28,7 @@ from agent_py_agent.agent.gateway_parts.request_binding import GatewayTaskBindin
 from agent_py_agent.agent.gateway_parts.request_worker import claim_request
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.output_alignment import anchored_output_refs
-from agent_py_agent.agent.tooling.registry_workspace import freeze_workspace_ref
+from agent_py_agent.agent.tooling.registry_workspace import freeze_workspace_ref, read_workspace_ref
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 from agent_py_agent.tests.test_business_model_tools import agent as agent
 from agent_py_agent.tests.test_content_adoption_human_approval import (
@@ -267,3 +267,320 @@ def test_waiting_parent_projects_foreground_and_wakeable_root_separately():
     assert params.live_archive_state["foreground_work"] == {
         "foreground_ended": True, "work_pending": True, "wakeable_root": "parent-run",
     }
+
+
+# ---- B4-M28-P1-01..05: staging identity, landing replay, rejected adoption, digest authority, legacy cwd ----
+
+def _assets(agent, contents):
+    from io import BytesIO
+
+    from agent_py_agent.agent.gateway_parts.business_artifacts_http import upload_artifact
+
+    agent.config.business_host_ports_enabled = True
+    context, services = local_business_context(agent, model=True)
+    actor = services.actor(context)
+    sid = services.spaces.create({"name": "暂存采用"}, actor=actor, idempotency_key="m28-staged-space-key")["space_id"]
+    rows = []
+    for index, content in enumerate(contents):
+        value = upload_artifact(BytesIO(content), {"space_id": sid, "idempotency_key": f"m28-staged-upload-{index}"},
+                                f"material-{index}.txt", context, services)
+        ref = {key: value[key] for key in ("artifact_id", "version_ref", "content_sha256")}
+        asset = services.spaces.call("assets.register", {"space_id": sid, "name": f"资料{index}", "kind": "document",
+                                                         "artifact_ref": ref}, actor=actor,
+                                     idempotency_key=f"m28-staged-register-{index}")
+        rows.append({"action": "assets.versions.accept", "request_id": f"m28-request-{index}",
+                     "idempotency_key": f"m28-staged-adopt-{index}", "expected_revision": 0,
+                     "params": {"space_id": sid, "asset_id": asset["asset_id"], "version_ref": ref["version_ref"]}})
+    register_business_tools(agent)
+    return services, actor, rows, agent.tools.tools["business_assets_versions_accept"]
+
+
+def _adopt(agent, tool, args, approval_dir, operation):
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    def run(approved):
+        return execute_canonical_test_call(
+            agent.root, tools={tool.model_spec.name: tool}, tool_name=tool.model_spec.name, arguments=args,
+            write_boundary={"approved_actions": list(approved)}, operation_id=operation,
+            idempotency_key=f"{operation}-key", operation_owner_id=agent.home_paths.owner_id)
+
+    pending = run(())
+    assert pending.decision.status == "ask", pending
+    approval_dir.mkdir(parents=True, exist_ok=True)
+    return run([approve_through_original_input(approval_dir, pending.call, agent.home_paths.owner_id)]).result
+
+
+def _parent_turn(agent, tmp_path, parent_id, workspace):
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    claim = claim_request(paths, write_gateway_request(paths, {"id": parent_id, "prompt": "land approved files"}))
+    assert claim is not None
+    request = read_json_file_report(claim.path, context="test.load_request").payload
+    writer = GatewayTaskBindingWriter(claim.path, parent_id, request, request["execution_attempt_id"],
+                                      workspace_ref=workspace)
+    assert writer.bind_runtime_authority({
+        "invocation_run_id": parent_id, "task_id": "parent-task", "run_id": "parent-run",
+        "agent_run_id": parent_id, "attempt_id": "parent-attempt",
+    })
+    agent._current_run_params = replace(agent._current_run_params, request_id=parent_id,
+                                        conversation_task_binding_callback=writer, workspace_ref=workspace)
+    return writer, claim.path, request
+
+
+def _staged_child(agent, destinations, contents):
+    child = agent.subagents.create_run(goal="prepare files", thought="prepare", plan=["write"], parent_id="parent",
+                                      attributes={"required_file_refs": [str(path) for path in destinations]})
+    refs = {row["target_path"]: row["staging_ref"] for row in anchored_output_refs(child).warnings
+            if "staging_ref" in row}
+    for destination, content in zip(destinations, contents):
+        if content is not None:
+            staged = Path(refs[str(destination)])
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(content)
+    return child, refs
+
+
+def _closeout_params(boundary, attributes=None):
+    return SimpleNamespace(context_scope="conversation", run_id="parent", live_archive_state={},
+                           write_boundary=boundary, task_attributes=attributes)
+
+
+def _receipts(params):
+    return {row["destination"]: row for row in deliverable_report(params)["apply_receipts"]}
+
+
+def test_same_named_and_extensionless_declarations_keep_distinct_staging(tmp_path):
+    from agent_py_agent.agent.subagents.services.output_alignment import staged_output_manifest
+
+    project, child_dir = tmp_path / "project", tmp_path / "child"
+    project.mkdir()
+    child_dir.mkdir()
+    west, east, license_file = project / "west" / "report.txt", project / "east" / "report.txt", project / "LICENSE"
+    task = SimpleNamespace(
+        id="child-1", task_dir=str(child_dir), output_dir=str(child_dir / "output"),
+        allowed_write_roots=[str(child_dir)],
+        attributes={"required_file_refs": [str(west), str(east), "LICENSE", str(project / "west" / ".." / "west"
+                                                                                 / "report.txt")]},
+        workspace_ref_record=_workspace_record(project),
+    )
+    staging = {row["target_path"]: row["staging_ref"] for row in anchored_output_refs(task).warnings
+               if "staging_ref" in row}
+    output = child_dir / "output"
+    assert staging == {str(west): str(output / "west" / "report.txt"), str(east): str(output / "east" / "report.txt"),
+                       str(license_file.resolve()): str(output / "LICENSE")}
+    Path(staging[str(west)]).parent.mkdir(parents=True)
+    Path(staging[str(west)]).write_bytes(b"west bytes")
+    rows = {row["destination"]: row for row in staged_output_manifest(task)}
+    assert len(rows) == 3, "a repeated target reuses its manifest row"
+    assert rows[str(west)]["files_written"] and rows[str(west)]["sha256"] == sha256(b"west bytes").hexdigest()
+    assert not rows[str(east)]["files_written"] and not rows[str(license_file.resolve())]["files_written"]
+
+
+def test_staging_locations_keep_unique_names_and_honour_unambiguous_hints():
+    from agent_py_agent.agent.path_access_policy import staging_relative_locations
+
+    assert staging_relative_locations(["/p/report.txt"]) == {"/p/report.txt": "report.txt"}
+    assert staging_relative_locations(["/a/out", "/b/out"], {"/a/out": "out", "/b/out": "out"}) == {
+        "/a/out": "a/out", "/b/out": "b/out"}
+    assert staging_relative_locations(["/a/x.txt", "/a/y.txt"], {"/a/x.txt": "keep/x.txt"}) == {
+        "/a/x.txt": "keep/x.txt", "/a/y.txt": "y.txt"}
+
+
+def test_same_named_children_land_their_own_exact_versions(agent, tmp_path):
+    west, east = agent.root / "west" / "report.txt", agent.root / "east" / "report.txt"
+    west.parent.mkdir()
+    east.parent.mkdir()
+    contents = [b"west material", b"east material"]
+    _, _, rows, tool = _assets(agent, contents)
+    child, refs = _staged_child(agent, [west, east], [contents[0], None])
+    assert refs[str(west)] != refs[str(east)]
+    manifest = {row["destination"]: row for row in child.staged_workspace_outputs()}
+    assert manifest[str(west)]["files_written"] and not manifest[str(east)]["files_written"]
+    Path(refs[str(east)]).parent.mkdir(parents=True, exist_ok=True)
+    Path(refs[str(east)]).write_bytes(contents[1])
+    workspace = freeze_workspace_ref(agent.root)
+    _parent_turn(agent, tmp_path, child.parent_id, workspace)
+    for index, destination in enumerate((west, east)):
+        args = {**rows[index], "staged_file": {"child_run_id": child.id, "destination": str(destination)}}
+        assert _adopt(agent, tool, args, tmp_path / f"approval-{index}", f"m28-op-{index}").ok
+    params = _closeout_params({"allowed_write_roots": [str(agent.root)], "workspace_ref": workspace.to_record()})
+    assert deliverable_closeout_block(params, agent=agent) is None, deliverable_report(params)
+    assert west.read_bytes() == contents[0] and east.read_bytes() == contents[1]
+    assert deliverable_report(params)["target_delivered"]
+
+
+def test_completed_landing_replays_read_only_after_staging_is_removed(agent, tmp_path):
+    destination = agent.root / "report.txt"
+    _, _, rows, tool = _assets(agent, [b"original material"])
+    child, refs = _staged_child(agent, [destination], [b"original material"])
+    workspace = freeze_workspace_ref(agent.root)
+    _parent_turn(agent, tmp_path, child.parent_id, workspace)
+    args = {**rows[0], "staged_file": {"child_run_id": child.id, "destination": str(destination)}}
+    assert _adopt(agent, tool, args, tmp_path / "approval", "m28-replay").ok
+    boundary = {"allowed_write_roots": [str(agent.root)], "workspace_ref": workspace.to_record()}
+    params = _closeout_params(boundary)
+    assert deliverable_closeout_block(params, agent=agent) is None
+    assert _receipts(params)[str(destination)]["state"] == "landed"
+    accepted = sha256(b"original material").hexdigest()
+    Path(refs[str(destination)]).unlink()
+    before = destination.stat()
+
+    params = _closeout_params(boundary)
+    assert deliverable_closeout_block(params, agent=agent) is None, deliverable_report(params)
+    receipt = _receipts(params)[str(destination)]
+    assert (receipt["state"], receipt["landed_digest"], receipt["source_digest"]) == ("already_landed", accepted, "")
+    after = destination.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns), "replay must not write"
+    assert deliverable_report(params)["target_delivered"]
+
+    destination.write_bytes(b"edited by someone")
+    params = _closeout_params(boundary)
+    assert deliverable_closeout_block(params, agent=agent)
+    assert _receipts(params)[str(destination)]["state"] == "conflict"
+    assert destination.read_bytes() == b"edited by someone"
+
+    destination.unlink()
+    params = _closeout_params(boundary)
+    assert deliverable_closeout_block(params, agent=agent)
+    assert _receipts(params)[str(destination)]["state"] == "source_missing"
+    assert deliverable_report(params)["file_outcomes"][str(destination)] == "source_missing"
+    assert not destination.exists()
+
+    destination.write_bytes(b"original material")
+    # 同一路径的根目录已被替换：记录本身合法，但登记的身份与当前目录不再一致。
+    replaced = (0, 0)
+    changed = {**workspace.to_record(), "root_identity": list(replaced), "root_identities": [list(replaced)],
+               "workspace_ref": sha256(f"{workspace.root}\0{replaced[0]}\0{replaced[1]}".encode()).hexdigest()}
+    assert read_workspace_ref(changed) is not None and not read_workspace_ref(changed).is_current()
+    params = _closeout_params({"allowed_write_roots": [str(agent.root)], "workspace_ref": changed})
+    assert deliverable_closeout_block(params, agent=agent), deliverable_report(params)
+    assert _receipts(params)[str(destination)]["state"] == "scope_blocked"
+    assert not deliverable_report(params)["target_delivered"]
+
+
+def test_rejected_adoption_releases_the_destination_for_a_corrected_version(agent, tmp_path):
+    from agent_py_agent.agent.gateway_parts.request_errors import ConversationPersistenceError
+
+    destination = agent.root / "report.txt"
+    services, actor, rows, tool = _assets(agent, [b"original material", b"other asset"])
+    child, _ = _staged_child(agent, [destination], [b"original material"])
+    workspace = freeze_workspace_ref(agent.root)
+    writer, request_path, _ = _parent_turn(agent, tmp_path, child.parent_id, workspace)
+    staged = {"child_run_id": child.id, "destination": str(destination)}
+    wrong = {**rows[0], "params": {**rows[0]["params"], "version_ref": rows[1]["params"]["version_ref"]},
+             "staged_file": staged}
+
+    rejected = _adopt(agent, tool, wrong, tmp_path / "approval-wrong", "m28-wrong")
+    assert not rejected.ok and rejected.effect_outcome == "not_started", rejected.output
+    assert writer.staged_delivery_contract() is None, "a confirmed pre-effect rejection releases its reservation"
+
+    corrected = {**rows[0], "staged_file": staged}
+    adopted = _adopt(agent, tool, corrected, tmp_path / "approval-right", "m28-right")
+    assert adopted.ok, adopted.output
+    bound = writer.staged_delivery_contract()["staged_deliverables"]
+    assert [row["version_ref"] for row in bound] == [rows[0]["params"]["version_ref"]]
+
+    # Lost acknowledgement: the same accepted intent replays idempotently on the same binding.
+    assert _adopt(agent, tool, corrected, tmp_path / "approval-replay", "m28-right").ok
+    assert writer.staged_delivery_contract()["staged_deliverables"] == bound
+    # A contending intent cannot displace the canonically accepted version.
+    contender = _adopt(agent, tool, wrong, tmp_path / "approval-contender", "m28-contender")
+    assert not contender.ok and contender.error_code == "CAPABILITY_DENIED", contender.output
+    assert writer.staged_delivery_contract()["staged_deliverables"] == bound
+
+    reloaded = GatewayTaskBindingWriter(request_path, child.parent_id,
+                                        read_json_file_report(request_path, context="test.reload").payload,
+                                        writer.execution_attempt_id)
+    pending = {"destination": "/elsewhere/a.txt", "version_ref": "v-a"}
+    reloaded.remember_staged_delivery(pending)
+    replacement = {"destination": "/elsewhere/a.txt", "version_ref": "v-b"}
+    reloaded.remember_staged_delivery(replacement, is_accepted=lambda row: False)
+    rows_now = reloaded.staged_delivery_contract()["staged_deliverables"]
+    assert pending not in rows_now and replacement in rows_now
+
+    def unreadable(_row):
+        raise PermissionError("BUSINESS_UNAVAILABLE")
+
+    for check in (lambda row: True, unreadable):
+        try:
+            reloaded.remember_staged_delivery(pending, is_accepted=check)
+        except ConversationPersistenceError:
+            pass
+        else:
+            raise AssertionError("an accepted or unverifiable incumbent must not be replaced")
+    assert replacement in reloaded.staged_delivery_contract()["staged_deliverables"]
+
+    params = _closeout_params({"allowed_write_roots": [str(agent.root)], "workspace_ref": workspace.to_record()})
+    deliverable_closeout_block(params, agent=agent)
+    assert destination.read_bytes() == b"original material"
+    assert _receipts(params)[str(destination)]["state"] == "landed"
+
+
+def test_parent_required_digest_is_not_overridden_by_staged_digest(agent, tmp_path):
+    destination = agent.root / "report.txt"
+    staged_bytes = b"original material"
+    required = sha256(b"what the parent asked for").hexdigest()
+    accepted = sha256(staged_bytes).hexdigest()
+    _, _, rows, tool = _assets(agent, [staged_bytes])
+    child, _ = _staged_child(agent, [destination], [staged_bytes])
+    workspace = freeze_workspace_ref(agent.root)
+    writer, request_path, request = _parent_turn(agent, tmp_path, child.parent_id, workspace)
+    args = {**rows[0], "staged_file": {"child_run_id": child.id, "destination": str(destination)}}
+    assert _adopt(agent, tool, args, tmp_path / "approval", "m28-digest").ok
+    boundary = {"allowed_write_roots": [str(agent.root)], "workspace_ref": workspace.to_record()}
+    declared = {"required_file_refs": [{"path": str(destination), "sha256": required}]}
+
+    for _turn in ("original", "resumed"):
+        resumed = GatewayTaskBindingWriter(request_path, child.parent_id,
+                                           read_json_file_report(request_path, context="test.resume").payload,
+                                           request["execution_attempt_id"])
+        agent._current_run_params = replace(agent._current_run_params, conversation_task_binding_callback=resumed)
+        params = _closeout_params(boundary, declared)
+        assert deliverable_closeout_block(params, agent=agent)
+        receipt = _receipts(params)[str(destination)]
+        assert (receipt["state"], receipt["declared_digest"], receipt["accepted_digest"]) == (
+            "digest_mismatch", required, accepted)
+        assert not deliverable_report(params)["target_delivered"] and not destination.exists()
+
+    conflicting = SimpleNamespace(**{**vars(_closeout_params(boundary, declared)),
+                                     "delivery_contract": {"required_file_refs": [
+                                         {"path": str(destination), "sha256": accepted}]}})
+    assert deliverable_closeout_block(conflicting, agent=agent)
+    assert _receipts(conflicting)[str(destination)]["state"] == "digest_conflict" and not destination.exists()
+
+    matching = _closeout_params(boundary, {"required_file_refs": [{"path": str(destination), "sha256": accepted}]})
+    assert deliverable_closeout_block(matching, agent=agent) is None
+    assert destination.read_bytes() == staged_bytes and deliverable_report(matching)["target_delivered"]
+
+
+def test_pre_snapshot_task_keeps_relative_requirement_through_the_runner(agent, tmp_path):
+    right = b"legacy deliverable"
+    child = agent.subagents.create_run(goal="legacy", thought="legacy", plan=["write"], parent_id="parent",
+                                      attributes={"required_file_refs": [
+                                          {"path": "report.txt", "sha256": sha256(right).hexdigest()}]})
+    persisted = agent.subagents.load(child.id)
+    assert persisted.workspace_ref_record is None
+    boundary = agent.subagents.runner_context._build_write_boundary(persisted)
+    assert "workspace_ref" not in boundary and Path(boundary["execution_cwd"]).is_absolute()
+    project = Path(boundary["execution_cwd"])
+    project.mkdir(parents=True, exist_ok=True)
+    target = str(project / "report.txt")
+
+    def closeout(write_boundary):
+        params = SimpleNamespace(context_scope="task_local", run_id=child.id, task_attributes=persisted.attributes,
+                                 write_boundary=write_boundary, live_archive_state={})
+        return deliverable_closeout_block(params), deliverable_report(params)
+
+    block, report = closeout(boundary)
+    assert block and target in block and report["file_outcomes"] == {target: "missing"}
+    (project / "report.txt").write_bytes(b"something else")
+    block, report = closeout(boundary)
+    assert block and report["file_outcomes"] == {target: "mismatch"}
+    (project / "report.txt").write_bytes(right)
+    block, report = closeout(boundary)
+    assert block is None and report["target_delivered"] and report["landed_files"] == [target]
+
+    without_cwd = {key: value for key, value in boundary.items() if key != "execution_cwd"}
+    block, report = closeout(without_cwd)
+    assert block and "report.txt" in block
+    assert report["file_outcomes"] == {"report.txt": "unresolved"} and not report["target_delivered"]

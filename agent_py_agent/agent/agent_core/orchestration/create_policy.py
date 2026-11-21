@@ -484,7 +484,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
 
 
 def _creation_write_roots(agent, raw, goal, scope, attrs):
-    from ...path_access_policy import in_delegation_owner_root
+    from ...path_access_policy import in_delegation_owner_root, staging_relative_locations
     from .create_constraints import merged_extra_write_roots
 
     roots = resolved_extra_write_roots(agent, raw, goal)
@@ -502,7 +502,11 @@ def _creation_write_roots(agent, raw, goal, scope, attrs):
             if not decision.allowed:
                 refusals.append(decision.refusal(target))
     if refusals:
-        attrs["delegation_path_refusals"] = refusals
+        # 同名目标（不同目录）各自一个暂存相对位置，避免子任务把它们写进同一个暂存对象。
+        locations = staging_relative_locations([row["target_path"] for row in refusals],
+                                                {row["target_path"]: row["expected_relative_location"] for row in refusals})
+        attrs["delegation_path_refusals"] = [{**row, "expected_relative_location": locations[row["target_path"]]}
+                                             for row in refusals]
     if exact or raw.get("_exact_allowed_tools") is True:
         return permitted_child_write_roots(scope, roots)
     inherited = [root for root in roots if in_delegation_owner_root(scope, Path(root))]

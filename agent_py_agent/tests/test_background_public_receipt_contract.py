@@ -271,3 +271,78 @@ def test_frozen_owner_retry_consumes_envelope_without_recreating_private_seal():
     frozen = SimpleNamespace(message_metadata={'public_receipt': {'schema': receipt.RESULT_SCHEMA,
         'notification_intent': 'publish', 'public_source': {'call_id': 'archived'}}})
     assert public_receipt_delivery_block(agent, request, None, 'frozen public', has_attachments=True, frozen_retry=frozen) == ''
+
+
+# ---- B4-S1-P1-04: Markdown fences inside receipt string values are not outer framing ----
+
+_MARKDOWN_VALUES = [
+    '日志摘录：\n```text\nERROR synthetic case 1\n```',
+    '示例数据：\n```json\n{"count": 2}\n```',
+    '代码样例：\n~~~python\nprint("ok")\n~~~',
+]
+_MIXED_WRAPS = ['检查结果如下：\n{body}', '{body}\n以上为本次结果。', '说明\n```json\n{body}\n```',
+                '```json\n{body}\n```\n后记']
+
+
+@pytest.mark.parametrize('value', _MARKDOWN_VALUES)
+@pytest.mark.parametrize('wrap', _MIXED_WRAPS)
+def test_markdown_value_keeps_one_zero_tool_repair_and_publishes_only_the_correction(wrap, value):
+    params = _params()
+    mixed = wrap.format(body=_body(public=value))
+    response, _ = _response(params, mixed)
+    action, final = receipt.prepare_background_public_receipt(params, response)
+    assert action == 'repair' and final.runtime_reason == 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
+    assert final.text == '' and final.public_receipt is None, 'mixed text must never be published directly'
+    assert pending_natural_user_reply(params)['facts']['envelope_repair'] is True
+
+    corrected, _ = _response(params, _body(public=value), purpose='background_receipt_repair', call_id='call-2')
+    verdict, final = _natural_user_reply_step(None, params, corrected)
+    assert verdict == 'finish' and final.runtime_status == 'ok' and final.text == value
+    assert final.public_receipt['execution_source']['call_id'] == 'call-1'
+    assert final.public_receipt['public_source']['call_id'] == 'call-2'
+    assert pending_natural_user_reply(params) is None
+
+    again, _ = _response(params, mixed, call_id='call-3')
+    action, final = receipt.prepare_background_public_receipt(params, again)
+    assert action == 'finish' and final.runtime_reason == 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
+    assert pending_natural_user_reply(params) is None, 'the repair slot is single-use'
+
+
+@pytest.mark.parametrize('value', _MARKDOWN_VALUES)
+@pytest.mark.parametrize('wrap', ['{body}', '```json\n{body}\n```'])
+def test_complete_object_with_markdown_value_publishes_without_repair(wrap, value):
+    params = _params()
+    response, _ = _response(params, wrap.format(body=_body(public=value)))
+    action, final = receipt.prepare_background_public_receipt(params, response)
+    assert action == 'finish' and final.runtime_status == 'ok' and final.text == value
+    assert pending_natural_user_reply(params) is None
+
+
+@pytest.mark.parametrize('text', [
+    '```python\n' + _body(public=_MARKDOWN_VALUES[0]) + '\n```',
+    '```json\n' + _body(public=_MARKDOWN_VALUES[0]) + '\n```\n```json\n' + _body() + '\n```',
+    '说明\n```text\n' + _body(public=_MARKDOWN_VALUES[1]) + '\n```',
+    '仅文字说明，并引用 ```text 片段``` 但没有对象。',
+])
+def test_markdown_values_do_not_relax_non_json_or_ambiguous_framing(text):
+    params = _params()
+    response, _ = _response(params, text)
+    action, final = receipt.prepare_background_public_receipt(params, response)
+    assert action == 'finish' and final.runtime_reason == 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
+    assert final.text == '' and pending_natural_user_reply(params) is None
+
+
+@pytest.mark.parametrize('required', ['reply', 'attachment'])
+def test_markdown_value_repair_keeps_original_public_obligations(monkeypatch, required):
+    params = _params()
+    if required == 'reply':
+        monkeypatch.setattr(receipt, 'active_turn_user_reply_required', lambda _params: True)
+    else:
+        monkeypatch.setattr(receipt, '_has_pending_delivery_artifacts', lambda _params, *, agent=None: True)
+    response, _ = _response(params, '结果：\n' + _body(public=_MARKDOWN_VALUES[0]))
+    assert receipt.prepare_background_public_receipt(params, response)[0] == 'repair'
+    corrected, _ = _response(params, _body('internal_only', ''), purpose='background_receipt_repair',
+                             call_id='call-2')
+    verdict, final = _natural_user_reply_step(None, params, corrected)
+    assert verdict == 'finish' and final.runtime_reason == 'BACKGROUND_RECEIPT_PUBLIC_OBLIGATION'
+    assert final.text == '' and final.public_receipt is None

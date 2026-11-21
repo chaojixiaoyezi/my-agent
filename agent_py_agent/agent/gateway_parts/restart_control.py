@@ -56,6 +56,16 @@ def execute_restart_control(
     if status in _REFUSALS:
         code, template = _REFUSALS[status]
         return ConversationControlResult("restart", False, template.format(**result), error_code=code)
+    if status == "conflict":
+        # 在位的是另一种操作（如离线更新停机），本次未登记；不返回在位编号作 request_id，免得被当成受理。
+        details = {key: result[key] for key in ("status", "error_code", "side_effect_state", "requested_operation",
+                                                "incumbent_operation", "incumbent_request_id", "next_step")}
+        return ConversationControlResult(
+            "restart", False,
+            f"已有 {details['incumbent_operation']} 请求（{details['incumbent_request_id']}）在排队，本次重启未登记。"
+            f"{details['next_step']}",
+            error_code=str(result["error_code"]), details=details,
+        )
     receipt = result["restart_receipt"]
     prefix = "已合并到正在排队的安全重启" if status == "coalesced" else "已安排安全重启"
     return ConversationControlResult(

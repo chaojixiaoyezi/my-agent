@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ...model_visible_refs import has_placeholder_path_segment
+from ...path_access_policy import staging_relative_locations
 from ...tooling.registry_workspace import open_workspace_delivery_file, read_workspace_ref
 from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from ..context_bundle_refs import execution_cwd
@@ -43,6 +44,7 @@ def anchored_output_refs(task: Any) -> OutputAnchoring:
     refusals = attrs.get("delegation_path_refusals") if isinstance(attrs, dict) else None
     refused = {row.get("target_path"): row.get("expected_relative_location", "")
                for row in (refusals if isinstance(refusals, list) else []) if isinstance(row, dict)}
+    staged: list[dict[str, Any]] = []
     for ref, fieldname in _declared_path_refs(task):
         target = anchor_refs_for_execution(task, [ref])[0]
         if target not in refs:
@@ -57,10 +59,13 @@ def anchored_output_refs(task: Any) -> OutputAnchoring:
             forbidden_roots=forbidden_roots,
         )
         if len(warnings) != previous and getattr(task, "output_dir", ""):
-            warning = warnings[-1]
-            target_path = warning["target_path"]
-            warning.update(staging_fields(task, Path(target_path), expected=refused.get(target_path, "")))
-            warning["message_zh"] += " 请将文件写入 staging_ref，再由父任务按精确版本采用并落地。"
+            staged.append(warnings[-1])
+    # 每个不同绝对目标一个暂存位置；同名不同目录不会落到同一暂存文件。
+    locations = staging_relative_locations([row["target_path"] for row in staged], refused)
+    for warning in staged:
+        warning.update(staging_fields(task, Path(warning["target_path"]),
+                                      expected=locations[warning["target_path"]]))
+        warning["message_zh"] += " 请将文件写入 staging_ref，再由父任务按精确版本采用并落地。"
     return OutputAnchoring(anchored_refs=refs, warnings=warnings)
 
 
@@ -74,7 +79,8 @@ def anchor_refs_for_execution(task: Any, refs: list[str]) -> list[str]:
         text = str(ref or "").strip()
         if not text:
             continue
-        if looks_like_output_path(text):
+        # 调用方只传路径形态或显式文件声明；这里只排除 URL 与占位段，不再用后缀形态丢掉 LICENSE 这类文件名。
+        if _anchorable_file_ref(text):
             path = Path(text).expanduser()
             if not path.is_absolute() and cwd:
                 text = str((Path(cwd) / path).resolve(strict=False))
@@ -115,27 +121,37 @@ def _append_locked_warning(
 # LLM: 过滤规则与 context_bundle_contracts._looks_like_output_path 同语义：
 #   只锚"路径形态"的声明；逻辑名（source_file 这类无斜杠无后缀的标识）、URL、
 #   占位路径段（[任务目录] 等）一律不进锚定，避免把非路径声明翻译成假文件目标。
-# 函数用途: 取 attributes 里路径形态的声明产物。
+#   形态过滤只用于还会混入逻辑名的旧字符串字段；required_file_refs 与 {"path": ...} 是显式文件声明，
+#   只排除 URL 与占位段，扩展名缺失的 LICENSE 这类文件名照样参与锚定和暂存。
+# 函数用途: 取 attributes 里路径形态或显式文件类型的声明产物。
 def _declared_path_refs(task: Any) -> list[tuple[str, str]]:
     attrs = getattr(task, "attributes", {})
     attrs = attrs if isinstance(attrs, dict) else {}
     refs: list[tuple[str, str]] = []
     for fieldname in _DECLARED_FIELDS:
-        refs.extend((text, fieldname) for text in _path_texts(attrs.get(fieldname)))
+        refs.extend((text, fieldname) for text in _path_texts(attrs.get(fieldname),
+                                                              explicit=fieldname == "required_file_refs"))
     return refs
 
 
-# 函数用途: 滤出一个声明字段里路径形态的字符串条目。
-def _path_texts(value: object) -> list[str]:
+# 函数用途: 滤出一个声明字段里路径形态（或显式文件声明）的字符串条目。
+def _path_texts(value: object, *, explicit: bool = False) -> list[str]:
     if not isinstance(value, list):
         return []
     texts: list[str] = []
     for item in value:
         raw = item.get("path") if isinstance(item, dict) else item
         text = raw.strip() if isinstance(raw, str) else ""
-        if text and looks_like_output_path(text):
+        typed = explicit or isinstance(item, dict)
+        if text and (_anchorable_file_ref(text) if typed else looks_like_output_path(text)):
             texts.append(text)
     return texts
+
+
+# 函数用途: 显式文件声明可被锚定的条件：不是 URL，也不含占位路径段。
+def _anchorable_file_ref(value: str) -> bool:
+    text = value.replace("\\", "/")
+    return "://" not in text and not has_placeholder_path_segment(text)
 
 
 def staging_fields(task: Any, target: Path, *, expected: str = "") -> dict[str, str | bool]:
@@ -154,10 +170,13 @@ def staging_fields(task: Any, target: Path, *, expected: str = "") -> dict[str, 
 def staged_output_manifest(task: Any) -> list[dict[str, object]]:
     """仅在收尾核验实际已写的普通文件，并返回可由父执行重读的清单。"""
     rows = []
+    seen: set[str] = set()
     root = Path(task.output_dir)
     for warning in anchored_output_refs(task).warnings:
-        if "staging_ref" not in warning:
+        # 同一目标只出一行清单，重复声明复用同一暂存位置。
+        if "staging_ref" not in warning or warning["target_path"] in seen:
             continue
+        seen.add(warning["target_path"])
         staged = Path(warning["staging_ref"])
         row = {key: warning[key] for key in ("staging_ref", "expected_relative_location", "parent_apply_tool")}
         row.update(destination=warning["target_path"], child_run_id=task.id, files_written=False, sha256="")
@@ -315,7 +334,8 @@ def _append_not_writable_warning(
         )
     if matching_allowed and not blocked_by_forbidden:
         return
-    if any(w.get("ref") == anchored and w.get("code") == OUTPUT_TARGET_NOT_WRITABLE_CODE for w in warnings):
+    if any(w.get("code") == OUTPUT_TARGET_NOT_WRITABLE_CODE
+           and (w.get("ref") == anchored or w.get("target_path") == resolved_target.as_posix()) for w in warnings):
         return
     capped_roots = [root.as_posix() for root in writable_roots[:max(0, max_roots)]]
     roots_preview = ", ".join(capped_roots) if capped_roots else "none"

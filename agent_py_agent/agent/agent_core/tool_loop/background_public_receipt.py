@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ...common.fast_dataclass import fast_replace
-from ...common.structured_output import parse_structured_envelope
+from ...common.structured_output import first_json_object_span, parse_structured_envelope
 from ...contracts.background_public_receipt import CONTRACT_KEY, RESULT_SCHEMA
 from ...conversation.user_visible_text import sanitize_user_visible_text
 from ..model.response_provenance import response_provenance_error, response_provenance_projection
@@ -79,10 +79,17 @@ def _source_envelope(params, response):
     return None
 
 
+# LLM: 只判定能否获得一次零工具修复，不授予公开资格；修复后的完整对象仍走原解析、来源与义务校验。
+# 外层框架只看第一个完整 JSON 对象之外的正文，对象字符串值里的 Markdown 围栏不算外层围栏。
+# 函数用途: 识别“说明/后记 + 完整对象”或“说明 + 单一 json 围栏对象”这类可修复的混合响应。
 def _looks_like_mixed_object(text):
     source = text.strip()
     if '{' not in source or '}' not in source:
         return False
+    span = first_json_object_span(source)
+    if span is not None:
+        # 对象本体折叠为 {}，其余框架判定沿原规则；坏对象（无可解码对象）仍按原文判定。
+        source = source[:span[0]] + '{}' + source[span[1]:]
     for fence in ('```', '~~~'):
         if fence in source:
             if source.count(fence) != 2:

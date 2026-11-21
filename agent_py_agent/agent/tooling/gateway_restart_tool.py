@@ -127,9 +127,11 @@ class RestartGatewayTool(BaseTool):
             config=config,
         )
         status = str(result.get("status") or "")
-        if status in _REFUSAL_CODES:
+        if status in _REFUSAL_CODES or status == "conflict":
+            # 冲突回执只带在位操作的身份与下一步，不带在位请求全文；同样是写入前的 not_started 拒绝。
             body = {key: value for key, value in result.items() if key != "request"}
-            return _refuse(json.dumps(body, ensure_ascii=False), _REFUSAL_CODES[status], raw=True)
+            code = str(result.get("error_code") or "") if status == "conflict" else _REFUSAL_CODES[status]
+            return _refuse(json.dumps(body, ensure_ascii=False), code, raw=True)
         request = result.get("request") or {}
         receipt = result["restart_receipt"]
         body = {
