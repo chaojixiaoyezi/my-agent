@@ -133,6 +133,74 @@ from .recovery_guard import (
 from .run_creation import RunCreation, create_run_chain
 from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_identity, runtime_db_path
 
+_SKILL_REFERENCE_FIELDS = ("skill_snapshot_refs", "skill_refs", "scheduler_skill_refs", "allowed_skills")
+_SKILL_REFERENCE_REVISION = "skill_protection_revision"
+
+
+def _skill_metadata_projection(row, execution_fields):
+    paths = [f"'$.{field}'" for field in (*_SKILL_REFERENCE_FIELDS, *execution_fields)]
+    metadata = f"{row}.metadata_json"
+    values = ", ".join(f"json_type({metadata}, {path}), json_extract({metadata}, {path})" for path in paths)
+    # Distinguish absent fields from explicit null, and JSON containers from strings.
+    return (f"CASE WHEN json_valid({metadata}) THEN "
+            f"CASE WHEN json_type({metadata})='object' THEN json_array({values}) ELSE {metadata} END "
+            f"ELSE {metadata} END")
+
+
+def _skill_reference_triggers():
+    """Track the inputs of the protection scan inside the canonical SQL transaction."""
+    def unsettled(row):
+        return (f"({row}.status IN ('{OP_EXECUTING}','{OP_UNKNOWN}') "
+                f"OR ({row}.status='{OP_CLAIMED}' AND {row}.handler_started_at>0))")
+
+    old_unsettled, new_unsettled = unsettled("OLD"), unsettled("NEW")
+    execution = ("executor", "runner_pid", "runner_start_time", "lifecycle")
+    sources = (
+        ("tasks", "task_id,thread_id,conversation_task_id", "", ""),
+        ("task_runs", "task_run_id,task_id,created_at,closed_at", "",
+         "OLD.closed_at=0 OR NEW.closed_at=0"),
+        ("agent_runs", "agent_run_id,task_run_id,parent_agent_run_id,status,current_attempt_id,current_attempt_generation",
+         "", ""),
+        ("agent_attempts", "attempt_id,agent_run_id,attempt_generation,status,ended_at", "", ""),
+        ("resource_locks", "canonical_scope", f"canonical_scope LIKE '{EXEC_LOCK_SCOPE_PREFIX}%'",
+         f"OLD.canonical_scope LIKE '{EXEC_LOCK_SCOPE_PREFIX}%' OR NEW.canonical_scope LIKE '{EXEC_LOCK_SCOPE_PREFIX}%'"),
+        ("tool_operations", "attempt_id,status,handler_started_at", "",
+         f"{old_unsettled} IS NOT {new_unsettled} OR "
+         f"({old_unsettled} AND OLD.attempt_id IS NOT NEW.attempt_id)"),
+    )
+    body = f"UPDATE metadata SET value=lower(hex(randomblob(16))) WHERE key='{_SKILL_REFERENCE_REVISION}';"
+    for table, fields, membership, update_scope in sources:
+        columns = fields.split(",")
+        changed = [f"OLD.{column} IS NOT NEW.{column}" for column in columns]
+        if table in {"task_runs", "agent_attempts"}:
+            columns.append("metadata_json")
+            extra = execution if table == "agent_attempts" else ()
+            changed.append(f"({_skill_metadata_projection('OLD', extra)}) "
+                           f"IS NOT ({_skill_metadata_projection('NEW', extra)})")
+        insert_scope = membership.replace("canonical_scope", "NEW.canonical_scope")
+        delete_scope = membership.replace("canonical_scope", "OLD.canonical_scope")
+        if table == "tool_operations":
+            insert_scope, delete_scope = new_unsettled, old_unsettled
+        for action, event, condition in (
+            ("insert", "INSERT", insert_scope),
+            ("delete", "DELETE", delete_scope),
+            ("update", "UPDATE OF " + ",".join(columns),
+             f"({' OR '.join(changed)})" + (f" AND ({update_scope})" if update_scope else "")),
+        ):
+            name = f"skill_reference_{table}_{action}"
+            when = f" WHEN {condition}" if condition else ""
+            yield f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {event} ON {table}{when} BEGIN {body} END"
+
+
+def _skill_reference_generation(conn):
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key=? AND EXISTS "
+        "(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='skill_reference_tasks_insert')",
+        (_SKILL_REFERENCE_REVISION,),
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
 BINDING_ACTIVE = "ACTIVE"
 BINDING_SUPERSEDED = "SUPERSEDED"
@@ -720,6 +788,29 @@ class RuntimeRepository(
         except BaseException as error:
             self._observe_runtime_db_error(error, identity)
             raise
+
+    def prepare_skill_reference_generation(self) -> None:
+        """Install reference tracking for an existing owner only when discovery first needs it."""
+        with self._runtime_connection() as conn:
+            if _skill_reference_generation(conn) is not None:
+                return
+        if self.read_only or self.existing_only:
+            return
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if _skill_reference_generation(conn) is None:
+                for statement in _skill_reference_triggers():
+                    conn.execute(statement)
+                conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)",
+                             (_SKILL_REFERENCE_REVISION, uuid.uuid4().hex))
+
+    def skill_reference_generation(self) -> list | None:
+        identity = runtime_db_identity(self.db_path)
+        with self._runtime_connection() as conn:
+            revision = _skill_reference_generation(conn)
+        if identity is None or revision is None or runtime_db_identity(self.db_path) != identity:
+            return None
+        return [*identity, revision]
 
     def curator_compact_cursor(self, thread_id: str) -> dict | None:
         with self._runtime_connection() as conn:

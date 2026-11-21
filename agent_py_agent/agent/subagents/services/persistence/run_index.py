@@ -1,6 +1,7 @@
 """子代理容量及请求谱系的增量查找投影；规范状态仍由原文件写者负责。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -166,6 +167,7 @@ class SubagentRunIndex:
                     );
         """)
         self._ensure_membership_revision(db)
+        self._ensure_skill_reference_projection(db)
         if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (4,):
             with os.scandir(self.workspace) as entries:
                 sampled = list(islice(entries, 8))
@@ -174,6 +176,44 @@ class SubagentRunIndex:
             db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)",
                            [("complete", int(not legacy)), ("offset", 0),
                             ("inventory_ready", int(not legacy)), ("schema", 4)])
+
+    @staticmethod
+    def _ensure_skill_reference_projection(db):
+        db.execute("CREATE TABLE IF NOT EXISTS skill_reference_fingerprints ("
+                   "run_id TEXT PRIMARY KEY, digest TEXT NOT NULL)")
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES ('skill_reference_revision',?)",
+                   (secrets.randbits(62) + 1,))
+
+    def skill_reference_generation(self) -> list[int]:
+        """Read the committed reference generation only when canonical coverage is complete."""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            self._require_complete(db)
+            row = db.execute("SELECT value FROM meta WHERE key='skill_reference_revision'").fetchone()
+            if row is None or type(row[0]) is not int or row[0] <= 0:
+                raise SubagentRunIndexUnavailable("skill reference generation is unavailable")
+            # Older committed runs may have no fingerprint until their first new write.
+            return [self._membership_revision(db), row[0]]
+
+    @staticmethod
+    def _record_skill_reference_projection(db, run_id, attrs, *, active, in_recovery):
+        # The recovery selection includes some ended runs, whose references no longer protect skills.
+        if active:
+            projection = ({key: attrs[key] for key in (
+                "skill_snapshot_refs", "skill_refs", "scheduler_skill_refs", "allowed_skills",
+            ) if key in attrs} if isinstance(attrs, dict) else attrs)
+            digest = hashlib.sha256(_identity_key(projection).encode()).hexdigest()
+        else:
+            digest = "closed" if in_recovery else None
+        if digest is None:
+            changed = db.execute("DELETE FROM skill_reference_fingerprints WHERE run_id=?", (run_id,)).rowcount
+        else:
+            changed = db.execute(
+                "INSERT INTO skill_reference_fingerprints VALUES (?,?) ON CONFLICT(run_id) DO UPDATE SET "
+                "digest=excluded.digest WHERE digest!=excluded.digest", (run_id, digest),
+            ).rowcount
+        if changed:
+            db.execute("UPDATE meta SET value=value+1 WHERE key='skill_reference_revision'")
 
     @staticmethod
     def _ensure_membership_revision(db):
@@ -204,10 +244,15 @@ class SubagentRunIndex:
                 raise SubagentRunIndexUnavailable("subagent run index schema unavailable")
             return False
         if current:
-            if db.execute("SELECT 1 FROM meta WHERE key='current_membership_revision'").fetchone() is None:
+            missing = {"current_membership_revision", "skill_reference_revision"} - {
+                row[0] for row in db.execute("SELECT key FROM meta WHERE key IN "
+                                             "('current_membership_revision','skill_reference_revision')")
+            }
+            if "current_membership_revision" in missing:
                 self._ensure_membership_revision(db)
-                return True
-            return False
+            if "skill_reference_revision" in missing:
+                self._ensure_skill_reference_projection(db)
+            return bool(missing)
         self._install(db)
         logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
         return True
@@ -325,6 +370,10 @@ class SubagentRunIndex:
         if request:
             rows.append((request, "request", run_id))
         connection.executemany("INSERT INTO membership VALUES (?,?,?)", rows)
+        self._record_skill_reference_projection(
+            connection, run_id, task.attributes, active=active,
+            in_recovery=any(kind in {"closeout", "source_lifecycle", "parent_wait"} for _, kind, _ in rows),
+        )
         current_members = {row for row in rows if row[1] in {'status', 'thread', 'lineage'}}
         if any(row[1] == 'status' and row[0] in SUBAGENT_ENDED_STATUSES for row in previous_members):
             previous_members = set()
