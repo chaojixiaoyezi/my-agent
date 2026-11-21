@@ -436,7 +436,9 @@ def validate_pending_local_dates(rows):
             raise ValueError("invalid curator local date")
         source = row["source_range"]
         cursor = row["cursor"]
-        if (not isinstance(source, dict) or set(source) != {"kind", "messages", "audit"}
+        required = {"kind", "messages", "audit"}
+        if (not isinstance(source, dict) or not required <= source.keys()
+                or source.keys() - required - {"first_enable_after", "audit_endpoint"}
                 or source["kind"] not in ("finalize", "input") or not isinstance(cursor, dict)
                 or set(cursor) != {"messages", "audit"}):
             raise ValueError("invalid curator date source range")
@@ -445,6 +447,19 @@ def validate_pending_local_dates(rows):
                     or any(not isinstance(k, str) or not k or not isinstance(v, str)
                            for k, v in item["messages"].items())):
                 raise ValueError("invalid curator date cursor")
+        cutoff = source.get("first_enable_after", 0.0)
+        if type(cutoff) not in (int, float) or not 0 <= cutoff < float("inf"):
+            raise ValueError("invalid curator date range cutoff")
+        if "audit_endpoint" in source:
+            endpoint = source["audit_endpoint"]
+            if (not source["audit"] or not isinstance(endpoint, dict)
+                    or set(endpoint) != {"name", "dev", "ino", "start", "end", "digest"}
+                    or not isinstance(endpoint["name"], str)
+                    or "/" in endpoint["name"] or "\\" in endpoint["name"] or not endpoint["name"].endswith(".jsonl")
+                    or any(type(endpoint[key]) is not int or endpoint[key] < 0 for key in ("dev", "ino", "start", "end"))
+                    or endpoint["end"] <= endpoint["start"] or not isinstance(endpoint["digest"], str)
+                    or len(endpoint["digest"]) != 64):
+                raise ValueError("invalid curator date audit endpoint")
         if set(cursor["messages"]) != set(source["messages"]):
             raise ValueError("curator date cursor does not match source range")
         if (not isinstance(row["failure_type"], str) or type(row["failure_count"]) is not int

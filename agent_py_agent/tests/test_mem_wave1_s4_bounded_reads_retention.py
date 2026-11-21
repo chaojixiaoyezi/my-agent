@@ -202,7 +202,7 @@ def test_remember_schema_exposes_cursor_only_on_the_top_level_list_call():
 
 
 def test_thread_compaction_registers_pre_compact_once_after_the_commit_returns(tmp_path, monkeypatch):
-    from agent_py_agent.agent.agent_core import _finalization_service
+    from agent_py_agent.agent.conversation import compact_checkpoint
     from agent_py_agent.agent.conversation.compact import (
         ConversationCompactOptions,
         prepare_conversation_context,
@@ -232,14 +232,14 @@ def test_thread_compaction_registers_pre_compact_once_after_the_commit_returns(t
         events.append("commit_returned")
         return result
 
-    original_request = _finalization_service._request_memory_curator
+    original_wake = compact_checkpoint.wake_compact_curator
 
-    def request(target, reason):
-        events.append(reason)
-        return original_request(target, reason)
+    def wake(target, thread):
+        events.append("pre_compact")
+        return original_wake(target, thread)
 
     monkeypatch.setattr(threads, "update_compact_state", commit)
-    monkeypatch.setattr(_finalization_service, "_request_memory_curator", request)
+    monkeypatch.setattr(compact_checkpoint, "wake_compact_curator", wake)
 
     result = prepare_conversation_context(agent, agent.conversation_store, threads.require(context.thread_id),
                                           options=ConversationCompactOptions(force=True))
@@ -249,21 +249,46 @@ def test_thread_compaction_registers_pre_compact_once_after_the_commit_returns(t
     assert "pre_compact" in state.pending_reasons and state.pending_reason_generations["pre_compact"] == 1
 
 
-def test_active_turn_compaction_registers_pre_compact_after_its_commit(monkeypatch):
-    from agent_py_agent.agent.agent_core import _finalization_service
+def test_active_turn_compaction_registers_pre_compact_after_its_commit(tmp_path, monkeypatch):
     from agent_py_agent.agent.conversation import active_turn_compact
+    from agent_py_agent.agent.conversation.compact_scope import CompactScope
+    from agent_py_agent.agent.conversation.live_tool_compact import LiveToolCompactBinding
+    from agent_py_agent.tests.test_gateway_conversation_compact import _agent
 
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    store = agent.conversation_store
+    threads = store.threads
+    thread = threads.get_or_create({"canonical_user_id": "owner", "now": 1.0})
+    binding = LiveToolCompactBinding(store, thread, CompactScope(kind="turn", turn_id="turn-1"))
     events = []
-    monkeypatch.setattr(active_turn_compact, "commit_live_tool_compact",
-                        lambda _agent, _binding, _request: events.append("commit_returned") or "updated-thread")
-    monkeypatch.setattr(_finalization_service, "_request_memory_curator", lambda _agent, reason: events.append(reason))
-    plan = SimpleNamespace(binding="binding", source_call_ids=("call-1",), source_tool_refs=(), retained_tool_refs=(),
-                           retained_call_ids=(), projected_tokens_before=10, policy=None, progress={})
-    request = SimpleNamespace(request_id="req", attempt_id="att", compact_context=None, interrupt_check=None,
-                              progress_callback=None)
+    original_commit = threads.update_compact_state
+    original_claim = agent.memory_curator.claim_compact_checkpoint
 
-    assert active_turn_compact._commit_active_turn_compact(object(), plan, request, "summary", 5) == "updated-thread"
-    assert events == ["commit_returned", "pre_compact"]
+    def commit(*args, **kwargs):
+        updated = original_commit(*args, **kwargs)
+        events.append(("published", updated.compact_generation))
+        return updated
+
+    def claim(updated, **kwargs):
+        events.append(("pre_compact", updated.compact_generation))
+        return original_claim(updated, **kwargs)
+
+    monkeypatch.setattr(threads, "update_compact_state", commit)
+    monkeypatch.setattr(agent.memory_curator, "claim_compact_checkpoint", claim)
+    plan = SimpleNamespace(binding=binding, source_call_ids=("call-1",),
+                           source_tool_refs=({"run_id": "run", "attempt_id": "att",
+                                              "turn_id": "turn-1", "call_id": "call-1"},),
+                           retained_tool_refs=(), retained_call_ids=(), projected_tokens_before=10,
+                           policy=SimpleNamespace(context_window_tokens=100, trigger_percent=90,
+                                                  trigger_tokens=90, recovery_target_tokens=50), progress={})
+    request = SimpleNamespace(request_id="req", attempt_id="att", compact_context=None,
+                              interrupt_check=None, progress_callback=None)
+
+    updated = active_turn_compact._commit_active_turn_compact(agent, plan, request, "summary", 5)
+
+    assert updated.compact_generation == 1
+    assert events == [("published", 1), ("pre_compact", 1)]
+    assert agent.memory_curator.state_store.load().pending_reason_generations["pre_compact"] == 1
 
 
 @pytest.mark.parametrize(("apply_id", "expected"), [("apply-1", ["pre_compact"]), ("", [])])

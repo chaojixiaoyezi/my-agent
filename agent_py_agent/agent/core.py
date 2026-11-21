@@ -688,6 +688,7 @@ class SimpleAgent(
         )
         with measure_restart_startup("db_open"):
             self.subagents = _build_subagent_manager(self, paths)
+        self.memory_curator.state_store.bind_compact_repository(self.subagents.runtime_db)
         configure_canonical_background_contracts()
         from .agent_core.orchestration.dispatch.orphan_request import execute_orphan_source
 

@@ -176,6 +176,7 @@ def test_stable_generation_moves_fully_curated_thread(tmp_path, monkeypatch, ena
     path = tmp_path / "agent.yaml"
     _write_switch(path, enabled)
     service.config = load_config(path)
+    service.config.retention_scan_slice_ms = 5000
     thread, rows = _old_thread(home, _ROWS)
     end = rows[-1].message_id
     _write_curator_state(home, {thread.thread_id: end})
@@ -207,3 +208,31 @@ def test_home_doctor_uses_live_config_for_its_read_only_plan(tmp_path):
     report = build_home_doctor_report(home, config=config)["retention"]
     assert report["curator_switch"]["state"] == "enabled"
     assert not any(row["record_id"] == thread.thread_id for row in report["actions"] if row["category"] == "conversation")
+
+
+@pytest.mark.parametrize("stage", ["_begin_trash", "_write_tombstone"])
+def test_switch_change_during_conversation_move_rolls_back(tmp_path, monkeypatch, stage):
+    home, service = _retention_owner(tmp_path, profile="aux-profile")
+    path = tmp_path / "agent.yaml"
+    _write_switch(path, False)
+    service.config = load_config(path)
+    thread, _ = _old_thread(home, _ROWS)
+    report, [action], _ = _plan_all(service)
+    original = getattr(retention_apply, stage)
+    before = {member: member.read_bytes() for member in action.related_paths if member.is_file()}
+
+    def change_config(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if stage == "_begin_trash" or kwargs.get("status") == "trashed":
+            _write_switch(path, True)
+        return result
+
+    monkeypatch.setattr(retention_apply, stage, change_config)
+    result = retention_apply.execute_retention_plan(
+        home=home, candidates=service.candidates, plan=replace(report, actions=(action,)),
+        now=_NOW, config=service.config,
+    )
+
+    assert [(row.record_id, row.status) for row in result.actions] == [(thread.thread_id, "state_changed")]
+    assert {member: member.read_bytes() for member in before} == before
+    assert not action.destination.exists()
