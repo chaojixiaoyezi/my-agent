@@ -1498,3 +1498,59 @@ def test_old_task_alias_ledger_conflicts_with_new_project_candidate(tmp_path: Pa
     records = service.long_term.all()
     assert [record.entry_id for record in records] == ["memory-old-task-ledger"]
     assert service.candidates.get(candidate.candidate_id).status == "blocked_conflict"
+
+
+@pytest.mark.parametrize("index_state", ["missing", "partial", "complete"])
+def test_legacy_dream_replacement_has_the_same_scope_across_index_states(tmp_path, monkeypatch, index_state):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.memory_store import recall
+    from agent_py_agent.agent.memory_store.jsonl import MemoryRecord
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
+    from agent_py_agent.tests.test_conveyor_m51_read_index_scope_subject import _fact, _seed_index
+
+    service, store, thread = _runtime(tmp_path)
+    memory = service.long_term
+    old = MemoryRecord(
+        "user", "Original relocation.", entry_id="dream", kind="fact", source="user-profile-dream",
+        attributes={"relocated_from": "USER.md#old", "subject_key": "user-profile-dream:old"},
+    )
+    other_source = replace(old, entry_id="other-source", content="Different source.", source="memory-import")
+    other_project = replace(old, entry_id="other-project", content="Different scope.", attributes={
+        **old.attributes, "scope_type": "project", "scope_key": "project:outside",
+    })
+    with monkeypatch.context() as historical:
+        historical.setattr(recall, "normalize_dream_relocation", lambda record: record)
+        _seed_index(memory, [old, other_source, other_project, _fact("unrelated", "Unrelated project fact")])
+    index = MemoryReadIndex(memory.path)
+    if index_state != "complete":
+        index.invalidate()
+    if index_state == "partial":
+        memory.rebuild_read_index(batch_size=1)
+    assert index.coverage()["status"] == index_state
+    manifest = index.store.manifest()
+    paths = [index.store.manifest_path, *(memory.path.parent / row["path"] for row in manifest["segments"])]
+    originals = {path: path.read_bytes() for path in paths}
+    located = memory.locate_for_promotion(entry_id="dream", subject_key="user-profile-dream:old",
+                                          scope=("personal", "personal"))
+    [row] = [record for record in located if record.entry_id == "dream"]
+    assert (row.attributes.get("scope_type"), row.attributes.get("scope_key")) == ("personal", "personal")
+    assert row.version == 1
+    for control in (other_source, other_project):
+        rows = memory.locate_for_promotion(entry_id=control.entry_id)
+        [unchanged] = [record for record in rows if record.entry_id == control.entry_id]
+        assert unchanged.attributes == control.attributes
+    assert {path: path.read_bytes() for path in paths} == originals
+
+    candidate = _explicit(service, store, thread, content="Updated relocation.", subject_key="user-profile-dream:old",
+                          proposed_action="replace", target_entry_id="dream")
+    stale = _explicit(service, store, thread, content="Earlier proposed relocation.",
+                      subject_key="user-profile-dream:old", proposed_action="replace", target_entry_id="dream")
+    with monkeypatch.context() as verify_lookup:
+        if index_state == "complete":
+            verify_lookup.setattr(memory, "all", lambda: pytest.fail("complete index must use point lookup"))
+        result = confirm_candidate(service, candidate.candidate_id)
+    assert result.promoted, result
+    assert confirm_candidate(service, stale.candidate_id).reason_code == "TARGET_ENTRY_STALE_OBSERVATION"
+    [updated] = memory.read_ids(["dream"])
+    assert (updated.entry_id, updated.version, updated.content) == ("dream", 2, "Updated relocation.")

@@ -348,9 +348,6 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     memory_top_k = max(1, int(agent.config.memory_top_k or 1))
     current = getattr(agent, "_current_run_params", None)
     selected_scope = None if recall_suppressed else checked_foreground_memory_scope(agent, current)
-    routed_context = _routed_memory_context_for_request(
-        agent, request, skip_formal_recall=recall_suppressed,
-    )
     workspace = frozen_workspace_ref(request) if not recall_suppressed else None
     recall_scope = (
         MemoryRecallScope.from_runtime(task_id=request.task_id, task_attributes=request.task_attributes)
@@ -364,6 +361,9 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         )
     )
 
+    routed_context = _routed_memory_context_for_request(
+        agent, request, skip_formal_recall=recall_suppressed, recall_scope=recall_scope,
+    )
     recall_predicate = runtime_recall_predicate(recall_scope, request.user_prompt)
     long_term_memories = [] if recall_suppressed else _optional_memory_read(
         lambda: (
@@ -628,7 +628,10 @@ def _tool_runtime_for_context_bundle(
 # missing/invalid authority disables this projection with a typed finding.
 # memory_rule_routing_mode 是唯一开关：off 即关闭（原 memory_rule_routing_enabled 已并入）。
 # 函数用途: 为当前请求构造 lesson 路由收据；隔离或记忆总闸关闭时不读取正式索引。
-def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, skip_formal_recall: bool):
+def _routed_memory_context_for_request(
+    agent, request: RuntimeContextRequest, *, skip_formal_recall: bool,
+    recall_scope: MemoryRecallScope | None = None,
+):
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
     route_enabled = not skip_formal_recall and route_mode != "off"
     route_auto_read_limit = int(getattr(agent.config, "memory_rule_auto_read_limit", 3))
@@ -645,6 +648,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
     return build_routed_memory_context(
         route_root,
         request.user_prompt,
+        recall_scope=recall_scope,
         options=RouteContextOptions(
             enabled=route_enabled,
             index_path=route_index,

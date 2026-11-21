@@ -165,7 +165,7 @@ class MemoryReadIndex:
 
     # LLM: 同一只读事务取水位及OR候选；短词/bigram编码成trigram可检索token，不丢英文关键词。
     # 函数用途: 从冷热读索引选取有界候选并附实际coverage。
-    def query(self, query, *, limit=64, scopes=None):
+    def query(self, query, *, limit=64, scopes=None, include_semantic=False):
         root = self.store.manifest()
         if root is None or not 1 <= limit <= 1000:
             return [], self.coverage(root)
@@ -185,6 +185,7 @@ class MemoryReadIndex:
                 return [], coverage
             scope_sql, scope_args = _scope_filter(scopes)
             expiry = " AND (e.expires_at IS NULL OR e.expires_at=0 OR e.expires_at>?)"
+            now = time.time()
             if terms:
                 expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
                 # 有范围时让外层 SQL 排序，避免 FTS 在连接过滤之前对全部命中计算排名。
@@ -192,14 +193,26 @@ class MemoryReadIndex:
                 rows = conn.execute(
                     "SELECT e.* FROM entries_fts f JOIN entries e ON e.id=f.id WHERE entries_fts MATCH ?"
                     + expiry + scope_sql + order,
-                    (expression, time.time(), *scope_args, limit + 1)).fetchall()
+                    (expression, now, *scope_args, limit + 1)).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT e.* FROM entries e WHERE instr(e.search_text,?) > 0"
                     + expiry + scope_sql + " ORDER BY e.id LIMIT ?",
-                    (folded, time.time(), *scope_args, limit + 1)).fetchall()
+                    (folded, now, *scope_args, limit + 1)).fetchall()
+            semantic_rows = []
+            if include_semantic:
+                # A separate bounded window from the same snapshot supplies records without a lexical match.
+                semantic_rows = conn.execute(
+                    "SELECT e.id,e.version,e.content_hash,e.segment,e.row_no FROM entries e WHERE 1=1"
+                    + expiry + scope_sql + " ORDER BY e.rowid DESC LIMIT ?",
+                    (now, *scope_args, limit + 1)).fetchall()
         coverage = {**coverage, "result_truncated": len(rows) > limit}
-        return [{**dict(row), "operation_id": root["operation_id"]} for row in rows[:limit]], coverage
+        candidates = {row["id"]: row for row in rows[:limit]}
+        if include_semantic:
+            coverage["semantic_window_truncated"] = len(semantic_rows) > limit
+            for row in semantic_rows[:limit]:
+                candidates.setdefault(row["id"], row)
+        return [{**dict(row), "operation_id": root["operation_id"]} for row in candidates.values()], coverage
 
     # LLM: 最终注入只点查已入选身份；缺/旧索引返回None交有界权威降级，不能全账或全live枚举。
     # 函数用途: 用本代索引定位最终确认的一小批正式事实。
@@ -283,6 +296,7 @@ class MemoryReadIndex:
     # 函数用途: 将候选恢复为当前真正可见的正式事实。
     def resolve(self, candidates, *, operation_id=None, for_write=False):
         from .jsonl import memory_content_hash
+        from .recall import normalize_dream_relocation
 
         root = self.store.manifest()
         bound = {item.get("operation_id") for item in candidates}
@@ -300,7 +314,7 @@ class MemoryReadIndex:
                     loaded[index] = self.store.segment_rows(root["segments"][index])
                 rows = loaded[index]
                 if 0 <= offset < len(rows):
-                    record = _read_index_record(rows[offset], normalize_dream=not for_write)
+                    record = _read_index_record(rows[offset], normalize_dream=False)
             if (record is None or record.entry_id != item["id"] or record.version != item["version"]
                     or memory_content_hash(record.content) != item["content_hash"]):
                 if for_write:
@@ -311,7 +325,7 @@ class MemoryReadIndex:
         if current is None or current["operation_id"] != root["operation_id"]:
             raise MemoryReadIndexGenerationConflict("MEMORY_READ_INDEX_GENERATION_CONFLICT")
         blocked = self.store.tombstones.blocked((r.entry_id, memory_content_hash(r.content)) for r in records)
-        return [record for record in records if record.entry_id not in blocked]
+        return [normalize_dream_relocation(record) for record in records if record.entry_id not in blocked]
 
     # LLM: 删除后整份派生库可丢弃，清空字节后移除精确DB及journal/WAL/SHM；调用方持formal锁，无常驻连接。
     # 函数用途: 让已遗忘正文不留在SQLite空闲页或FTS历史段中。

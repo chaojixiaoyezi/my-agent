@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
@@ -176,3 +178,39 @@ def test_search_scoped_with_embedder_fuses_and_still_scopes(tmp_path) -> None:
 
     assert hits and any("五十万" in r.content for r in hits)
     assert not any("天气" in r.content for r in hits)
+
+
+def test_scoped_semantic_arm_preserves_a_cached_nonlexical_hit(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.jsonl import _query_vector
+    from agent_py_agent.agent.memory_store.recall import MemoryRecallScope, runtime_recall_predicate
+    from agent_py_agent.agent.retrieval.text_vector_cache import index_text
+    from agent_py_agent.tests.test_conveyor_m51_read_index_scope_subject import _fact, _seed_index
+
+    class OfflineEmbedder:
+        def embed(self, _texts):
+            raise AssertionError("latency-safe retrieval must use existing vectors")
+
+    memory = JsonlMemory(tmp_path / "memory" / "long_term" / "memory.jsonl", embedder=OfflineEmbedder(),
+                         vector_identity={"profile_id": "offline", "model": "fixture"})
+    exact = _fact("exact", "deploy")
+    semantic = _fact("semantic", "release")
+    outside = _fact("outside", "deploy outside", scope_key="project:outside")
+    _seed_index(memory, [exact, semantic, outside])
+    store = memory._vector_store()
+    for row, vector in [(exact, [0.0, 1.0]), (semantic, [1.0, 0.0]), (outside, [1.0, 0.0])]:
+        store.upsert(row.entry_id, vector, text=index_text(row.content, row.attributes))
+    _query_vector(memory, "deploy", [1.0, 0.0])
+    monkeypatch.setattr("agent_py_agent.agent.memory_store.jsonl._queue_vector_backfill", lambda *_args: None)
+
+    scope = MemoryRecallScope.from_runtime(task_attributes={"project_id": "current"})
+    hits, facts = memory.search_scoped_candidates_report(
+        "deploy", 5, runtime_recall_predicate(scope, "deploy"), latency_safe=True,
+    )
+    assert {row.entry_id for row in hits} == {exact.entry_id, semantic.entry_id}
+    assert facts["semantic_coverage"] == {"partial": False, "reasons": []}
+    assert memory._pending_access == {}
+
+    monkeypatch.setattr(memory, "_search_tier_index",
+                        lambda *_args, **_kwargs: pytest.fail("an explicitly empty scope must not query the index"))
+    empty = runtime_recall_predicate(MemoryRecallScope(()), "deploy")
+    assert memory.search_scoped_candidates_report("deploy", 5, empty, latency_safe=True)[0] == []

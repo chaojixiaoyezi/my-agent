@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._context_paths import (
     _append_finding,
@@ -26,9 +26,12 @@ from ._context_reading import (
     _read_authority_file,
 )
 from .loader import load_memory_routes
-from .matcher import match_routes
+from .matcher import match_routes, route_in_recall_scope
 from .models import MemoryRouteMatch
 from .validator import validate_routes
+
+if TYPE_CHECKING:
+    from ..memory_store.recall import MemoryRecallScope
 
 VALID_CONTEXT_MODES = {"soft", "strict"}
 
@@ -68,6 +71,7 @@ def build_routed_memory_context(
     query: str,
     *,
     options: RouteContextOptions | None = None,
+    recall_scope: MemoryRecallScope | None = None,
 ) -> RoutedMemoryContext:
     """Route a query to safe memory authority reads and prompt sections."""
 
@@ -88,11 +92,12 @@ def build_routed_memory_context(
     if routes is None:
         return context
 
-    context.routes_count = len(routes)
-    for finding in validate_routes(routes, resolved_root):
+    admitted = [route for route in routes if route_in_recall_scope(route, recall_scope)]
+    context.routes_count = len(admitted)
+    for finding in validate_routes(admitted, resolved_root):
         _append_finding(context.findings, finding)
 
-    matches = match_routes(query, routes, limit=_opts.limit)
+    matches = match_routes(query, routes, limit=_opts.limit, recall_scope=recall_scope)
     context.matches = [_match_to_dict(match) for match in matches]
 
     targets = _read_targets_from_matches(matches, resolved_root, context.findings)
