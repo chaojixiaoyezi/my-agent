@@ -648,6 +648,13 @@ class WorkflowRunStore:
         with self._lock(workflow_run_id):
             record = self.load_run(workflow_run_id)
             previous = next((s for s in record.steps if s.step_id == step_record.step_id), None)
+            if previous is not None:
+                before, after = previous.escalation_result, step_record.escalation_result
+                published = before.get('watermark_publication', {}).get('state') == 'published'
+                if published and before.get('attempt_id') == after.get('attempt_id'):
+                    step_record = replace(step_record, watermark=previous.watermark, escalation_result={
+                        **after, 'watermark_publication': before['watermark_publication'],
+                    })
             changed = previous is not None and payload(previous) != payload(step_record)
             if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed', 'skipped') and not resuming):
                 raise ValueError('WORKFLOW_RUN_TERMINAL')
@@ -689,6 +696,23 @@ class WorkflowRunStore:
             if ((before.get('attempt_id') or expected_attempt_id) != expected_attempt_id
                     or consumed + 1 != retry['consumed_budget']
                     or retry['consumed_budget'] >= step.max_attempts):
+                return None
+            return self.save_step_result(workflow_run_id, step)
+
+    def start_step_retry(self, workflow_run_id, step, *, observed_at):
+        """Claim the same eligible reservation under the run CAS before dispatch."""
+        with self._lock(workflow_run_id):
+            current = self.load_run(workflow_run_id)
+            previous = next((item for item in current.steps if item.step_id == step.step_id), None)
+            if current.status != 'running' or previous is None:
+                return None
+            before, after = previous.escalation_result, step.escalation_result
+            waiting = before.get('retry', {})
+            if (previous.status not in ('pending', 'running', 'paused_for_resume') or waiting.get('state') != 'waiting'
+                    or step.status != 'running' or step.attempt_count != previous.attempt_count
+                    or before.get('attempt_id') != after.get('attempt_id') or waiting.get('replay_proof') != 'not_started'
+                    or not math.isfinite(observed_at) or waiting['next_eligible_at'] > observed_at
+                    or after.get('retry') != {**waiting, 'state': 'running'}):
                 return None
             return self.save_step_result(workflow_run_id, step)
 

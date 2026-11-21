@@ -900,33 +900,47 @@ class WorkflowsTool(BaseTool):
             # qualified模型入口也继承原任务；仅本次服务副本绑定DTO，原HTTP调用方/provider不受影响。
             backend._inherited_run_context = frozen_context
         factory = backend.engine_factory or self._business_engine
-        admissions = []
+        admission = None
+
+        def is_run_decision(value):
+            return isinstance(value, dict) and 'event' not in value and value.get('status') in ('queued', 'skipped', 'blocked')
 
         # LLM: 运行策略只冻结到本次可信engine，不增加身份字段，不更改调度器payload协议。
         # 函数用途: 为业务执行器装配本次并发策略，避免第二次准入。
         def make_engine(owner_home, *, run_authorizer, agent_steps):
             engine = copy.copy(factory(owner_home, run_authorizer=run_authorizer, agent_steps=agent_steps))
             engine.default_concurrency_policy = params.get('concurrency_policy', 'allow')
-            engine.concurrency_admission_observer = admissions.append
+            observer = getattr(engine, 'concurrency_admission_observer', None)
+
+            def observe(event):
+                nonlocal admission
+                if is_run_decision(event):
+                    admission = event
+                if callable(observer):
+                    observer(event)
+
+            engine.concurrency_admission_observer = observe
             return engine
         backend.engine_factory = make_engine
         from ..workflows.datasource_runtime import bind_asset_im_notifier
         with bind_asset_im_notifier(self.owner_home, self.im_notifier) if callable(self.im_notifier) else nullcontext():
             result = backend.execute(params['action'], self._business_request(params), actor=actor,
                 expected_revision=params.get('expected_revision'), idempotency_key=params.get('idempotency_key', ''))
-        if not admissions and params['action'] == 'workflows.run' and result.get('state') == 'blocked':
+        run_id = result.get('workflow_run_id') or params.get('workflow_run_id')
+        if admission is not None and admission.get('workflow_run_id') != run_id:
+            admission = None
+        if admission is None and params['action'] == 'workflows.run' and result.get('state') == 'blocked':
             from ..workflows.run_store import WorkflowRunStore
             runs = WorkflowRunStore(self.owner_home)
             current = runs.load_run(result['workflow_run_id'])
             if current.status in ('queued', 'skipped'):
                 cached = runs.load_admission_receipt(current.workflow_run_id)
-                if cached is not None:
-                    admissions.append(cached)
+                if is_run_decision(cached):
+                    admission = cached
                 elif current.status == 'queued':
                     # 创建原run到准入回执发表之间仍属pending，不能伪造queue_position或报blocked。
                     return {**result, 'state': 'pending'}
-        if admissions:
-            admission = admissions[-1]
+        if admission is not None:
             state = ('pending' if admission['status'] == 'queued' else 'completed'
                      if admission.get('error_code') == 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING' else 'blocked')
             return {**result, **admission, 'state': state}

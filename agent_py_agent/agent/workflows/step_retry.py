@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, wait
 from dataclasses import replace
 from threading import Event
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 from ..common.cancellation import ToolCancelled, current_cancellation_token, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..contracts.error_taxonomy import error_contract
+from .batching import BatchContinuation
 
 # 旧工作流回执中的确切传输错误码，按同一工具超时合同判定。
 _LEGACY_TRANSIENT_CODES = {
@@ -86,12 +88,37 @@ def continuing_retry(step):
     return bool(facts.get('retry')) and facts.get('effect_outcome') == 'not_started'
 
 
-def wait_for_retry(engine, deadline):
+_WORKFLOW_STOP_POLL_SECONDS = 0.2
+
+
+def wait_for_workflow_completion(futures, *, timeout=None):
+    """Observe cancellation while leaves are queued or executing."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        _check_stop_cleanly()
+        delay = _WORKFLOW_STOP_POLL_SECONDS
+        if deadline is not None:
+            delay = max(0, min(delay, deadline - time.monotonic()))
+        done, _ = wait(futures, timeout=delay, return_when=FIRST_COMPLETED)
+        if done or deadline is not None and time.monotonic() >= deadline:
+            return done
+
+
+def wait_for_retry(engine, deadline, *, sleeper=None):
+    """Wait on the run coordinator. An injected sleeper owns the requested delay."""
+    _check_stop_cleanly(engine)
+    if sleeper is not None:
+        remaining = deadline - time.time()
+        if remaining > 0:
+            sleeper(remaining)
+        _check_stop_cleanly(engine)
+        return max(time.time(), deadline)
     signal = current_cancellation_token() or Event()
     while (remaining := deadline - time.time()) > 0:
         _check_stop_cleanly(engine)
-        signal.wait(min(remaining, 0.2))
+        signal.wait(min(remaining, _WORKFLOW_STOP_POLL_SECONDS))
     _check_stop_cleanly(engine)
+    return time.time()
 
 
 def start_retry(step, *, reserve_effect=False):
@@ -165,7 +192,7 @@ def run_step_with_retry(
 
         try:
             execute_fn()
-        except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError):
+        except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError, BatchContinuation):
             raise
         except Exception as exc:
             step.status = 'failed'

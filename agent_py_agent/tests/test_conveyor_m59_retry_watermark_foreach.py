@@ -156,7 +156,7 @@ def test_dag_runs_twelve_ready_steps(tmp_path, monkeypatch):
             if peak == 12:
                 reached.set()
         try:
-            reached.wait(2)
+            assert reached.wait(10), "all ready leaves must receive their configured slots"
             return {"value": 1}
         finally:
             with guard:
@@ -177,6 +177,7 @@ def test_typed_codes_ignore_substrings_and_use_tool_contract():
 
 
 def test_dag_backoff_releases_its_only_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(batching, "_configured_host_parallel", 1)
     seen = []
     def tool_step(engine, run, workflow, step, spec, context, outputs):
         seen.append((step.step_id, current_thread()))
@@ -206,7 +207,8 @@ def test_dag_backoff_releases_its_only_worker(tmp_path, monkeypatch):
     assert len(list((engine.store.run_dir(result.workflow_run_id) / "attempts").glob("retry.*.admitted"))) == 2
 
 
-def test_resume_retains_reserved_retry_attempt_and_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize("dag", [True, False], ids=["dag", "sequential"])
+def test_resume_retains_reserved_retry_attempt_and_budget(tmp_path, monkeypatch, dag):
     calls = []
 
     def execute(engine, run, workflow, step, spec, context, outputs):
@@ -222,9 +224,11 @@ def test_resume_retains_reserved_retry_attempt_and_budget(tmp_path, monkeypatch)
     workflow = _flow([
         {"step_id": "s", "mode": "tool_call", "tool_spec": {"tool_name": "read_file"},
          "retry_policy": {"max_attempts": 2, "delay_seconds": 0.2}},
-    ], execution_mode="dag")
+    ], **({"execution_mode": "dag"} if dag else {}))
+    from agent_py_agent.agent.workflows import step_retry
+
     with monkeypatch.context() as patch:
-        patch.setattr(dag_scheduler, "wait_for_retry", interrupted)
+        patch.setattr(dag_scheduler if dag else step_retry, "wait_for_retry", interrupted)
         with pytest.raises(InterruptedError) as caught:
             engine.run_workflow(workflow)
     paused = engine.store.load_run(caught.value.record.workflow_run_id)
@@ -307,3 +311,143 @@ def test_deployment_registry_and_owner_pool_use_the_configured_ceiling(tmp_path,
     OwnerScopedAgentPool(base_config=custom, root=tmp_path)
     assert batching.resolved_max_parallel() == 12
     assert batching.validate_foreach({"from": "inputs.items"})["max_parallel"] == 1
+
+
+def test_unreadable_predecessor_recovers_to_the_next_revision(tmp_path, monkeypatch):
+    executions = []
+    def analyze(*_):
+        executions.append(1)
+        return {"watermark": {"cursor": 2}}
+
+    flow = _flow([{"step_id": "checkpoint", "mode": "llm_skill_analysis"}], execution_mode="dag")
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+    step_watermarks.save_workflow_step_watermark(tmp_path, "dag-flow", "checkpoint", {"cursor": 1})
+    load = step_watermarks.load_workflow_step_watermark
+    monkeypatch.setattr(step_watermarks, "load_workflow_step_watermark",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("simulated baseline read error")))
+    initial = engine.run_workflow(flow)
+    assert initial.status == "succeeded"
+    assert initial.steps[0].escalation_result["watermark_publication"]["state"] == "repair"
+
+    monkeypatch.setattr(step_watermarks, "load_workflow_step_watermark", load)
+    repaired = engine.resume_workflow_run(initial.workflow_run_id)
+    engine.resume_workflow_run(initial.workflow_run_id)
+    assert repaired.steps[0].escalation_result["watermark_publication"]["state"] == "published"
+    checkpoint = load(tmp_path, "dag-flow", "checkpoint")
+    assert (checkpoint["revision"], checkpoint["watermark"]) == (2, {"cursor": 2})
+    assert executions == [1]
+
+
+@pytest.mark.parametrize("dag", [False, True], ids=["sequential", "dag"])
+@pytest.mark.parametrize("after_step_write", [False, True], ids=["before_step_write", "after_step_write"])
+def test_run_ack_error_preserves_succeeded_attempt(tmp_path, monkeypatch, dag, after_step_write):
+    executions = []
+    def analyze(*_):
+        executions.append(1)
+        return {"watermark": {"cursor": 2}}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+    save = engine.store.save_step_watermark
+    hit = []
+    def lose_ack(*args, **kwargs):
+        if not hit:
+            hit.append(1)
+            if after_step_write:
+                def fail_run_write(root, parts, value):
+                    if parts[-1] == "run.json":
+                        raise OSError("simulated run ACK I/O error")
+                    return write(root, parts, value)
+                with monkeypatch.context() as fault:
+                    fault.setattr(run_store_module, "_write_json", fail_run_write)
+                    return save(*args, **kwargs)
+            raise OSError("simulated step ACK I/O error")
+        return save(*args, **kwargs)
+
+    from agent_py_agent.agent.workflows import run_store as run_store_module
+    write = run_store_module._write_json
+    monkeypatch.setattr(engine.store, "save_step_watermark", lose_ack)
+    flow = _flow([{"step_id": "checkpoint", "mode": "llm_skill_analysis"}],
+                 **({"execution_mode": "dag"} if dag else {}))
+    initial = engine.run_workflow(flow)
+    assert initial.status == initial.steps[0].status == "succeeded"
+    assert hit == [1]
+
+    repaired = engine.resume_workflow_run(initial.workflow_run_id)
+    assert repaired.steps[0].status == "succeeded"
+    assert repaired.steps[0].escalation_result["watermark_publication"]["state"] == "published"
+    assert step_watermarks.load_workflow_step_watermark(tmp_path, "dag-flow", "checkpoint")["revision"] == 1
+    assert executions == [1]
+
+
+def test_sequential_retry_parks_the_coordinator_outside_the_execution_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(batching, "_configured_host_parallel", 1)
+    started, resume = Event(), Event()
+    attempts = []
+    wait_threads = []
+
+    def execute(engine, run, workflow, step, spec, context, outputs):
+        attempts.append((current_thread(), step.escalation_result["attempt_id"]))
+        if len(attempts) == 1:
+            step.status, step.error_code = "failed", "TOOL_TIMEOUT"
+            step.escalation_result["effect_outcome"] = "not_started"
+        else:
+            step.status = "succeeded"
+            step.output_snapshot = {"value": 1}
+
+    def pause(_seconds):
+        wait_threads.append(current_thread())
+        started.set()
+        assert resume.wait(10)
+
+    engine = WorkflowEngine(tmp_path / "retry", tool_step_executor=execute)
+    monkeypatch.setattr(engine, "retry_sleep", pause, raising=False)
+    workflow = _flow([{"step_id": "retry", "mode": "tool_call", "tool_spec": {"tool_name": "read_file"},
+                       "retry_policy": {"max_attempts": 2, "delay_seconds": 60}}])
+    other = WorkflowEngine(tmp_path / "other", analysis_handler=lambda *_: {"ready": True})
+    independent = _flow([{"step_id": "other", "mode": "llm_skill_analysis"}], execution_mode="dag")
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        queued = callers.submit(engine.run_workflow, workflow)
+        try:
+            assert started.wait(10)
+            assert callers.submit(other.run_workflow, independent).result(timeout=5).status == "succeeded"
+            assert attempts[0][0] is not wait_threads[0]
+        finally:
+            resume.set()
+        assert queued.result(timeout=10).status == "succeeded"
+    assert len(attempts) == len({attempt for _, attempt in attempts}) == 2
+
+
+@pytest.mark.parametrize("prior", ["absent", "legacy", "competing"])
+def test_baseline_recovery_preserves_predecessor_identity(tmp_path, monkeypatch, prior):
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *_: {"watermark": {"cursor": 2}})
+    write = step_watermarks.save_workflow_step_watermark
+    read = step_watermarks.load_workflow_step_watermark
+    if prior == "legacy":
+        path = tmp_path / "data" / "workflow_watermarks" / "dag-flow" / "w.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"watermark": {"cursor": 1}}))
+    elif prior == "competing":
+        write(tmp_path, "dag-flow", "w", {"cursor": 1})
+
+    def unreadable(*args, **kwargs):
+        raise OSError("simulated baseline read error")
+
+    flow = _flow([{"step_id": "w", "mode": "llm_skill_analysis"}])
+    with monkeypatch.context() as fault:
+        fault.setattr(step_watermarks, "load_workflow_step_watermark", unreadable)
+        initial = engine.run_workflow(flow)
+    assert initial.steps[0].escalation_result["watermark_base_revision"] is None
+    if prior == "competing":
+        rival = write(tmp_path, "dag-flow", "w", {"cursor": 99}, run_id="competing-run",
+                      step_attempt_id="competing-attempt", expected_revision=1)
+    resumed = engine.resume_workflow_run(initial.workflow_run_id)
+    assert resumed.status == resumed.steps[0].status == "succeeded"
+    publication = resumed.steps[0].escalation_result["watermark_publication"]
+    saved = read(tmp_path, "dag-flow", "w")
+    if prior == "competing":
+        assert saved == rival
+        assert publication["state"] == "repair"
+        assert publication["error_code"] == "WORKFLOW_RUN_REVISION_CONFLICT"
+    else:
+        assert (saved["revision"], saved["watermark"]) == (1, {"cursor": 2})
+        assert publication["state"] == "published"
