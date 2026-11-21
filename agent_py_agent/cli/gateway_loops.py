@@ -2507,6 +2507,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
     #   自动总结 Skill 在其后独立运行，两者失败互不影响。
     # 函数用途: 在策展车道里依次执行到期的记忆整理和待处理的自动总结 Skill。
     def _safe_run_curator(self, agent: object, label: str) -> object:
+        _recover_owner_feedback_reviews(agent, label)
         if _curator_run_allowed(self, agent):
             result = self._run_memory_curator(agent, label)
         else:
@@ -2935,6 +2936,25 @@ def _curator_maintenance_due(agent: object) -> bool:
         return False
     curator = getattr(agent, "memory_curator", None)
     return callable(getattr(curator, "run_maintenance_if_due", None))
+
+
+def _recover_owner_feedback_reviews(agent: object, label: str) -> None:
+    """Retry saved review publication inside the bounded owner maintenance lane."""
+    config = getattr(agent, "config", None)
+    if not getattr(config, "memory_curator_enabled", True) or not _agent_memory_enabled(agent):
+        return
+    home = getattr(agent, "home_paths", None)
+    promotion = getattr(agent, "memory_promotion", None)
+    runtime_db = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if home is None or promotion is None or runtime_db is None:
+        return
+    try:
+        promotion.recover_feedback_reviews(
+            runtime_db, owner_home=home.owner_home_dir,
+            limit=getattr(config, "retention_scan_slice_entries", AgentConfig.retention_scan_slice_entries),
+        )
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_memory_curator.feedback_review", label, exc)
 
 
 # LLM: 辅助模型缺席或冷却时执行零 LLM 的记忆维护（归档旧经验/压缩候选），绝不调 run_if_due。

@@ -350,7 +350,10 @@ def _owner_runtime_db(agent: object):
 
 
 def _remember_correction(agent, memory, params, scope) -> ToolHandlerOutcome:
-    from ..memory_store.promotion import queue_memory_feedback_review, register_memory_feedback
+    from ..memory_store.promotion import (
+        materialize_memory_feedback_review,
+        register_memory_feedback,
+    )
 
     entry_id, version = params.get("entry_id"), params.get("version")
     verdict, note = params.get("verdict"), params.get("note", "")
@@ -389,17 +392,12 @@ def _remember_correction(agent, memory, params, scope) -> ToolHandlerOutcome:
     resolved = _resolved_target(memory, params, action="correct", index=1)
     if isinstance(resolved, ToolHandlerOutcome):
         return resolved
-    entry_id, record = resolved
+    _, record = resolved
     if scope is not None and not recall.long_term_record_matches_scope(record, scope):
         return _unavailable_target(1)
-    if record.version != version:
-        return _memory_error(f"展示版本 {version} 已过时，条目当前版本为 {record.version}。",
-                             "MEMORY_VERSION_CONFLICT", hint="先用 remember(action=list) 重新核对再提交。",
-                             not_started=True)
-
     try:
-        receipt, inserted, saved_note = register_memory_feedback(
-            runtime_db, entry_id=entry_id, version=version, verdict=verdict, task_identity=task_identity, note=note,
+        registration = register_memory_feedback(
+            runtime_db, record=record, version=version, verdict=verdict, task_identity=task_identity, note=note,
         )
     except RuntimeDatabaseDeferred:
         return _memory_error("owner 运行库正在恢复，尚未提交纠正回执。", "RUNTIME_DB_RECOVERY_DEFERRED",
@@ -408,24 +406,45 @@ def _remember_correction(agent, memory, params, scope) -> ToolHandlerOutcome:
         return _memory_error(f"无法确认纠正回执的提交结果（{type(exc).__name__}）。", "TOOL_EXECUTION_FAILED",
                              hint="检查 owner 运行库后按原参数重试，宿主会按原记录去重。")
 
+    if registration is None:
+        return _memory_error(f"展示版本 {version} 已过时，条目当前版本为 {record.version}。",
+                             "MEMORY_VERSION_CONFLICT", hint="先用 remember(action=list) 重新核对再提交。",
+                             not_started=True)
+
+    receipt, inserted, saved_note, pending, published = registration
     payload: dict[str, object] = {
         "ok": True, "action": "correct", "receipt": receipt, "active_memory_changed": False,
         "replayed": not inserted and receipt["verdict"] == verdict,
         "conflicting_repeat": not inserted and receipt["verdict"] != verdict,
     }
     try:
-        review_id, review_status = queue_memory_feedback_review(
-            candidates, record=record, receipt=receipt, note=saved_note,
-        )
-    except (OSError, ValueError, RuntimeError) as exc:
+        if pending:
+            if scope is not None:
+                frozen = MemoryScope.for_new_observation(json.loads(pending))
+                if not scope.allows(frozen.scope_type, frozen.scope_key):
+                    return _unavailable_target(1)
+            review_id, review_status = materialize_memory_feedback_review(
+                runtime_db, candidates, receipt=receipt, note=saved_note, pending=pending,
+            )
+        elif published:
+            try:
+                review_status = candidates.get(published).status
+            except KeyError:
+                review_status = "published"
+            review_id = published
+        else:
+            payload.update(review_status="legacy_scope_unverified",
+                           hint="原回执已保留。请核对当前条目范围与版本，必要时在新任务中提交当前版本。")
+            return ToolHandlerOutcome("remember", True, json.dumps(payload, ensure_ascii=False))
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         payload["review_status"] = "pending"
         payload["review_error_code"] = "MEMORY_CANDIDATE_WRITE_FAILED"
         payload["hint"] = (f"纠正回执已保存，待审候选写入未确认（{type(exc).__name__}）。"
-                           "可按原参数重试，以原回执补齐候选。")
+                           "后台会重试待审登记，也可按原参数补齐。")
     else:
         payload.update(review_candidate_id=review_id, review_status=review_status)
         payload["hint"] = ("已保留原回执，采用首次登记的 verdict 待审。"
-                           if payload["conflicting_repeat"] else "回执已进入待审，正式记忆保持原版本。")
+                           if payload["conflicting_repeat"] else "纠正回执已登记，未修改正式记忆。")
     return ToolHandlerOutcome("remember", True, json.dumps(payload, ensure_ascii=False))
 
 
@@ -436,6 +455,9 @@ def _remember_write_result(action: str, promotion_results: list[dict[str, object
                          for item in promotion_results)
     required_repairs = _remember_required_repairs(promotion_results)
     copy_commands = _remember_copy_commands(promotion_results)
+    hint = _remember_result_hint(action, active_changed, required_repairs, promotion_results)
+    if any(item.get("project_binding_status") == "pending" for item in promotion_results):
+        hint += " 有工作区绑定待补写。可重试对应的记忆操作；已提交的正式记忆会去重。"
     body: dict[str, object] = {
         "ok": True,
         "saved": _remember_saved(promotion_results),
@@ -443,7 +465,7 @@ def _remember_write_result(action: str, promotion_results: list[dict[str, object
         "active_memory_changed": active_changed,
         "results": promotion_results,
         "required_repairs": required_repairs,
-        "hint": _remember_result_hint(action, active_changed, required_repairs, promotion_results),
+        "hint": hint,
     }
     if len(copy_commands) == 1:
         body["copy_command"] = copy_commands[0]

@@ -455,27 +455,118 @@ def _proof_matches(ref: dict, proof: dict) -> bool:
             and str(ref.get("quote") or "").strip() == proof["quote"])
 
 
-def register_memory_feedback(runtime_db, *, entry_id: str, version: int, verdict: str,
-                             task_identity: str, note: str) -> tuple[dict[str, object], bool, str]:
-    """插入一次并在原事务中读取胜出的权威回执及其原始说明。"""
+_FEEDBACK_REVIEW_PREFIX = "memory_feedback_review_pending:"
+_FEEDBACK_REVIEW_END = "memory_feedback_review_pending;"
+_FEEDBACK_REVIEW_DONE = "memory_feedback_review_done:"
+_FEEDBACK_REVIEW_CURSOR = "memory_feedback_review_cursor"
+_FEEDBACK_NOTE_PREFIX = "memory_feedback_note:"
+
+
+def _feedback_review_scope(record):
+    from .recall import dream_relocation_attributes
+
+    attrs = dream_relocation_attributes(record)
+    try:
+        return MemoryScope.for_new_observation({key: attrs.get(key) for key in ("scope_type", "scope_key")})
+    except ValueError:
+        return None
+
+
+def _feedback_metadata(conn, key):
+    row = conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+    return row[0] if row is not None else ""
+
+
+def register_memory_feedback(runtime_db, *, record: MemoryRecord, version: int, verdict: str,
+                             task_identity: str, note: str):
+    """Commit the first receipt, note and validated review scope together."""
+    entry_id = record.entry_id
     receipt_id = hashlib.sha256(f"{entry_id}\0{version}\0{task_identity}".encode()).hexdigest()
-    note_key = f"memory_feedback_note:{receipt_id}"
+    note_key = _FEEDBACK_NOTE_PREFIX + receipt_id
+    pending_key = _FEEDBACK_REVIEW_PREFIX + receipt_id
     with runtime_db.transaction() as conn:
-        inserted = conn.execute(
-            "INSERT INTO memory_feedback_receipts (receipt_id, entry_id, version, verdict, task_identity, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(entry_id, version, task_identity) DO NOTHING",
-            (receipt_id, entry_id, version, verdict, task_identity, time.time()),
-        ).rowcount == 1
+        inserted = False
+        if record.version == version:
+            inserted = conn.execute(
+                "INSERT INTO memory_feedback_receipts (receipt_id, entry_id, version, verdict, task_identity, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(entry_id, version, task_identity) DO NOTHING",
+                (receipt_id, entry_id, version, verdict, task_identity, time.time()),
+            ).rowcount == 1
+        pending = _feedback_metadata(conn, pending_key)
+        if record.version != version and not pending:
+            return None
         receipt = conn.execute(
             "SELECT receipt_id, entry_id, version, verdict, task_identity, created_at "
-            "FROM memory_feedback_receipts WHERE entry_id=? AND version=? AND task_identity=?",
-            (entry_id, version, task_identity),
+            "FROM memory_feedback_receipts WHERE receipt_id=?", (receipt_id,),
         ).fetchone()
+        if receipt is None:
+            return None
         if inserted and note:
-            # 可选说明与原回执一起提交，保持 C10.5 的六列合同与首写语义。
             conn.execute("INSERT INTO metadata (key, value) VALUES (?, ?)", (note_key, note))
-        saved_note = conn.execute("SELECT value FROM metadata WHERE key=?", (note_key,)).fetchone()
-    return dict(receipt), inserted, saved_note[0] if saved_note is not None else ""
+        saved_note = _feedback_metadata(conn, note_key)
+        published = _feedback_metadata(conn, _FEEDBACK_REVIEW_DONE + receipt_id)
+        if not pending and not published and record.version == version:
+            scope = _feedback_review_scope(record)
+            if inserted and scope is None:
+                scope = MemoryScope("personal", "personal")
+            # An older receipt can be backfilled only from its exact, explicitly scoped formal version.
+            if scope is not None:
+                pending = json.dumps(scope.to_dict())
+                conn.execute("INSERT INTO metadata (key, value) VALUES (?, ?)", (pending_key, pending))
+    return dict(receipt), inserted, saved_note, pending, published
+
+
+def has_pending_memory_feedback_reviews(conn) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM metadata WHERE key >= ? AND key < ? LIMIT 1",
+        (_FEEDBACK_REVIEW_PREFIX, _FEEDBACK_REVIEW_END),
+    ).fetchone() is not None
+
+
+def _pending_memory_feedback_page(conn, *, after, limit):
+    return conn.execute(
+        "SELECT f.*, m.key AS pending_key, m.value AS pending_scope, n.value AS note "
+        "FROM metadata AS m LEFT JOIN memory_feedback_receipts AS f "
+        "ON f.receipt_id=substr(m.key, ?) "
+        "LEFT JOIN metadata AS n ON n.key=? || f.receipt_id "
+        "WHERE m.key > ? AND m.key < ? ORDER BY m.key LIMIT ?",
+        (len(_FEEDBACK_REVIEW_PREFIX) + 1, _FEEDBACK_NOTE_PREFIX, after, _FEEDBACK_REVIEW_END, limit),
+    ).fetchall()
+
+
+def recover_memory_feedback_reviews(runtime_db, candidates, *, limit):
+    """Repair one indexed page, with SQLite closed before candidate publication."""
+    from ..io.readonly_sqlite import readonly_sqlite_connection
+
+    limit = min(PROMOTION_BATCH_MAX_COUNT, max(1, limit))
+    with readonly_sqlite_connection(runtime_db.db_path, require_private_directory=False) as conn:
+        conn.row_factory = sqlite3.Row
+        after = _feedback_metadata(conn, _FEEDBACK_REVIEW_CURSOR)
+        if not after.startswith(_FEEDBACK_REVIEW_PREFIX):
+            after = _FEEDBACK_REVIEW_PREFIX
+        rows = _pending_memory_feedback_page(conn, after=after, limit=limit)
+        if not rows and after != _FEEDBACK_REVIEW_PREFIX:
+            rows = _pending_memory_feedback_page(conn, after=_FEEDBACK_REVIEW_PREFIX, limit=limit)
+    for row in rows:
+        try:
+            if row["receipt_id"] is None:
+                raise ValueError("MEMORY_FEEDBACK_RECEIPT_MISSING")
+            materialize_memory_feedback_review(
+                runtime_db, candidates, receipt=dict(row), note=row["note"] or "",
+                pending=row["pending_scope"],
+            )
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            logging.getLogger(__name__).warning(
+                "MEMORY_FEEDBACK_REVIEW_PENDING receipt_id=%s error_type=%s next_action=retry_owner_maintenance",
+                row["receipt_id"], type(exc).__name__,
+            )
+    if rows:
+        # Resume after the attempted page so persistent failures cannot starve later receipts.
+        with runtime_db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_FEEDBACK_REVIEW_CURSOR, rows[-1]["pending_key"]),
+            )
 
 
 def project_memory_feedback_hints(runtime_db, entries: list[dict[str, object]]) -> dict[str, object] | None:
@@ -507,27 +598,21 @@ def project_memory_feedback_hints(runtime_db, entries: list[dict[str, object]]) 
     return None
 
 
-def queue_memory_feedback_review(candidates, *, record: MemoryRecord, receipt: dict[str, object],
-                                 note: str) -> tuple[str, str]:
-    """将回执作为待审线索送入 Curator 共用候选账，候选没有正式落点。"""
+def materialize_memory_feedback_review(runtime_db, candidates, *, receipt, note, pending):
+    """Acknowledge the receipt only after its exact candidate is durable."""
     receipt_id = str(receipt["receipt_id"])
-    attrs = record.attributes if isinstance(record.attributes, dict) else {}
-    try:
-        scope = MemoryScope.from_value({"scope_type": attrs.get("scope_type"), "scope_key": attrs.get("scope_key")})
-    except ValueError:
-        # 旧条目没有类型化范围时，待审条目仍只保存在当前 owner 的候选账。
-        scope = MemoryScope.from_value({"scope_type": "personal", "scope_key": "personal"})
-    content = f"核对记忆条目 {record.entry_id} 的第 {receipt['version']} 版，反馈为 {receipt['verdict']}。"
+    scope = MemoryScope.for_new_observation(json.loads(pending))
+    content = f"核对记忆条目 {receipt['entry_id']} 的第 {receipt['version']} 版，反馈为 {receipt['verdict']}。"
     if note:
         content += f" 说明：{note}"
     observed_at = datetime.fromtimestamp(float(receipt["created_at"]), timezone.utc).isoformat()
     observation = CandidateObservation(
         candidate_type="discard", origin="model_inferred", content=content[:_MAX_CONTENT_CHARS], scope=scope,
         subject_key=f"memory-feedback.{receipt_id}", proposed_action="none", promotion_target="none",
-        target_entry_id=record.entry_id, target_entry_version=record.version,
+        target_entry_id=str(receipt["entry_id"]), target_entry_version=int(receipt["version"]),
         observation_id=receipt_id, observed_at=observed_at,
-        evidence_refs=({"kind": "memory_feedback", "ref_id": receipt_id, "entry_id": record.entry_id,
-                        "version": record.version, "verdict": receipt["verdict"]},),
+        evidence_refs=({"kind": "memory_feedback", "ref_id": receipt_id, "entry_id": str(receipt["entry_id"]),
+                        "version": int(receipt["version"]), "verdict": receipt["verdict"]},),
         source_task_ids=(str(receipt["task_identity"]),),
     )
     candidate_id = stable_candidate_id(
@@ -537,8 +622,21 @@ def queue_memory_feedback_review(candidates, *, record: MemoryRecord, receipt: d
     try:
         candidate = candidates.get(candidate_id)
     except KeyError:
-        candidate = candidates.observe(observation)
-    return candidate.candidate_id, candidate.status
+        candidates.observe(observation)
+        candidate = candidates.get(candidate_id)
+    if (candidate.candidate_id != candidate_id or candidate.subject_key != observation.subject_key
+            or candidate.target_entry_id != observation.target_entry_id
+            or candidate.target_entry_version != observation.target_entry_version
+            or candidate.scope != scope.to_dict() or candidate.promotion_target != "none"
+            or candidate.proposed_action != "none"):
+        raise ValueError("MEMORY_FEEDBACK_REVIEW_IDENTITY_MISMATCH")
+    with runtime_db.transaction() as conn:
+        removed = conn.execute("DELETE FROM metadata WHERE key=? AND value=?",
+                               (_FEEDBACK_REVIEW_PREFIX + receipt_id, pending)).rowcount
+        if removed:
+            conn.execute("INSERT INTO metadata (key, value) VALUES (?, ?)",
+                         (_FEEDBACK_REVIEW_DONE + receipt_id, candidate_id))
+    return candidate_id, candidate.status
 
 
 # LLM: result 只说明机器决策和正式 ref，不包含候选或历史记忆正文。
@@ -553,6 +651,7 @@ class MemoryPromotionResult:
     formal_memory_changed: bool = False
     # 自动同主题替换时被替换的旧条目身份（entry_id/version/content_hash，不含正文）；其它情况为 None。
     superseded: dict[str, object] | None = None
+    project_binding_status: str = ""
 
     # LLM: 结果只序列化决策码和正式ref；未新增提交时省略变更标志、没有替换时省略 superseded，保持旧消费者字段兼容。
     # 函数用途: 将晋升结果转换为 CLI/Curator 可消费字典。
@@ -560,6 +659,8 @@ class MemoryPromotionResult:
         payload = asdict(self)
         if not self.formal_memory_changed:
             payload.pop("formal_memory_changed")
+        if not self.project_binding_status:
+            payload.pop("project_binding_status")
         if self.superseded is None:
             payload.pop("superseded")
         return payload
@@ -582,6 +683,7 @@ class _TargetCommit:
     changed: bool
     # 自动同主题替换时记录被替换旧条目的身份；普通提交为 None。
     superseded: dict[str, object] | None = None
+    project_binding_status: str = ""
 
 
 # LLM: 四种目标共用唯一仓库，接收已经取得的外层配额准入。
@@ -658,14 +760,14 @@ class _PromotionCommitMixin:
             subject_key=candidate.subject_key, scope=(scope.scope_type, scope.scope_key)), candidate)
         same_content = _same_content_in(existing, candidate)
         if same_content is not None and candidate.proposed_action == "add":
-            return _TargetCommit("memory/long_term/memory.jsonl#" + same_content.entry_id, False)
+            return _long_term_commit(self, candidate, same_content, changed=False)
         if candidate.proposed_action == "add":
-            return _TargetCommit(self._commit_long_term_add(candidate, existing, admission), True)
-        return _TargetCommit(self._commit_long_term_existing(candidate, existing, admission), True)
+            return self._commit_long_term_add(candidate, existing, admission)
+        return self._commit_long_term_existing(candidate, existing, admission)
 
     # LLM: 保留原 add 调用接缝；独立提交原语仍共用已有准入、冲突判据和确定性 ID。
     # 函数用途: 委托正式仓库提交新增长期事实，不隐式改为替换。
-    def _commit_long_term_add(self, candidate: MemoryCandidate, existing: list[MemoryRecord], admission: OwnerQuotaAdmission) -> str:
+    def _commit_long_term_add(self, candidate: MemoryCandidate, existing: list[MemoryRecord], admission: OwnerQuotaAdmission) -> _TargetCommit:
         return _commit_long_term_add(self, candidate, existing, admission)
 
     # LLM: replace/merge 必须精确 target_entry_id 且 target 在 same subject scope 内；提交前必须
@@ -677,7 +779,7 @@ class _PromotionCommitMixin:
         candidate: MemoryCandidate,
         existing: list[MemoryRecord],
         admission: OwnerQuotaAdmission,
-    ) -> str:
+    ) -> _TargetCommit:
         target = candidate.target_entry_id
         if not target or target not in {item.entry_id for item in existing}:
             raise _PromotionConflict(
@@ -699,7 +801,7 @@ class _PromotionCommitMixin:
                             "content": candidate.content,
                             "kind": _long_term_kind(candidate.candidate_type),
                             "tags": [candidate.candidate_type, candidate.origin],
-                            "attributes": _long_term_attributes(candidate),
+                            "attributes": _long_term_commit_attributes(self, candidate),
                             "source": f"candidate:{candidate.candidate_id}",
                             "expires_at": _expiry_epoch(candidate.valid_until),
                             "expected_version": candidate.target_entry_version,
@@ -708,7 +810,7 @@ class _PromotionCommitMixin:
                 )[0]
             except MemoryVersionConflict:
                 raise _PromotionConflict("TARGET_ENTRY_CONCURRENT_WRITE", (target,)) from None
-            return "memory/long_term/memory.jsonl#" + record.entry_id
+            return _long_term_commit(self, candidate, record, changed=True)
         if action == "remove":
             try:
                 self.long_term.apply_batch([{"action": "remove", "entry_id": target,
@@ -716,7 +818,7 @@ class _PromotionCommitMixin:
                     _admission=admission)
             except MemoryVersionConflict:
                 raise _PromotionConflict("TARGET_ENTRY_CONCURRENT_WRITE", (target,)) from None
-            return "memory/long_term/memory.jsonl#" + target + ":removed"
+            return _TargetCommit("memory/long_term/memory.jsonl#" + target + ":removed", True)
         raise ValueError("long_term promotion proposed_action must be add/replace/remove/merge")
 
     # LLM: USER仍核user_explicit，SOUL仍需原确认；AGENTS最终提交一律拒绝，只能由用户 /agents 预览确认。
@@ -791,7 +893,7 @@ def _commit_long_term_add(
     candidate: MemoryCandidate,
     existing: list[MemoryRecord],
     admission: OwnerQuotaAdmission,
-) -> str:
+) -> _TargetCommit:
     if existing:
         raise _PromotionConflict(
             "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE",
@@ -807,7 +909,7 @@ def _commit_long_term_add(
                 "content": candidate.content,
                 "kind": _long_term_kind(candidate.candidate_type),
                 "tags": [candidate.candidate_type, candidate.origin],
-                "attributes": _long_term_attributes(candidate),
+                "attributes": _long_term_commit_attributes(service, candidate),
                 "source": f"candidate:{candidate.candidate_id}",
                 "expires_at": _expiry_epoch(candidate.valid_until),
             }
@@ -819,8 +921,7 @@ def _commit_long_term_add(
             "LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH",
             _exact_content_entry_ids(matches, candidate),
         )
-    committed = record[0]
-    return "memory/long_term/memory.jsonl#" + committed.entry_id
+    return _long_term_commit(service, candidate, record[0], changed=True)
 
 
 # LLM: add与旧格式删除恢复必须共用精确ID派生，不能按内容或subject猜历史归属。
@@ -1481,6 +1582,14 @@ class MemoryPromotionService(_PromotionCommitMixin):
         finally:
             _AUTOMATIC_PROMOTION.reset(token)
 
+    def recover_feedback_reviews(self, runtime_db, *, owner_home: Path, limit: int) -> None:
+        from ..runtime_db.schema import runtime_db_path
+
+        if (self.persona.owner_home != owner_home or runtime_db.db_path != runtime_db_path(owner_home)
+                or self.candidates.path != owner_home / "memory" / "candidates.jsonl"):
+            raise ValueError("MEMORY_FEEDBACK_OWNER_STORE_MISMATCH")
+        recover_memory_feedback_reviews(runtime_db, self.candidates, limit=limit)
+
     # LLM: 各条仍走原完整审核/CAS；空批也偿还持久治理欠账，condense不持有policy/candidate或配额锁。
     # 函数用途: 成批自动晋升只读筛出的候选，整批只做一次总量治理。
     def promote_ready(self, *, limit: int = 32) -> tuple[MemoryPromotionResult, ...]:
@@ -1573,6 +1682,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
         if recovery is not None:
             return recovery
         early_result = _promotion_precheck(candidate, automatic)
+        if candidate.status == 'promoted':
+            early_result = _replay_project_binding(self, candidate, early_result)
         if early_result is not None:
             return early_result
         if (automatic and candidate.commit_obligation and candidate.obligation_retry_after
@@ -1660,9 +1771,6 @@ class MemoryPromotionService(_PromotionCommitMixin):
         reviewer: str,
         outcome: _TargetCommit,
     ) -> MemoryPromotionResult:
-        if (outcome.changed and _promotion_target(candidate) == "long_term"
-                and candidate.proposed_action != "remove"):
-            _record_promoted_project_binding(self.persona.owner_home, candidate)
         if self.rule_notices_enabled:
             from .rule_notices import publish_promoted_rule
 
@@ -1678,6 +1786,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
             outcome.reference,
             formal_memory_changed=outcome.changed,
             superseded=outcome.superseded,
+            project_binding_status=outcome.project_binding_status,
         )
 
     # LLM: user_explicit 逐条回查消息；工具事实及所有声明产物均逐条回查生产调用的宿主成功终态。
@@ -1742,6 +1851,8 @@ def _prepare_promotion_batch(service, rows, reviewer, automatic):
             results[cid] = recovery
             continue
         early = _promotion_precheck(candidate, automatic)
+        if candidate.status == 'promoted':
+            early = _replay_project_binding(service, candidate, early)
         if early is not None:
             results[cid] = early
             continue
@@ -2060,27 +2171,88 @@ def _exact_content_entry_ids(
     )
 
 
-def _record_promoted_project_binding(owner_home: Path, candidate: MemoryCandidate) -> None:
-    scope = MemoryScope.from_value(candidate.scope)
-    if scope.scope_type != "project":
-        return
+_PROJECT_BINDING_BASIS = "project_binding_basis"
+
+
+def _project_binding_workspaces(candidate):
     from ..tooling.registry_workspace import read_workspace_ref
 
-    for ref in candidate.evidence_refs:
-        if ref.get("kind") != "workspace_binding":
-            continue
-        workspace = read_workspace_ref({**ref, "workspace_ref": ref.get("ref_id")})
-        if workspace is None:
+    if MemoryScope.from_value(candidate.scope).scope_type == "project":
+        for ref in candidate.evidence_refs:
+            if ref.get("kind") == "workspace_binding":
+                workspace = read_workspace_ref({**ref, "workspace_ref": ref.get("ref_id")})
+                if workspace is not None:
+                    yield workspace
+
+
+def _long_term_commit_attributes(service, candidate):
+    attributes = _long_term_attributes(candidate)
+    basis = {}
+    for workspace in _project_binding_workspaces(candidate):
+        try:
+            basis[workspace.workspace_ref] = project_bindings.generation(service.persona.owner_home, workspace.root)
+        except (OSError, UnicodeError, ValueError) as exc:
+            # An unreadable registry can only be repaired if the root still has no binding.
+            basis[workspace.workspace_ref] = ""
+            _warn_project_binding(exc, "basis")
+    if basis:
+        # The formal commit is the durable proof. Workspace paths remain in candidate evidence.
+        attributes[_PROJECT_BINDING_BASIS] = basis
+    return attributes
+
+
+def _publish_project_binding(service, candidate, record):
+    if record.source != f"candidate:{candidate.candidate_id}":
+        return ""
+    basis = record.attributes.get(_PROJECT_BINDING_BASIS)
+    if not isinstance(basis, dict):
+        return ""
+    scope = MemoryScope.from_value(candidate.scope)
+    if (record.attributes.get("scope_type"), record.attributes.get("scope_key")) != (scope.scope_type, scope.scope_key):
+        return ""
+    states = set()
+    for workspace in _project_binding_workspaces(candidate):
+        expected = basis.get(workspace.workspace_ref)
+        if not isinstance(expected, str):
             continue
         try:
-            project_bindings.record(owner_home, scope.scope_key, workspace.root,
-                                    expected_identity=workspace.root_identity)
+            states.add(project_bindings.record(
+                service.persona.owner_home, scope.scope_key, workspace.root,
+                expected_identity=workspace.root_identity, publication=(expected, candidate.candidate_id),
+            ))
         except (OSError, UnicodeError, ValueError) as exc:
-            # 正式记忆已提交，绑定失败不能改写其回执或宣布本次正式写入未发生。
-            logging.getLogger(__name__).warning(
-                "PROJECT_BINDING_WRITE_FAILED formal_memory_changed=true error_type=%s "
-                "next_action=check_owner_project_bindings_file", type(exc).__name__,
-            )
+            _warn_project_binding(exc, "publication")
+            states.add("pending")
+    return next((state for state in ("pending", "superseded", "settled") if state in states), "")
+
+
+def _warn_project_binding(error, phase):
+    logging.getLogger(__name__).warning(
+        "PROJECT_BINDING_IO_FAILED phase=%s error_type=%s next_action=retry_promotion",
+        phase, type(error).__name__,
+    )
+
+
+def _long_term_commit(service, candidate, record, *, changed):
+    return _TargetCommit(
+        "memory/long_term/memory.jsonl#" + record.entry_id, changed,
+        project_binding_status=_publish_project_binding(service, candidate, record),
+    )
+
+
+def _replay_project_binding(service, candidate, result):
+    prefix = "memory/long_term/memory.jsonl#"
+    if (not candidate.promotion_ref.startswith(prefix) or candidate.proposed_action == "remove"
+            or not any(_project_binding_workspaces(candidate))):
+        return result
+    try:
+        records = service.long_term.read_ids([candidate.promotion_ref.removeprefix(prefix)])
+    except (OSError, UnicodeError, ValueError) as exc:
+        _warn_project_binding(exc, "replay")
+        return replace(result, project_binding_status="pending")
+    if records:
+        return replace(result, project_binding_status=_publish_project_binding(service, candidate, records[0]))
+    return result
 
 
 # LLM: 长期事实 attributes 只保存短结构化 provenance/scope，不复制完整用户原话或工具输出。

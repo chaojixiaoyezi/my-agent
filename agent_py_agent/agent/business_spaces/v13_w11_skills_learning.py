@@ -418,23 +418,26 @@ def _orphan_state(call, skill_id, orphan):
     return _body_sha(_existing_text(call, skill_id)), ['skills', skill_id, 'SKILL.md']
 
 
-# LLM: 旧准备行在自己的口径下既不是原像也不是计划像时，哈希不能证明它是否执行过，同键重放也永远无法结清它。
-#   只有带当前版本的 skills.update 才能结清：旧键按未知冲突永久封存，占位在同一日志事务释放，新请求再走自己的 CAS。
-#   原像或计划像仍可由旧键恢复（含原生写后回执前崩溃），这时新键照旧拒绝。
-# 函数用途: 处理不同键遇到的在途占位，可结清的孤立占位结清后返回，其余按结果未知拒绝。
+# A third native image leaves the old effect unknown. Current-version authorization can
+# release that reservation, while the original and planned images remain replayable.
 def _reconcile_orphan(call, skill_id, store, digest, active_key, orphan, observe):
     pending = BusinessError('OUTCOME_UNKNOWN', details={
         'reason': 'skill_mutation_pending',
-        'next_action': '使用上次操作的幂等键重试并核对回执；若技能已被改成第三种内容，先读取当前版本，再用 skills.update 带上它提交。',
+        'next_action': '使用上次的幂等键重试；若技能已变更，先调用 skills.get，再用允许的操作携带当前 expected_version_ref。',
     }, effect_outcome='unknown')
-    if call.action != 'skills.update':
+    expected = call.params.get('expected_version_ref')
+    if expected is None:
         raise pending
     try:
         current = observe()
-        orphan_sha, orphan_ref = _orphan_state(call, skill_id, orphan)
+        if (call.action in ('skills.activate', 'skills.retire')
+                and orphan['action'] in ('skills.activate', 'skills.retire')):
+            orphan_sha, orphan_ref = current['original_sha'], current['staged_ref']
+        else:
+            orphan_sha, orphan_ref = _orphan_state(call, skill_id, orphan)
     except (BusinessError, OSError, ValueError) as exc:
         raise pending from exc
-    if (current['original_revision'] != call.params['expected_version_ref']
+    if (current['original_revision'] != expected
             or (orphan_ref == orphan['staged_ref'] and orphan_sha in (orphan['original_sha'], orphan['planned_sha']))):
         raise pending
 
@@ -591,12 +594,12 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
         if prepared is not None:
             raise _mutation_conflict() from exc
         raise
+    expected = call.params.get('expected_version_ref')
     if prepared is None:
         # 创建按正文 CAS：已有同正文是免写成功，异正文才是状态冲突，冲突不留占位。
         if call.action == 'skills.create' and observed['original_sha'] not in (None, observed['planned_sha']):
             raise BusinessError('STATE_CONFLICT')
-        if (call.action == 'skills.update'
-                and observed['original_revision'] != call.params['expected_version_ref']):
+        if expected is not None and observed['original_revision'] != expected:
             raise BusinessError('REVISION_CONFLICT')
         prepared = {**observed, 'state': 'prepared', 'idempotency_key': key,
                     'receipt_key': receipt_key, 'request_fingerprint': fingerprint,
@@ -632,7 +635,9 @@ def _skill_receipted_locked(call, skill_id, *, staged, observe):
     if observed['staged_ref'] != prepared['staged_ref']:
         raise _mutation_conflict()
     rollback = None
-    if observed['original_sha'] == prepared['planned_sha']:
+    guarded_noop = (prepared_here and expected is not None and call.action in ('skills.activate', 'skills.retire')
+                    and prepared['original_sha'] == prepared['planned_sha'])
+    if observed['original_sha'] == prepared['planned_sha'] and not guarded_noop:
         result = _skill_mutation_result(call, skill_id)
     elif observed['original_sha'] == prepared['original_sha']:
         try:
@@ -725,38 +730,57 @@ def update_skill(call):
 
 
 def _toggle_plan(call, enabled):
-    from ..assets.skill_adapter import SkillAdapter
+    from ..assets.skill_adapter import SkillAdapter, _enabled_state_sha
 
     skill_id = _safe_skill_id(call.params['skill_id'])
     descriptor = _descriptor(call, skill_id)
     if _layer(descriptor, _learned_names(call)) not in {'user', 'learned'}:
         raise BusinessError('STATE_CONFLICT')
-    return SkillAdapter(call.owner_home).plan_enabled(descriptor['id'], enabled)
+    adapter = SkillAdapter(call.owner_home)
+    plan = adapter.plan_enabled(descriptor['id'], enabled)
+    if 'expected_version_ref' in call.params:
+        # Bind the public body digest to the same native image used by the write CAS.
+        with adapter._enabled_state(descriptor['id'], writing=False) as (_, parts, body, meta):
+            if _enabled_state_sha(parts, body, meta) != plan['original_sha']:
+                raise BusinessError('REVISION_CONFLICT')
+            plan['original_revision'] = _body_sha(body)
+    return plan
 
 
 def _toggle_staged(call, enabled, *, plan=None):
-    from ..assets.skill_adapter import SKILL_ENABLED_CAS_REFUSED, SkillAdapter, SkillSnapshotError
+    from ..assets.skill_adapter import (
+        SKILL_ENABLED_CAS_REFUSED,
+        SkillAdapter,
+        SkillSnapshotError,
+        _enabled_state_sha,
+    )
 
     _require(call)
     skill_id = _safe_skill_id(call.params['skill_id'])
     descriptor = _descriptor(call, skill_id)
-    learned = _learned_names(call)
-    if _layer(descriptor, learned) not in {'user', 'learned'}:
+    if _layer(descriptor, _learned_names(call)) not in {'user', 'learned'}:
         raise BusinessError('STATE_CONFLICT')
     prior_enabled = bool(descriptor.get('enabled', True))
-    changed = prior_enabled != enabled
-    if changed:
-        try:
+    changed = prior_enabled != enabled if plan is None else plan['original_sha'] != plan['planned_sha']
+    adapter = SkillAdapter(call.owner_home)
+    try:
+        if plan is not None and not changed:
+            # A guarded no-op checks the native image under its lock without bumping the sidecar revision.
+            with adapter._enabled_state(descriptor['id'], writing=True) as (_, parts, body, meta):
+                if _enabled_state_sha(parts, body, meta) != plan['original_sha']:
+                    raise _cas_refused()
+                return _skill_mutation_result(call, skill_id), lambda: True
+        if changed:
             _require(call)
-            SkillAdapter(call.owner_home).set_enabled(
-                descriptor['id'], enabled, expected_sha=None if plan is None else plan['original_sha'],
-            )
-        except SkillSnapshotError as error:
-            if error.reason == SKILL_ENABLED_CAS_REFUSED:
-                raise _cas_refused() from error
-            raise _mutation_conflict() from error
-        except (ValueError, FileNotFoundError) as error:
-            raise BusinessError('STATE_CONFLICT') from error
+            adapter.set_enabled(descriptor['id'], enabled, expected_sha=None if plan is None else plan['original_sha'])
+    except SkillSnapshotError as error:
+        if error.reason == SKILL_ENABLED_CAS_REFUSED:
+            raise _cas_refused() from error
+        raise _mutation_conflict() from error
+    except BusinessError:
+        raise
+    except (ValueError, FileNotFoundError) as error:
+        raise BusinessError('STATE_CONFLICT') from error
     result = _skill_mutation_result(call, skill_id)
 
     def rollback():
@@ -766,7 +790,8 @@ def _toggle_staged(call, enabled, *, plan=None):
             current = _descriptor(call, skill_id)
             if bool(current.get('enabled', True)) == enabled:
                 SkillAdapter(call.owner_home).set_enabled(
-                    current['id'], prior_enabled, expected_sha=None if plan is None else plan['planned_sha'],
+                    current['id'], prior_enabled if plan is None else not enabled,
+                    expected_sha=None if plan is None else plan['planned_sha'],
                 )
                 return True
         except (BusinessError, SkillSnapshotError, ValueError, FileNotFoundError):

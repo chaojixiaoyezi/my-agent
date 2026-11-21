@@ -140,6 +140,7 @@ def recover_committed_update(service, candidate, reviewer):
         _coordinator_policy_birth,
         _learning_exclusion_block,
         _learning_exclusion_scope,
+        _publish_project_binding,
     )
 
     if (candidate.status != "approved" or candidate.proposed_action not in {"replace", "merge"}
@@ -166,14 +167,22 @@ def recover_committed_update(service, candidate, reviewer):
                 return MemoryPromotionResult(candidate.candidate_id, False, candidate.status, blocked)
             ref = "memory/long_term/memory.jsonl#" + candidate.target_entry_id
             service.candidates.mark_promoted_admitted(candidate.candidate_id, admission, (reviewer, ref, "update_commit_recovered"))
-    return MemoryPromotionResult(candidate.candidate_id, True, "promoted", "UPDATE_COMMIT_RECOVERED", ref)
+    return MemoryPromotionResult(
+        candidate.candidate_id, True, "promoted", "UPDATE_COMMIT_RECOVERED", ref,
+        project_binding_status=_publish_project_binding(service, candidate, latest),
+    )
 
 
 # LLM: 比较最新非touch事件的全部写入身份；merge在唯一正式库中按replace存储，旧source/更高版本或任一元数据漂移均拒绝。
 # 函数用途: 严格确认目标确由本候选、同一前序版本和规范化内容提交，不用同文相似性代替归属。
 def _same_committed_update(record, candidate) -> bool:
     from .operations import memory_content_hash
-    from .promotion import _expiry_epoch, _long_term_attributes, _long_term_kind
+    from .promotion import (
+        _PROJECT_BINDING_BASIS,
+        _expiry_epoch,
+        _long_term_attributes,
+        _long_term_kind,
+    )
 
     return (record is not None and record.entry_id == candidate.target_entry_id
             and record.source == f"candidate:{candidate.candidate_id}"
@@ -181,5 +190,6 @@ def _same_committed_update(record, candidate) -> bool:
             and memory_content_hash(record.content) == memory_content_hash(candidate.content)
             and record.kind == _long_term_kind(candidate.candidate_type)
             and record.tags == [candidate.candidate_type, candidate.origin]
-            and record.attributes == _long_term_attributes(candidate)
+            and {key: value for key, value in record.attributes.items()
+                 if key != _PROJECT_BINDING_BASIS} == _long_term_attributes(candidate)
             and record.expires_at == _expiry_epoch(candidate.valid_until))
