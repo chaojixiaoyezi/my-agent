@@ -30,6 +30,15 @@ class AuditRead:
     target: str
     limit: int
     max_chars: int
+    end_event_id: str = ""
+    endpoint: dict | None = None
+
+
+@dataclass
+class AuditCoverage:
+    partial: bool = False
+    positions: dict[str, dict] = field(default_factory=dict)
+    endpoint: dict | None = None
 
 
 # LLM: prefix只含已确认干净的较早分片指纹；seen保守挡住重复event_id首匹配，不含事件内容。
@@ -56,6 +65,7 @@ class AuditRow:
     start: int
     end: int
     line: int
+    digest: str
 
 
 # LLM: 整个当前文件的错误必须先收齐，预算不能吞掉较晚坏行；UTF-8/IO整读失败丢弃全部有效行。
@@ -83,6 +93,10 @@ class AuditWindow:
     pending: list = field(default_factory=list)
     prefix: list = field(default_factory=list)
     used_chars: int = 0
+    coverage: AuditCoverage = field(default_factory=AuditCoverage)
+    anchor: dict | None = None
+    locate_only: bool = False
+    reached_endpoint: bool = False
     cacheable: bool = True
     prefix_digest: str = ""
     prefix_last: str = ""
@@ -182,7 +196,7 @@ def _read_open(handle, path: Path, cursor: AuditCursor | None, window: AuditWind
         parsed_row = _parse_row(result, missing_errors, raw.decode("utf-8"), line_number)
         if parsed_row is None:
             continue
-        row = AuditRow(parsed_row, start, end, line_number)
+        row = AuditRow(parsed_row, start, end, line_number, hashlib.sha256(raw).hexdigest())
         if window is None:
             result.rows.append(row)
         elif _consume_row(window, row, (path.name, stamp)):
@@ -239,30 +253,47 @@ def _queue_cursor(window: AuditWindow, row: AuditRow, scope: tuple[str, FileStam
 
 # LLM: 预算逐项与原_collect_audit相同；只在确认首匹配后处理事件，缺游标不能从头重放。
 # 函数用途: 消费一条审计行并决定是否到达原批量或字符上限。
+def _row_position(row: AuditRow, scope: tuple[str, FileStamp]) -> dict:
+    name, stamp = scope
+    return {"name": name, "dev": stamp.dev, "ino": stamp.ino,
+            "start": row.start, "end": row.end, "digest": row.digest}
+
+
 def _consume_row(window: AuditWindow, row: AuditRow, scope: tuple[str, FileStamp]) -> bool:
     target = str(row.payload.get("event_id") or "").strip()
     if not window.found:
         note_seen(window.seen, target)
         window.found = target == window.request.target
         if window.found:
+            window.anchor = _row_position(row, scope)
             _queue_cursor(window, row, scope)
-        return False
+        return window.found and window.locate_only
+    endpoint = window.request.endpoint
+    if endpoint is not None and (scope[0], row.start) > (endpoint["name"], endpoint["start"]):
+        return True
     item = window.project(row.payload)
     chars = len(json.dumps(item.to_model(), ensure_ascii=False))
-    if window.selected and (len(window.selected) >= window.request.limit or window.used_chars + chars > window.request.max_chars):
+    if window.selected and window.used_chars + chars > window.request.max_chars:
+        window.coverage.partial = True
         return True
     if not note_seen(window.seen, target):
         _queue_cursor(window, row, scope)
+    position = _row_position(row, scope)
+    window.coverage.positions.setdefault(target, position)
     window.selected.append(item)
     window.used_chars += chars
-    return len(window.selected) >= window.request.limit
+    if endpoint is not None and position == endpoint and target == window.request.end_event_id:
+        window.reached_endpoint = True
+    window.coverage.partial = not window.reached_endpoint and len(window.selected) >= window.request.limit
+    return window.reached_endpoint or window.coverage.partial
 
 
 # LLM: 局部选择只在全分片读成功后发布；UTF-8/IO失败丢弃本分片选择，Bloom多置位只能降低命中率。
 # 函数用途: 限额构造对象但完整检测当前分片损坏，稳定干净位置才可以进入缓存。
 def _consume_file(window: AuditWindow, path: Path, cursor: AuditCursor | None) -> bool:
     empty = cursor and cursor.end == cursor.stamp.size
-    local = replace(window, selected=list(window.selected), pending=list(window.pending))
+    local = replace(window, selected=list(window.selected), pending=list(window.pending),
+                    coverage=AuditCoverage(window.coverage.partial, dict(window.coverage.positions)))
     result = AuditSlice(stamp=cursor.stamp) if empty else _read_slice(path, cursor, local)
     if cursor is not None and result.fatal:
         raise _AuditRescan
@@ -272,6 +303,10 @@ def _consume_file(window: AuditWindow, path: Path, cursor: AuditCursor | None) -
     if not result.fatal:
         window.found, window.selected, window.pending = local.found, local.selected, local.pending
         window.used_chars = local.used_chars
+        window.anchor, window.reached_endpoint = local.anchor, local.reached_endpoint
+        window.coverage = local.coverage
+        if result.stamp is None:
+            window.coverage.partial = True
     if result.stopped:
         return True
     _append_prefix(window, path.name, result.stamp)
@@ -301,7 +336,12 @@ def _prefix_digest(previous: str, name: str, stamp: FileStamp) -> str:
 
 # LLM: 同一批的位置共享不可变seen；坏分片/缺游标/过大前缀不缓存，仅退回同算法重扫。
 # 函数用途: 保存本批干净首位置并返回原缺游标诊断。
-def _finish_window(window: AuditWindow):
+def _endpoint_error(event_id):
+    return {"context": "memory_curator.audit_range", "error_code": "AUDIT_RANGE_ENDPOINT_UNRESOLVED",
+            "event_id": event_id}
+
+
+def _finish_window(window: AuditWindow, coverage=None):
     if window.request.target and not window.found:
         window.errors.append({"context": "memory_curator.audit_cursor", "error_code": "AUDIT_CURSOR_MISSING",
                               "event_id": window.request.target})
@@ -309,18 +349,23 @@ def _finish_window(window: AuditWindow):
         seen = bytes(window.seen)
         for target, position in window.pending:
             _AUDIT_CURSORS.put(cursor_key(window.request.root, target), replace(position, seen=seen))
+    if window.request.endpoint is not None and not (window.reached_endpoint or window.coverage.partial):
+        return [], [*window.errors, _endpoint_error(window.request.end_event_id)]
+    if coverage is not None:
+        coverage.partial = window.coverage.partial
+        coverage.positions = window.coverage.positions
     return window.selected, window.errors
 
 
 # LLM: 缓存只改变起点，物理文件/行顺序、投影、错误及预算始终由这一个算法负责。
 # 函数用途: 从完整目录头或已复核锚行之后扫描原审计批次。
-def _scan_window(window: AuditWindow, paths: list[Path], cursor: AuditCursor | None):
+def _scan_window(window: AuditWindow, paths: list[Path], cursor: AuditCursor | None, coverage=None):
     start = next((i for i, path in enumerate(paths) if cursor and path.name == cursor.name), 0)
     for path in paths[start:]:
         current_cursor = cursor if cursor and path.name == cursor.name else None
         if _consume_file(window, path, current_cursor):
             break
-    return _finish_window(window)
+    return _finish_window(window, coverage)
 
 
 # LLM: 每次尝试新建局部状态，回退不能继承上次部分选择或错误；只复制有界元数据。
@@ -336,22 +381,76 @@ def _new_window(request: AuditRead, project: Callable, cursor: AuditCursor | Non
 
 # LLM: 不建磁盘状态，不迁移旧cursor；IO/UTF-8使缓存锚不可见时同算法冷扫保留原缺游标错误。
 # 函数用途: 收集精确audit事件之后的原有界输入。
-def collect_audit_window(request: AuditRead, project: Callable):
+def _verify_endpoint(path, endpoint, event_id):
+    try:
+        with path.open("rb") as handle:
+            before = file_stamp(os.fstat(handle.fileno()))
+            if ((before.dev, before.ino) != (endpoint["dev"], endpoint["ino"])
+                    or endpoint["end"] > before.size):
+                return False
+            handle.seek(endpoint["start"])
+            size = endpoint["end"] - endpoint["start"]
+            raw = handle.read(size)
+            if hashlib.sha256(raw).hexdigest() != endpoint["digest"]:
+                return False
+            payload = json.loads(raw)
+            return (isinstance(payload, dict) and payload.get("event_id") == event_id
+                    and file_stamp(os.fstat(handle.fileno())) == before
+                    and file_stamp(path.stat()) == before)
+    except (OSError, ValueError):
+        return False
+
+
+def _legacy_endpoint(request, project, paths):
+    # Legacy state has only the ID. Resolve its physical anchor with the same
+    # first-occurrence rules as the ordinary cursor, without collecting previews.
+    locate = replace(request, target=request.end_event_id, end_event_id="", endpoint=None)
+    cached = _reuse_cursor(locate, paths)
+    if cached is not None:
+        path = request.root / cached.name
+        with path.open("rb") as handle:
+            handle.seek(cached.start)
+            raw = handle.read(cached.end - cached.start)
+        return {"name": cached.name, "dev": cached.stamp.dev, "ino": cached.stamp.ino,
+                "start": cached.start, "end": cached.end, "digest": hashlib.sha256(raw).hexdigest()}
+    window = _new_window(locate, project, None)
+    window.locate_only = True
+    _scan_window(window, paths, None)
+    return None if window.errors else window.anchor
+
+
+def collect_audit_window(request: AuditRead, project: Callable, *, coverage=None):
     root = Path(request.root)
     # 直接打开审计目录列举分片，防止 exists/glob 吞掉目录读取的 OSError。
     try:
         with os.scandir(root) as entries:
             paths = sorted(root / entry.name for entry in entries if entry.name.endswith(".jsonl"))
     except FileNotFoundError:
-        return [], []
+        return [], [_endpoint_error(request.end_event_id)] if request.end_event_id else []
     except OSError as exc:
         return [], [_read_error(root, exc, 0)]
     request = replace(request, target=str(request.target or "").strip())
+    endpoint = request.endpoint
+    if request.end_event_id:
+        try:
+            endpoint = endpoint or _legacy_endpoint(request, project, paths)
+        except (OSError, ValueError):
+            endpoint = None
+        if endpoint is None or not _verify_endpoint(root / endpoint["name"], endpoint, request.end_event_id):
+            return [], [_endpoint_error(request.end_event_id)]
+        request = replace(request, endpoint=endpoint)
+        paths = [path for path in paths if path.name <= endpoint["name"]]
     cursor = _reuse_cursor(request, paths) if request.target else None
     try:
-        return _scan_window(_new_window(request, project, cursor), paths, cursor)
+        result = _scan_window(_new_window(request, project, cursor), paths, cursor, coverage)
     except _AuditRescan:
-        return _scan_window(_new_window(request, project, None), paths, None)
+        result = _scan_window(_new_window(request, project, None), paths, None, coverage)
+    if endpoint is not None:
+        if not _verify_endpoint(root / endpoint["name"], endpoint, request.end_event_id):
+            return [], [_endpoint_error(request.end_event_id)]
+        if coverage is not None and not result[1]:
+            coverage.endpoint = endpoint
+    return result
 
 
 # LLM: 仅显式操作员确认同一owner目录与预期游标；不掩盖损坏，不改持久Curator状态。

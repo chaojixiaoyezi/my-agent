@@ -748,6 +748,8 @@ class _RetentionScanContext:
     policy_fingerprint: str = ""
     # 过期会话是否已被后台整理读完的判定材料（提取是否开启、逐会话游标、排除名单），首次用到时读一次，本轮共用。
     curator_facts: tuple | None = None
+    curator_pins: _RetentionPins | None = None
+    retry_scan_path: Path | None = None
     # 本轮过期但整理游标之后仍有可学习消息（或读不完/读不出）的会话数，进报告 uncurated_threads。
     uncurated_threads: int = 0
     # 只读打开的会话库，按会话根缓存，供探查整理游标之后的消息。
@@ -806,6 +808,8 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     actions.extend(_protected_runtime_actions(context, selected_task_roots))
     # 保留原类别错误顺序：任务权威错误在前，统一来源错误只发表一次。
     context.errors.extend(pin_errors)
+    pins = protection[0]
+    actions.extend(_curator_restore_actions(pins, context.errors))
     actions.extend(_aged_file_actions(context, selected_task_roots, protection))
     actions.extend(_context_bundle_actions(context) if context.scan_budget is None else discovered)
     actions.extend(
@@ -905,6 +909,8 @@ def _reference_action_allowed(protection, action):
     if action.category not in {"conversation", "completed_task", "tool_output", "subagent_scratch"}:
         return True
     pins, complete = protection
+    if action.category == "conversation" and (not pins.curator_complete or action.record_id in pins.curator_threads):
+        return False
     return (complete and action.record_id not in pins.ids and action.path.name not in pins.ids
             and not any(pins.paths.overlaps(path.resolve(strict=False))
                         for path in (action.path, *action.related_paths)))
@@ -975,6 +981,8 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             Path(context.home.owner_memory_candidates_jsonl).parent / "candidates_archive",
             Path(context.home.owner_memory_curator_runs_dir), Path(context.home.owner_memory_curator_runs_dir).parent / "state.json",
             Path(context.home.owner_compact_dir) / "conversations", *_recovery_roots(context.home),
+            Path(context.home.owner_audit_dir),
+            Path(context.home.owner_data_dir) / "retention" / "retired_threads.jsonl",
             *(root / "threads" for root in self.roots)}
         self.pin_ancestors = {parent for root in self.pin_roots for parent in (root, *root.parents)}
         self.inventory = {Path(context.home.owner_home_dir),
@@ -1032,6 +1040,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             self.paused = True
         elif discovery is not None:
             discovery.conversation_roots = self.roots
+            discovery.curator_pins = self.value[0]
             if not self.discovery_done:
                 for action in _budgeted_discovery_actions(discovery):
                     self.queued_actions[action.action_id] = action
@@ -1691,6 +1700,126 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             for nested, directory in stream:
                 yield nested if directory else None
 
+    def _curator_dependencies(self, pins, state_path, state):
+        from .retired_thread_journal import _validate_row, retired_thread_state
+
+        switch = read_live_extraction_switch(self.home, self.config)
+        pins.curator_switch = switch
+        pins.curator_sources[state_path] = self.sources[state_path][0]
+        if state is None:
+            pins.curator_complete = switch.state == "disabled"
+            return
+        pins.curator_cursors = state.per_thread_cursors
+        ranges = []
+        for work in state.pending_local_dates:
+            source, cursor = work["source_range"], work["cursor"]
+            if source["kind"] != "input":
+                continue
+            for thread_id, end in source["messages"].items():
+                if cursor["messages"].get(thread_id) != end:
+                    pins.curator_threads.add(thread_id)
+                yield 1
+            if source["audit"] and cursor["audit"] != source["audit"]:
+                ranges.append((cursor["audit"], source["audit"]))
+            yield 1
+        if switch.state == "enabled":
+            ranges.append((state.last_processed_audit_event_id, ""))
+        if ranges:
+            yield from self._curator_audit_dependencies(pins, ranges)
+        if switch.state != "enabled" and not pins.curator_threads:
+            return
+        journal = Path(self.home.owner_data_dir) / "retention" / "retired_threads.jsonl"
+        for row in self._rows(journal):
+            if row is None:
+                yield 1
+                continue
+            try:
+                _validate_row(row)
+            except (ValueError, TypeError):
+                yield 1
+                continue
+            thread_id = row["thread_id"]
+            status = retired_thread_state(self.home, row)
+            if status == "purged" and thread_id in pins.curator_threads:
+                pins.curator_unresolved.add(thread_id)
+            elif status == "waiting":
+                root = pins.home / row["conversation_root"]
+                container = pins.home / row["trash_container"]
+                if root in self.roots and container.is_relative_to(Path(self.home.owner_trash_dir) / "retention"):
+                    tombstone = container / "tombstone.json"
+                    for meta in self._rows(tombstone):
+                        yield 1
+                        if meta is None or not _retired_conversation_matches(pins.home, row, container, meta):
+                            continue
+                        needed = _trash_curator_dependency(pins, container, meta, self.config, self.budget)
+                        if needed == "needed":
+                            pins.curator_retirements[container] = row
+            yield 1
+        if journal in self.sources:
+            pins.curator_recovery_source = (journal, self.sources[journal][0])
+
+    def _curator_audit_dependencies(self, pins, ranges):
+        from .curator_audit_cursor import AuditRead, _reuse_cursor
+
+        root = Path(self.home.owner_audit_dir)
+        paths = []
+        with closing(self._walk(root, recursive=False)) as stream:
+            for path in stream:
+                if path is not None and path.suffix == ".jsonl":
+                    paths.append(path)
+                yield 1
+        pins.curator_sources[root] = self.sources[root][0]
+        starts, ends = {}, {}
+        active = 0
+        for start, end in ranges:
+            if start:
+                starts.setdefault(start, []).append(end)
+            else:
+                active += 1
+                if end:
+                    ends[end] = ends.get(end, 0) + 1
+            yield 1
+        paths.sort()
+        # Reuse the reader's proven shard anchors when all required ranges have
+        # one. A cold or stale anchor falls back to the resumable source scan.
+        first_shard = ""
+        if not active:
+            hints = []
+            for start in starts:
+                hint = _reuse_cursor(AuditRead(root, start, 0, 0), paths)
+                if hint is None:
+                    break
+                hints.append(hint.name)
+                yield 1
+            else:
+                first_shard = min(hints, default="")
+        for path in paths:
+            if path.name < first_shard:
+                pins.curator_sources[path] = self._stamp(path)
+                yield 1
+                continue
+            for row in self._rows(path, required=True):
+                if row is None:
+                    yield 1
+                    continue
+                event_id = str(row.get("event_id") or "").strip()
+                if not event_id:
+                    pins.curator_complete = False
+                    yield 1
+                    continue
+                if active:
+                    thread_id = str(row.get("thread_id") or "")
+                    if thread_id:
+                        pins.curator_threads.add(thread_id)
+                active -= ends.pop(event_id, 0)
+                for end in starts.pop(event_id, ()):
+                    active += 1
+                    if end:
+                        ends[end] = ends.get(end, 0) + 1
+                yield 1
+            pins.curator_sources[path] = self.sources[path][0]
+        pins.curator_complete &= not starts and not ends
+
     def _build(self, policy):
         pins = _RetentionPins(Path(self.home.owner_home_dir))
         with closing(self._entries(pins.home)) as stream:
@@ -1817,10 +1946,16 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                             pins.paths.add(path.resolve(strict=False))
                     yield int(row is not None)
         path = curator.parent / "state.json"
+        state = MemoryCuratorState()
         for row in self._rows(path):
             if row is not None:
                 yield from pins.collect_steps(row, path)
+                try:
+                    state = MemoryCuratorState.from_dict(row)
+                except (TypeError, ValueError):
+                    state = None
             yield 1
+        yield from self._curator_dependencies(pins, path, state)
         self.phase = "verify"
         self.pending = ((pins, True), self.sources)
         yield 1
@@ -2285,6 +2420,7 @@ def _budgeted_scan_paths(context: _RetentionScanContext, root: Path, key: str, *
         context.scan_partial = True
     complete_window = cursor["window_complete"] if valid_cache else len(selected) <= limit
     for index, name in enumerate(selected[:limit]):
+        before = after
         if budget.exhausted():
             context.scan_partial = True
             context.scan_cursor[key] = {"after": after, "window": selected[index:], "window_complete": complete_window}
@@ -2322,6 +2458,13 @@ def _budgeted_scan_paths(context: _RetentionScanContext, root: Path, key: str, *
             context.errors.append(_state_error("MEMORY_RETENTION_SCAN_UNREADABLE", path))
             continue
         yield path
+        if context.retry_scan_path == path:
+            context.retry_scan_path = None
+            context.scan_partial = True
+            context.scan_cursor[key] = {"after": before, "window": selected[index:], "window_complete": complete_window}
+            if incomplete:
+                context.scan_cursor[key]["window_incomplete"] = True
+            return
     if len(selected) > limit or not complete_window:
         context.scan_partial = True
         context.scan_cursor[key] = {"after": after}
@@ -3256,7 +3399,9 @@ def _curator_retention_facts(context: _RetentionScanContext) -> tuple:
     if context.curator_facts is None:
         home = context.home
         context.curator_facts = (
-            read_live_extraction_switch(home, context.config), curator_thread_cursors(home), _curator_exclusions(home),
+            read_live_extraction_switch(home, context.config),
+            context.curator_pins.curator_cursors if context.curator_pins is not None else curator_thread_cursors(home),
+            _curator_exclusions(home),
         )
     return context.curator_facts
 
@@ -3281,10 +3426,19 @@ def _curator_thread_excluded(thread: ConversationThread, excluded: frozenset[str
 def _uncurated_thread_check(context: _RetentionScanContext, root: Path,
                             thread: ConversationThread) -> tuple[bool, str | None, ExtractionSwitchRead]:
     switch, cursors, excluded = _curator_retention_facts(context)
+    pins = context.curator_pins
+    if pins is not None and (not pins.curator_complete or switch != pins.curator_switch
+                             or thread.thread_id in pins.curator_threads):
+        context.uncurated_threads += 1
+        return True, None, switch
     if _curator_thread_excluded(thread, excluded):
         return switch.state == "unknown", None, switch
     cursor = None if cursors is None else cursors.get(thread.thread_id, "")
     verdict = "unknown" if cursor is None else _probe_uncurated_messages(context, root, thread.thread_id, cursor)
+    if (verdict == "partial" and switch.state == "enabled" and context.scan_budget is not None
+            and retention_scan_budget.time.monotonic() >= context.scan_budget.deadline):
+        context.retry_scan_path = root / "threads" / f"{thread.thread_id}.json"
+        return True, None, switch
     if verdict != "curated":
         context.uncurated_threads += 1
     protect = switch.state == "unknown" or (switch.state == "enabled" and verdict != "curated")
@@ -3292,12 +3446,15 @@ def _uncurated_thread_check(context: _RetentionScanContext, root: Path,
     return protect, proof_cursor, switch
 
 
-def conversation_extraction_proof_current(home, config, action, root, thread, *, budget=None) -> bool:
+def conversation_extraction_proof_current(home, config, action, root, thread, *, budget=None, pins=None) -> bool:
     """在原消息锁内重新确认计划代次、整理游标及可学习消息尾部。"""
     from ..conversation.store import ConversationStore
 
     current = read_live_extraction_switch(home, config)
     previous = action.curator_switch
+    if pins is not None and (thread.thread_id in pins.curator_threads
+                            or not curator_dependency_proof_current(pins, current)):
+        return False
     if current.state == "unknown" or (previous is not None and current != previous):
         return False
     if previous is None and action.curator_enabled is False and current.state == "enabled":
@@ -3309,7 +3466,10 @@ def conversation_extraction_proof_current(home, config, action, root, thread, *,
     if cursors is None or cursors.get(thread.thread_id, "") != cursor:
         return False
     store = ConversationStore(root, initialize=False)
-    tail = _learnable_tail(store, thread.thread_id, cursor, budget or RetentionScanBudget.default(config))
+    scan_budget = budget or RetentionScanBudget.default(config)
+    tail = _learnable_tail(store, thread.thread_id, cursor, scan_budget)
+    if tail == "partial" and retention_scan_budget.time.monotonic() >= scan_budget.deadline:
+        raise reference_pins.ReferencePinScanPending()
     return tail == "curated" and read_live_extraction_switch(home, config) == current
 
 
@@ -3338,7 +3498,7 @@ def _learnable_tail(store, thread_id: str, cursor: str, budget) -> str:
         if any(not (isinstance(row.metadata, dict) and row.metadata.get("learning_excluded") is True) for row in rows):
             return "uncurated"
         if outcome.partial:
-            return "unknown"
+            return "partial"
         if not rows:
             return "curated"
         if not outcome.has_more and len(rows) < _UNCURATED_PROBE_PAGE_ROWS:
@@ -4082,6 +4242,14 @@ class _RetentionPins:
     paths: set[Path] = field(default_factory=set)
     ids: set[str] = field(default_factory=set)
     complete: bool = True
+    curator_complete: bool = True
+    curator_threads: set[str] = field(default_factory=set)
+    curator_cursors: dict[str, str] = field(default_factory=dict)
+    curator_switch: ExtractionSwitchRead | None = None
+    curator_sources: dict[Path, tuple | None] = field(default_factory=dict)
+    curator_retirements: dict[Path, dict] = field(default_factory=dict)
+    curator_recovery_source: tuple[Path, tuple | None] | None = None
+    curator_unresolved: set[str] = field(default_factory=set)
     target_rebuild: Any = field(default=None, repr=False)
     verified_targets: set[Path] = field(default_factory=set, repr=False)
 
@@ -4120,6 +4288,13 @@ class _RetentionPins:
             for key, item in value.items():
                 if key in {"content", "summary", "quote", "text", "reason", "note"}:
                     continue
+                if key == "source_range" and isinstance(item, dict) and item.get("kind") == "input":
+                    messages = item.get("messages")
+                    if isinstance(messages, dict):
+                        for thread_id in messages:
+                            if isinstance(thread_id, str) and thread_id:
+                                self.ids.add(thread_id)
+                                yield 1
                 selected = reference or key in {"source", "path", "file_path", "cold_detail_ref"} or any(
                     part in key for part in ("_ref", "_source", "checkpoint", "legal_hold"))
                 yield from self.collect_steps(item, source, reference=selected)
@@ -4285,6 +4460,87 @@ def _pin_object(path: Path) -> dict[str, Any]:
 
 # LLM: 墓碑声明只作pin路径映射，正文只读当前容器payload；坏墓碑或坏正文关闭purge，绝不读source外部文件。
 # 函数用途: 保护回收站中仍被原路径、实际路径或记录ID引用的材料。
+def _curator_source_current(path, expected):
+    try:
+        stamp = reference_pins._metadata_stamp(path.stat(follow_symlinks=False))
+    except FileNotFoundError:
+        stamp = None
+    except OSError:
+        return False
+    return stamp == expected
+
+
+def curator_dependency_proof_current(pins, current):
+    return (pins.curator_complete and current == pins.curator_switch and current.state != "unknown"
+            and all(_curator_source_current(path, stamp) for path, stamp in pins.curator_sources.items()))
+
+
+def _retired_conversation_matches(owner, row, container, meta):
+    from .retired_thread_journal import _validate_row
+
+    try:
+        _validate_row(row)
+    except (ValueError, TypeError):
+        return False
+    source = owner / row["conversation_root"] / "threads" / (row["thread_id"] + ".json")
+    return (owner / row["trash_container"] == container
+            and meta.get("schema_version") == "my-agent.memory-retention-tombstone.v2"
+            and meta.get("category") == "conversation" and meta.get("status") == "trashed"
+            and meta.get("source_path") == str(source) and meta.get("authority_path") == str(source)
+            and meta.get("payload_path") == str(container / "payload")
+            and meta.get("action_id") == row["action_id"]
+            and _timestamp(meta.get("moved_at")) == row["retired_at"]
+            and not _trash_transaction_pending(container))
+
+
+def _trash_curator_dependency(pins, container, meta, config=None, budget=None):
+    if meta.get("category") != "conversation":
+        return "settled"
+    if pins.curator_switch is None:
+        return "unknown"
+    path = Path(meta["source_path"])
+    if path.parent.name != "threads" or path.suffix != ".json":
+        return "unknown"
+    if path.stem in pins.curator_threads:
+        return "needed"
+    if not pins.curator_complete or pins.curator_switch.state == "unknown":
+        return "unknown"
+    if pins.curator_switch.state == "disabled":
+        return "settled"
+    from ..conversation.store import ConversationStore
+
+    payload = container / "payload"
+    report = read_json_object_report(payload / "threads" / path.name, context="memory_retention.trash_thread")
+    try:
+        if report.load_error is not None:
+            return "unknown"
+        thread = ConversationThread.from_dict(report.payload)
+        if thread.thread_id != path.stem:
+            return "unknown"
+        if _curator_thread_excluded(thread, frozenset()):
+            return "settled"
+        tail = _learnable_tail(ConversationStore(payload, initialize=False), thread.thread_id,
+                               pins.curator_cursors.get(thread.thread_id, ""),
+                               budget or RetentionScanBudget.default(config))
+    except (OSError, TypeError, ValueError):
+        return "unknown"
+    return {"curated": "settled", "uncurated": "needed"}.get(tail, "unknown")
+
+
+def _curator_restore_actions(pins, errors):
+    for thread_id in sorted(pins.curator_unresolved):
+        errors.append(MemoryRetentionError("MEMORY_RETENTION_CURATOR_SOURCE_PURGED", thread_id,
+                                           "Curator source is unresolved because its committed trash payload was purged"))
+    for container, row in pins.curator_retirements.items():
+        tombstone = container / "tombstone.json"
+        yield _action(category="trash", operation="conversation_restore", path=container,
+                      destination=pins.home / row["conversation_root"],
+                      reason="unfinished_curator_conversation", proof=_ActionProof(
+                          authority_path=tombstone, authority_fingerprint=file_fingerprint(tombstone),
+                          source_fingerprint=tree_fingerprint(container), record_id=row["thread_id"],
+                          curator_switch=pins.curator_switch))
+
+
 def trash_payload_pinned(pins: _RetentionPins, container: Path, errors: list[MemoryRetentionError]) -> bool:
     try:
         row = _pin_object(container / "tombstone.json")
@@ -4292,7 +4548,8 @@ def trash_payload_pinned(pins: _RetentionPins, container: Path, errors: list[Mem
         if row.get("status") != "trashed" or not isinstance(original, str) or not original:
             return True
         payload = container / "payload"
-        return pins.protects(payload, errors) or pins.protects(Path(original), errors, content_path=payload)
+        return (_trash_curator_dependency(pins, container, row) != "settled"
+                or pins.protects(payload, errors) or pins.protects(Path(original), errors, content_path=payload))
     except (OSError, ValueError, TypeError, IndexError):
         errors.append(_state_error("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", container))
         return True

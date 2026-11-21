@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
@@ -101,6 +102,8 @@ class MemoryCuratorStateStore:
     # 函数用途: 初始化当前 owner 的 Curator durable state 仓库。
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self.runtime_repository = None
+        self._legacy_compact_cursors = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     # LLM: 读取缺失文件返回初始 state；已存在但损坏必须 fail closed。
@@ -143,8 +146,78 @@ class MemoryCuratorStateStore:
             self._write_unlocked(updated)
             return updated
 
-    def claim_compact_work(self, thread_id, expected, cursor, *, wake: bool) -> MemoryCuratorState:
-        """同一事务推进检查点观察游标和原 pre_compact 待办代次。"""
+    def bind_compact_repository(self, repository) -> None:
+        if repository is None:
+            return
+        self.runtime_repository = repository
+        if repository.curator_compact_migration_position() < 0 or not self.path.exists():
+            return
+        try:
+            # The legacy map is loaded once per owner instance during migration.
+            self._legacy_compact_cursors = self.load().compact_consumption_cursors
+        except CuratorStateCorruptError:
+            self._legacy_compact_cursors = None
+
+    def compact_cursor(self, thread_id, *, state=None):
+        repository = self.runtime_repository
+        if repository is None:
+            current = state if state is not None else self.load()
+            return current.compact_consumption_cursors.get(thread_id, {})
+        cursor = repository.curator_compact_cursor(thread_id)
+        if cursor is not None:
+            return cursor
+        legacy_cursors = state.compact_consumption_cursors if state is not None else self._legacy_compact_cursors
+        if legacy_cursors is None:
+            raise CuratorStateCorruptError("Cannot seed compact cursor until the legacy state is recovered")
+        legacy = legacy_cursors.get(thread_id)
+        if legacy is None:
+            return {}
+        with gateway_short_transaction("curator_compact_cursor_migrate"):
+            repository.migrate_curator_compact_cursors(((thread_id, legacy),))
+        return repository.curator_compact_cursor(thread_id) or {}
+
+    def migrate_compact_cursors(self, state, *, limit):
+        repository = self.runtime_repository
+        if repository is None:
+            return state
+        with gateway_short_transaction("curator_compact_cursor_migrate"), locked_json_path(self.path):
+            position = repository.curator_compact_migration_position()
+            if position < 0 and not state.compact_consumption_cursors:
+                self._legacy_compact_cursors = {}
+                return state
+            current = self._load_unlocked()
+            legacy = current.compact_consumption_cursors
+            if position >= 0:
+                page = tuple(islice(legacy.items(), position, position + limit))
+                finished = position + len(page) >= len(legacy)
+                repository.migrate_curator_compact_cursors(
+                    page, position=position, advance=-1 if finished else position + len(page),
+                )
+                if not finished:
+                    return current
+            if legacy:
+                current = replace(current, compact_consumption_cursors={})
+                self._write_unlocked(current)
+            self._legacy_compact_cursors = {}
+            return current
+
+    def include_compact_wake(self, state):
+        repository = self.runtime_repository
+        if repository is None:
+            return state
+        generation = repository.curator_compact_wake_generation()
+        if generation <= state.compact_wake_generation:
+            return state
+        pending, generations = _bump_pending_reason(state, "pre_compact")
+        return replace(state, compact_wake_generation=generation, pending_reasons=pending,
+                       pending_reason_generations=generations, pending_requested_at=utc_now_iso())
+
+    def claim_compact_work(self, thread_id, expected, cursor, *, wake: bool) -> MemoryCuratorState | None:
+        """Commit consumption and any durable wake in the same transaction."""
+        if self.runtime_repository is not None:
+            with gateway_short_transaction("curator_compact_claim"):
+                self.runtime_repository.claim_curator_compact_cursor(thread_id, expected, cursor, wake=wake)
+            return None
         with gateway_short_transaction("curator_compact_claim"), locked_json_path(self.path):
             current = self._load_unlocked()
             if current.compact_consumption_cursors.get(thread_id, {}) != expected:
@@ -290,11 +363,12 @@ class MemoryCuratorStateStore:
                 "memory curator state is unreadable", error_class="unreadable"
             )
         try:
-            return MemoryCuratorState.from_dict(report.payload)
+            state = MemoryCuratorState.from_dict(report.payload)
         except ValueError as exc:
             raise CuratorStateCorruptError(
                 "memory curator state failed schema validation", error_class="schema_invalid"
             ) from exc
+        return self.include_compact_wake(state)
 
     # LLM: 损坏 state 被原子 rename 到 quarantine/ 并写哨兵; 原文件保留为不可变副本
     # (含 cursor/lease/pending), 人工恢复可从副本取回权威游标, 绝不自动从头重跑。
@@ -517,14 +591,14 @@ def _leased_state(state: MemoryCuratorState, request: CuratorLeaseRequest):
     if request.purpose == "candidate_scan":
         lease["purpose"] = request.purpose
     first_enable_after = state.first_enable_after
-    if not (first_enable_after or state.last_run_at or state.last_success_at
-            or state.per_thread_cursors or state.last_processed_audit_event_id):
+    if (request.purpose == "extract" and not (first_enable_after or state.last_run_at or state.last_success_at
+            or state.per_thread_cursors or state.last_processed_audit_event_id)):
         first_enable_after = request.first_enable_after
     return replace(
         state,
         first_enable_after=first_enable_after,
         pending_local_dates=dates,
-        last_run_at=current.isoformat(),
+        last_run_at=current.isoformat() if request.purpose == "extract" else state.last_run_at,
         active_lease=lease,
         config_revision=str(request.config_revision or "").strip(),
         pending_reasons=pending,

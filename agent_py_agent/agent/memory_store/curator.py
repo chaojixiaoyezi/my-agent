@@ -52,6 +52,7 @@ from .curator_backend import (
     CuratorModelAttempt,
     CuratorModelCallError,
     CuratorModelTimeoutError,
+    CuratorRepairDeferred,
     attempt_shape_payload,
     extract_with_retries,
     extraction_budget_seconds,
@@ -740,10 +741,11 @@ class _CuratorLifecycleMixin:
 
         storage = getattr(self.conversation_store, "storage", None)
         root = getattr(storage, "compact_root", None)
-        current = state if state is not None else self.state_store.load()
+        indexed = self.state_store.runtime_repository is not None
+        current = state if indexed or state is not None else self.state_store.load()
         if root is None or not self._effective_config().enabled:
             return current
-        entry = current.compact_consumption_cursors.get(thread.thread_id, {})
+        entry = self.state_store.compact_cursor(thread.thread_id, state=current)
         through = entry.get("through", 0)
         if thread.compact_generation <= through:
             return current
@@ -797,23 +799,23 @@ class _CuratorLifecycleMixin:
             nonlocal state
             if not thread.compact_checkpoint_id:
                 return True
-            already = state.compact_consumption_cursors.get(thread.thread_id, {}).get("through", 0)
+            already = self.state_store.compact_cursor(thread.thread_id, state=state).get("through", 0)
             if already >= thread.compact_generation:
                 return True
             if budget.exhausted():
                 return False
             try:
-                state = self.claim_compact_checkpoint(thread, state=state, budget=budget)
+                state = self.claim_compact_checkpoint(thread, state=state, budget=budget) or state
             except (OSError, ValueError) as exc:
                 _LOGGER.warning("CURATOR_COMPACT_RECONCILE_DEFERRED error_type=%s", type(exc).__name__)
                 return False
-            cursor = state.compact_consumption_cursors.get(thread.thread_id, {})
+            cursor = self.state_store.compact_cursor(thread.thread_id, state=state)
             return cursor.get("through", 0) >= thread.compact_generation
 
         complete = compact_thread_scan(self.conversation_store, budget, observe)
         if complete and stamp == compact_thread_stamp(storage.threads_dir):
             state = self.state_store.record_compact_scan(stamp, expected=state.compact_scan_stamp)
-        return state
+        return self.state_store.include_compact_wake(state)
 
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
 
@@ -825,6 +827,7 @@ class _CuratorLifecycleMixin:
             return self._result(status="disabled", reason="interval")
         try:
             state = self.state_store.load()
+            state = self.state_store.migrate_compact_cursors(state, limit=live_cfg.batch_message_limit)
         except CuratorStateCorruptError as exc:
             return self._corrupt_failure("interval", exc)
         current = _localized_now(now, self.timezone_name)
@@ -1274,7 +1277,7 @@ class _CuratorExecutionMixin:
         batch = self._execution_batch(context, precollected_batch, excluded_ids)
         replay = context.route.get("date_replay")
         if batch.load_errors:
-            isolated = _isolate_breaker_load_errors(self.run_log, context, batch)
+            isolated = None if replay is not None else _isolate_breaker_load_errors(self.run_log, context, batch)
             if isolated is None:
                 raise CuratorInputError(_load_error_code(batch.load_errors), load_errors=batch.load_errors)
             batch, isolation_warning = isolated
@@ -1512,10 +1515,15 @@ class _CuratorExecutionMixin:
     ) -> CuratorRunResult:
         # LLM: 先统一提取候选的落点输出（含来源/身份事实），再做身份冲突过滤；两步都在租约内完成。
         extra_warnings = (*extra_warnings, *_message_read_warnings(batch))
-        if batch.date_backlog or batch.message_scan_partial:
+        target_day = context.route.get("finalize_date")
+        more_groups = bool(target_day and context.route.get("remaining"))
+        if batch.date_backlog or batch.message_scan_partial or batch.audit_scan_partial or more_groups:
             # 通过原reason代次保留续办义务；成功只提交本批确已读取的其它线程，不签全部扫描完成。
             self.state_store.request(context.reason)
-            extra_warnings = (*extra_warnings, *_message_scan_warnings(batch))
+            if batch.message_scan_partial:
+                extra_warnings = (*extra_warnings, *_message_scan_warnings(batch))
+            if batch.audit_scan_partial:
+                extra_warnings = (*extra_warnings, "audit_scan_partial")
         outputs = _prepare_outputs(
             context, batch, extraction, owner=self.dependencies.identity.owner_id
         )
@@ -1542,22 +1550,22 @@ class _CuratorExecutionMixin:
         )
         replay = context.route.get("date_replay")
         finalize_work = context.route.get("finalize_work")
-        target_day = context.route.get("finalize_date")
         finalize_date = ""
         pending_dates = None
         if replay is not None:
-            pending_dates = _settle_date_range(context, prepared.cursor)
+            pending_dates = _settle_date_range(context, prepared.cursor, audit_endpoint=batch.audit_range_endpoint)
             prepared = replace(prepared, cursor=replace(
                 prepared.cursor, per_thread_cursors=context.state_before.per_thread_cursors,
                 last_audit_event_id=context.state_before.last_processed_audit_event_id,
             ))
         elif target_day:
-            if (not batch.message_scan_partial and not batch.date_backlog
+            if (not batch.message_scan_partial and not batch.date_backlog and not batch.audit_scan_partial
+                    and not more_groups
                     and prepared.cursor.processed_messages == len(batch.messages)
                     and prepared.cursor.processed_audit_events == len(batch.audit_events)):
                 finalize_date = target_day
                 pending_dates = [row for row in context.state_before.pending_local_dates if row != finalize_work]
-        elif not batch.message_scan_partial:
+        elif not (batch.message_scan_partial or batch.audit_scan_partial):
             finalize_date = _finalize_date(context.reason, self.timezone_name, started_at=context.started_at)
         state_commit = _success_commit(context, prepared, finished_at=finished_at, finalize_date=finalize_date,
                                        pending_dates=pending_dates)
@@ -2134,8 +2142,7 @@ class _CuratorRunMixin:
         config_revision = live_cfg.revision()
         try:
             current = _localized_now(now, self.timezone_name) if scheduled else now
-            initial_window = scheduled and reason in {"interval", "turn_threshold", "daily_finalize"}
-            window = max(0.0, current.timestamp() - live_cfg.interval_seconds) if initial_window else 0.0
+            window = max(0.0, current.timestamp() - live_cfg.interval_seconds) if scheduled else 0.0
             acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
                 reason, config_revision, _lease_seconds(live_cfg), current,
                 first_enable_after=window,
@@ -3103,6 +3110,8 @@ def _with_formal_window(batch: CuratorInputBatch, window: FormalMemoryWindow) ->
 def _failure_code(exc: BaseException) -> str:
     from .jsonl import MemoryAuthorityCorruptError
 
+    if isinstance(exc, CuratorRepairDeferred):
+        return "CURATOR_REPAIR_BUDGET_DEFERRED"
     if isinstance(exc, CuratorModelTimeoutError):
         return "CURATOR_MODEL_TIMEOUT"
     if isinstance(exc, CuratorModelCallError):
@@ -3227,7 +3236,8 @@ def _date_input_state(context):
         return context.state_before
     cursor = replay["cursor"]
     return replace(context.state_before, per_thread_cursors=cursor["messages"],
-                   last_processed_audit_event_id=cursor["audit"], first_enable_after=0.0)
+                   last_processed_audit_event_id=cursor["audit"],
+                   first_enable_after=replay["source_range"].get("first_enable_after", context.state_before.first_enable_after))
 
 
 def _date_range_work(state, day, batch):
@@ -3235,13 +3245,17 @@ def _date_range_work(state, day, batch):
 
     messages = {item.thread_id: item.message_id for item in batch.messages}
     audit = batch.audit_events[-1].event_id if batch.audit_events else ""
-    return new_curator_date_work(day, {"kind": "input", "messages": messages, "audit": audit}, {
+    source = {"kind": "input", "messages": messages, "audit": audit,
+              "first_enable_after": state.first_enable_after}
+    if audit in batch.audit_positions:
+        source["audit_endpoint"] = batch.audit_positions[audit]
+    return new_curator_date_work(day, source, {
         "messages": {thread: state.per_thread_cursors.get(thread, "") for thread in messages},
         "audit": state.last_processed_audit_event_id if audit else "",
     })
 
 
-def _settle_date_range(context, cursor):
+def _settle_date_range(context, cursor, *, audit_endpoint=None):
     replay = context.route["date_replay"]
     source = replay["source_range"]
     original = replay["cursor"]
@@ -3250,7 +3264,9 @@ def _settle_date_range(context, cursor):
                 "audit": cursor.last_audit_event_id if source["audit"] else ""}
     rows = [row for row in context.state_before.pending_local_dates if row != replay]
     if advanced != {"messages": source["messages"], "audit": source["audit"]}:
-        rows.append({**replay, "cursor": advanced})
+        if audit_endpoint and "audit_endpoint" not in source:
+            source = {**source, "audit_endpoint": audit_endpoint}
+        rows.append({**replay, "source_range": source, "cursor": advanced})
     return rows
 
 

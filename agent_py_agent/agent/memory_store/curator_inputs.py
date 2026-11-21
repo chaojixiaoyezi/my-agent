@@ -19,7 +19,7 @@ from ..common.cache_freshness import cache_entry_trustworthy
 from ..conversation.learning_source import derive_source_projection, projection_is_learnable
 from ..conversation.message_cursor import pass_position_scope
 from ..io.cursor_cache import CursorCache, file_stamp
-from .curator_audit_cursor import AuditRead, collect_audit_window
+from .curator_audit_cursor import AuditCoverage, AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
 from .learning_exclusions import thread_is_excluded
@@ -244,6 +244,9 @@ class CuratorInputBatch:
     skipped_message_cursors: dict[str, str] = field(default_factory=dict)
     candidate_anchors: tuple[dict[str, object], ...] = ()
     message_scan_partial: bool = False
+    audit_scan_partial: bool = False
+    audit_positions: dict[str, dict] = field(default_factory=dict)
+    audit_range_endpoint: dict | None = None
     message_scan_reasons: tuple[str, ...] = ()
     # 只有原消息读取调用已绑定的线程可独立隔离；正文和游标不发送模型，诊断随原运行账保存。
     isolated_message_errors: tuple[dict[str, object], ...] = ()
@@ -431,6 +434,7 @@ def collect_curator_inputs(
         config.max_input_chars
         - len(json.dumps([item.to_model() for item in messages], ensure_ascii=False)),
     )
+    audit_coverage = AuditCoverage()
     if (message_source.excluded_conversation_ids is None
             or source_range is not None and (not source_range["audit"]
                 or source_range["audit"] == state.last_processed_audit_event_id)):
@@ -442,9 +446,10 @@ def collect_curator_inputs(
             after_event_id=state.last_processed_audit_event_id,
             limit=config.batch_message_limit,
             max_chars=remaining_chars,
+            coverage=audit_coverage,
+            end_event_id=source_range["audit"] if source_range else "",
+            endpoint=source_range.get("audit_endpoint") if source_range else None,
         )
-        if source_range is not None:
-            audit_events = _through_audit(audit_events, source_range["audit"], state.last_processed_audit_event_id)
         audit_thread_ids, scope_errors = _audit_window_excluded_thread_ids(message_source, audit_events)
         audit_errors.extend(scope_errors)
         if audit_thread_ids is None:
@@ -473,7 +478,9 @@ def collect_curator_inputs(
             limit_per_run=max(64, config.batch_message_limit * 8),
         )
         audit_events = _enrich_audit_artifact_refs(audit_events, refs)
-        audit_events = _fit_audit_budget(audit_events, max_chars=remaining_chars)
+        fitted_events = _fit_audit_budget(audit_events, max_chars=remaining_chars)
+        audit_coverage.partial |= len(fitted_events) < len(audit_events)
+        audit_events = fitted_events
     batch = CuratorInputBatch(
         messages=tuple(messages),
         audit_events=tuple(audit_events),
@@ -482,6 +489,9 @@ def collect_curator_inputs(
         skipped_audit_cursor=skipped_audit_cursor,
         skipped_message_cursors=skipped_message_cursors,
         message_scan_partial=scan_state["partial"],
+        audit_scan_partial=audit_coverage.partial,
+        audit_positions=audit_coverage.positions,
+        audit_range_endpoint=audit_coverage.endpoint,
         message_scan_reasons=scan_state["reasons"],
         isolated_message_errors=isolated_message_errors,
     )
@@ -497,16 +507,6 @@ def collect_curator_inputs(
 
 # LLM: 新增广播来源/证据也计入同一预算；只裁尾部保持每线程和审计原始连续前缀，原文/hash不变。
 # 函数用途: 在返回完整JSON前收紧输入，单条消息只缩预览，不让扩展字段突破预算。
-def _through_audit(events, end, start):
-    if end == start:
-        return []
-    for pos, event in enumerate(events):
-        if event.event_id == end:
-            return events[: pos + 1]
-    # 已冻结范围最终游标不在可核实页时，不把页中后来出现的事件算成原范围。
-    return []
-
-
 def dated_curator_prefix(batch, now, *, through_date=""):
     """每个源只取同一本地日的连续前缀，禁止跨过未确认的日期边界写游标。"""
     from .curator_due import parse_time
@@ -528,7 +528,8 @@ def dated_curator_prefix(batch, now, *, through_date=""):
         return batch, ""
     chosen = min(days)
     if through_date and chosen > through_date:
-        return replace(batch, messages=(), audit_events=()), ""
+        return replace(batch, messages=(), audit_events=(),
+                       audit_scan_partial=batch.audit_scan_partial and not event_days), ""
     messages, events, stopped = [], [], set()
     backlog = False
     for item, day in zip(batch.messages, message_days):
@@ -538,18 +539,28 @@ def dated_curator_prefix(batch, now, *, through_date=""):
             backlog |= not through_date or day <= through_date
         else:
             messages.append(item)
+    audit_partial = batch.audit_scan_partial
     for index, (event, day) in enumerate(zip(batch.audit_events, event_days)):
         if day != chosen:
             backlog |= not through_date or any(rest <= through_date for rest in event_days[index:])
+            if through_date and day > through_date:
+                audit_partial = False
             break
         events.append(event)
-    return replace(batch, messages=tuple(messages), audit_events=tuple(events), date_backlog=backlog), chosen
+    return replace(batch, messages=tuple(messages), audit_events=tuple(events),
+                   date_backlog=backlog, audit_scan_partial=audit_partial), chosen
 
 
 def _fit_input_payload(batch, *, max_chars):
     while (excess := len(json.dumps(batch.to_model_payload(), ensure_ascii=False)) - max_chars) > 0:
-        if batch.audit_events:
-            batch = replace(batch, audit_events=batch.audit_events[:-1])
+        if len(batch.audit_events) > 1 or batch.audit_events and batch.messages:
+            batch = replace(batch, audit_events=batch.audit_events[:-1], audit_scan_partial=True)
+        elif batch.audit_events:
+            event = batch.audit_events[0]
+            if not event.preview:
+                break
+            event = replace(event, preview=event.preview[:max(0, len(event.preview) - excess)])
+            batch = replace(batch, audit_events=(event,))
         elif len(batch.messages) > 1:
             batch = replace(batch, messages=batch.messages[:-1])
         elif batch.messages:
@@ -1137,8 +1148,12 @@ def _collect_audit(
     after_event_id: str,
     limit: int,
     max_chars: int,
+    coverage: AuditCoverage | None = None,
+    end_event_id: str = "",
+    endpoint: dict | None = None,
 ) -> tuple[list[CuratorAuditInput], list[dict[str, object]]]:
-    return collect_audit_window(AuditRead(audit_dir, after_event_id, limit, max_chars), _audit_input)
+    request = AuditRead(audit_dir, after_event_id, limit, max_chars, end_event_id, endpoint)
+    return collect_audit_window(request, _audit_input, coverage=coverage)
 
 
 # LLM: 字段选择只认 audit 结构键，preview 也有固定上限且不读取 content_path 指向的大正文。

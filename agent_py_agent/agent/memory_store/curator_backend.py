@@ -77,6 +77,14 @@ class CuratorModelCallError(RuntimeError):
 #   供失败诊断区分截断、空响应和中途格式坏(真机 2026-09-26~28 主 owner 8 次 "not strict JSON" 因缺这些
 #   事实无法归因)。响应正文绝不进本对象。同步 curator._failure_diagnostic 与 test_curator_failure_attribution.py。
 # 类用途: 标记"模型回了但宿主解析不通过",并携带可以安全写进运行账的响应形状。
+class CuratorRepairDeferred(RuntimeError):
+    """A valid repair request could not start within the extraction budget."""
+
+    def __init__(self, budget: str) -> None:
+        self.budget = budget
+        super().__init__(f"Conflict repair exceeded its {budget} budget")
+
+
 class CuratorResponseParseError(ValueError):
     # LLM: message 必须原样沿用解析错误的 str(exc),失败码分类依赖它(CURATOR_ 前缀约定)。
     # 函数用途: 保存原解析错误信息和响应形状事实。
@@ -402,7 +410,7 @@ def extract_with_retries(
                 extraction = _parse_response(response, repair=repair)
             except CuratorResponseParseError as error:
                 violation = error.__cause__
-                if (repair is not None or retries_left <= 0 or not isinstance(violation, CuratorOutputViolation)
+                if (repair is not None or not isinstance(violation, CuratorOutputViolation)
                         or violation.violation_code != "missing_property"
                         or not violation.violation_path.endswith(".conflicts_with")):
                     raise
@@ -411,8 +419,12 @@ def extract_with_retries(
                     raise
                 repair, repair_prompt, repair_schema = candidate
                 repair_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(repair_prompt))
-                if len(repair_prompt) > config.max_input_chars or granted_seconds + repair_seconds > budget_seconds:
-                    raise
+                if retries_left <= 0:
+                    raise CuratorRepairDeferred("retry_count") from error
+                if len(repair_prompt) > config.max_input_chars:
+                    raise CuratorRepairDeferred("input_size") from error
+                if granted_seconds + repair_seconds > budget_seconds:
+                    raise CuratorRepairDeferred("elapsed_time") from error
                 retries_left -= 1
                 prompt, schema = repair_prompt, repair_schema
                 schema_chars = len(json.dumps(schema, ensure_ascii=False))

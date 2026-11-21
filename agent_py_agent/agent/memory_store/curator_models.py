@@ -275,6 +275,7 @@ class MemoryCuratorState:
     first_enable_after: float = 0.0
     compact_consumption_cursors: dict[str, dict[str, object]] = field(default_factory=dict)
     compact_scan_stamp: str = ""
+    compact_wake_generation: int = 0
 
     # LLM: 空对象=首次初始化(允许); 非空但无任何已知字段=纯未知字段
     # fail-closed(seq1625 P0 遗留: {"not":"a state"} 不得静默复用默认 state);
@@ -433,6 +434,7 @@ def validate_curator_state(state: MemoryCuratorState) -> None:
 
     validate_pending_local_dates(state.pending_local_dates)
     if (type(state.first_enable_after) not in (int, float) or not 0 <= state.first_enable_after < float("inf")
+            or type(state.compact_wake_generation) is not int or state.compact_wake_generation < 0
             or not isinstance(state.compact_scan_stamp, str)
             or state.compact_scan_stamp and not state.compact_scan_stamp.isdecimal()
             or not isinstance(state.compact_consumption_cursors, dict)):

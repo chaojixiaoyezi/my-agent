@@ -721,6 +721,48 @@ class RuntimeRepository(
             self._observe_runtime_db_error(error, identity)
             raise
 
+    def curator_compact_cursor(self, thread_id: str) -> dict | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key=?",
+                               (f"curator.compact.thread:{thread_id}",)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def curator_compact_wake_generation(self) -> int:
+        with self._runtime_connection() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key='curator.compact.wake'").fetchone()
+        return int(row["value"]) if row else 0
+
+    def curator_compact_migration_position(self) -> int:
+        with self._runtime_connection() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key='curator.compact.migration'").fetchone()
+        return int(row["value"]) if row else 0
+
+    def migrate_curator_compact_cursors(self, cursors, *, position=None, advance=None):
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if position is not None:
+                row = conn.execute("SELECT value FROM metadata WHERE key='curator.compact.migration'").fetchone()
+                if (int(row["value"]) if row else 0) != position:
+                    return
+            conn.executemany("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)",
+                             [(f"curator.compact.thread:{key}", json.dumps(value)) for key, value in cursors])
+            if advance is not None:
+                conn.execute("INSERT INTO metadata(key,value) VALUES('curator.compact.migration',?)"
+                             " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(advance),))
+
+    def claim_curator_compact_cursor(self, thread_id, expected, cursor, *, wake: bool):
+        key = f"curator.compact.thread:{thread_id}"
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            if (json.loads(row["value"]) if row else {}) != expected:
+                return
+            conn.execute("INSERT INTO metadata(key,value) VALUES(?,?)"
+                         " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(cursor)))
+            if wake:
+                conn.execute("INSERT INTO metadata(key,value) VALUES('curator.compact.wake','1')"
+                             " ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
+
     # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
     # LLM: 根运行创建新的 TaskRun，child 复用父 TaskRun；Task 本身只承载
     # owner/thread/goal 等耐久身份，不写本次执行状态。
