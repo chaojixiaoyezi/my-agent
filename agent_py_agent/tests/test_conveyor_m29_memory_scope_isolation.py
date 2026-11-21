@@ -292,3 +292,101 @@ def test_explicit_filter_keeps_bound_scope_and_task_scope_is_frozen(tmp_path):
                                     task_id="active", memory_recall_scope=bound, query=QUERY)
     assert scope.allows("project", "project:active") and scope.allows("project", X)
     assert not scope.allows("project", Y)
+
+
+def test_committed_promotion_replays_failed_project_binding(tmp_path, monkeypatch):
+    agent = _agent_with_current_user(tmp_path / "agent", content=QUERY)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent._current_run_params.workspace_ref = freeze_workspace_ref(workspace)
+    home = agent.home_paths.owner_home_dir
+    request = _project_request(Y)
+    tool = RememberTool(agent)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("project binding write interrupted")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(project_bindings, "write_json_file_atomic_unlocked", unavailable)
+        result = tool.execute(request)
+    assert result.ok, result.output
+    saved = json.loads(result.output)
+    [promoted] = saved["results"]
+    assert saved["active_memory_changed"] and promoted["project_binding_status"] == "pending"
+    assert project_bindings.lookup(home, workspace) == ()
+    formal_before = agent.memory.path.read_bytes()
+
+    replay = tool.execute(request)
+    assert replay.ok, replay.output
+    repeated = json.loads(replay.output)
+    assert not repeated["active_memory_changed"]
+    assert repeated["results"][0]["project_binding_status"] == "settled"
+    assert project_bindings.lookup(home, workspace) == (Y,)
+    assert agent.memory.path.read_bytes() == formal_before
+
+
+@pytest.mark.parametrize("replacement", ["rebind", "newer_binding", "new_directory"])
+def test_project_binding_replay_respects_current_registry_and_directory(tmp_path, monkeypatch, replacement):
+    agent = _agent_with_current_user(tmp_path / "agent", content=QUERY)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent._current_run_params.workspace_ref = freeze_workspace_ref(workspace)
+    home = agent.home_paths.owner_home_dir
+    project_bindings.record(home, X, workspace)
+    [draft] = _prepare_observations(agent, agent.memory, [_project_request(Y)], scope=None)
+    candidate = agent.memory_candidates.observe(draft)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("project binding write interrupted")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(project_bindings, "write_json_file_atomic_unlocked", unavailable)
+        [result] = agent.memory_promotion.promote_batch([candidate], reviewer="test", automatic=True)
+    assert result.promoted and result.formal_memory_changed and result.project_binding_status == "pending"
+    assert project_bindings.lookup(home, workspace) == (X,)
+
+    if replacement == "newer_binding":
+        newer = RememberTool(agent).execute(_project_request("project:z"))
+        assert newer.ok and json.loads(newer.output)["active_memory_changed"], newer.output
+        expected = ("project:z",)
+    elif replacement == "new_directory":
+        workspace.rename(tmp_path / "retired")
+        workspace.mkdir()
+        expected = ()
+    else:
+        expected = (Y,)
+
+    formal_before = agent.memory.path.read_bytes()
+    updated = agent.memory_candidates.get(candidate.candidate_id)
+    [replay] = agent.memory_promotion.promote_batch([updated], reviewer="test", automatic=True)
+    assert not replay.formal_memory_changed
+    assert replay.project_binding_status == ("settled" if replacement == "rebind" else "superseded")
+    assert project_bindings.lookup(home, workspace) == expected
+    assert agent.memory.path.read_bytes() == formal_before
+
+
+def test_project_binding_acknowledges_already_published_generation(tmp_path, monkeypatch):
+    agent = _agent_with_current_user(tmp_path / "agent", content=QUERY)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent._current_run_params.workspace_ref = freeze_workspace_ref(workspace)
+    home = agent.home_paths.owner_home_dir
+    [draft] = _prepare_observations(agent, agent.memory, [_project_request(Y)], scope=None)
+    candidate = agent.memory_candidates.observe(draft)
+    original_write = project_bindings.write_json_file_atomic_unlocked
+
+    def lose_confirmation(*args, **kwargs):
+        original_write(*args, **kwargs)
+        raise OSError("binding confirmation interrupted after publication")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(project_bindings, "write_json_file_atomic_unlocked", lose_confirmation)
+        result = agent.memory_promotion.promote(candidate.candidate_id, automatic=True)
+    assert result.promoted and result.project_binding_status == "pending"
+    assert project_bindings.lookup(home, workspace) == (Y,)
+    registry = home / "memory" / "project_bindings.json"
+    before = registry.stat()
+    replay = agent.memory_promotion.promote(candidate.candidate_id, automatic=True)
+    assert not replay.formal_memory_changed and replay.project_binding_status == "settled"
+    after = registry.stat()
+    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)

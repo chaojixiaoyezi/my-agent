@@ -1015,6 +1015,18 @@ def _memory_read_index_pending(owner_home: Path) -> bool:
     }
 
 
+def _has_pending_feedback_review(owner_home: Path) -> bool:
+    from .memory_store.promotion import has_pending_memory_feedback_reviews
+
+    if not runtime_db_path(owner_home).is_file():
+        return False
+    try:
+        with _quiescent_probe_connection(owner_home) as conn:
+            return conn is not None and has_pending_memory_feedback_reviews(conn)
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
 # LLM: 内部解析沿canonical模型，不公开转导类型；原退避、pending/旧lease和时间边界不变。
 # 函数用途: 判断owner是否仍有原策展运行/输入事实，区别于候选来源资格与用户正式确认。
 def _has_pending_memory_curator_work(
@@ -1031,6 +1043,8 @@ def _has_pending_memory_curator_work(
     """
     if (curator_config is not None and not curator_config.enabled) or not _owner_memory_enabled(owner_home):
         return False  # 总闸关闭:curator 软活不判活(不占登记表工位,对称 skill 空快照)
+    if _has_pending_feedback_review(owner_home):
+        return True
     state_path = owner_home / "memory" / "curator" / "state.json"
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))

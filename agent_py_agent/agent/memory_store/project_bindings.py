@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 from ..common.json_io import (
     locked_json_path,
@@ -27,41 +30,69 @@ def _read(path: Path) -> tuple[dict, dict]:
     return roots, aliases
 
 
+def _generation(binding: dict | None) -> str:
+    if binding is None:
+        return ""
+    if not isinstance(binding, dict):
+        raise ValueError("PROJECT_BINDINGS_UNREADABLE")
+    generation = binding.get("generation")
+    if isinstance(generation, str) and generation:
+        return generation
+    # Existing registrations predate generations. Their exact row is the initial CAS basis.
+    return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+
+
+def generation(owner_home: Path, workspace_root: Path) -> str:
+    roots, _ = _read(_path(owner_home))
+    return _generation(roots.get(str(workspace_root)))
+
+
 def record(
     owner_home: Path, project_key: str, workspace_root: Path, *, alias: str = "",
     expected_identity: tuple[int, int] | None = None,
-) -> None:
-    """在单文件锁内保存变更，目录身份随绑定落盘以识别同路径重建。"""
+    publication: tuple[str, str] | None = None,
+) -> str:
+    """Publish under the registry lock, optionally against a frozen generation."""
     project = canonical_scope_key("project", project_key)
     path = _path(owner_home)
     with locked_json_path(path):
         workspace = freeze_workspace_ref(workspace_root)
-        if workspace is None:
-            return
-        if expected_identity is not None and (
+        if workspace is None or (expected_identity is not None and (
             workspace.root != workspace_root or workspace.root_identity != expected_identity
-        ):
-            return
+        )):
+            return "superseded"
         roots, aliases = _read(path)
         root = str(workspace.root)
         previous = roots.get(root)
+        if previous is not None and not isinstance(previous, dict):
+            raise ValueError("PROJECT_BINDINGS_UNREADABLE")
         binding = {"project": project, "identity": list(workspace.root_identity)}
-        previous_alias = previous.get("alias", "") if isinstance(previous, dict) else ""
+        previous_alias = previous.get("alias", "") if previous else ""
         if not isinstance(previous_alias, str):
             raise ValueError("PROJECT_BINDINGS_UNREADABLE")
-        same_binding = previous == {**binding, "alias": previous_alias}
+        if publication is not None:
+            basis, operation = publication
+            current = _generation(previous)
+            if current == operation:
+                return "settled"
+            if current != basis:
+                return "superseded"
+        same_binding = previous is not None and all(previous.get(key) == value for key, value in binding.items())
         requested_alias = alias.strip()
         selected_alias = requested_alias or (previous_alias if same_binding else "")
         if selected_alias:
             binding["alias"] = selected_alias
-        if binding == previous and (not requested_alias or aliases.get(selected_alias) == root):
-            return
+        if (publication is None and same_binding and previous_alias == selected_alias
+                and (not requested_alias or aliases.get(selected_alias) == root)):
+            return "settled"
         if previous_alias and aliases.get(previous_alias) == root:
             del aliases[previous_alias]
         if selected_alias:
             aliases[selected_alias] = root
+        binding["generation"] = publication[1] if publication else uuid4().hex
         roots[root] = binding
         write_json_file_atomic_unlocked(path, {"roots": roots, "aliases": aliases})
+        return "settled"
 
 
 def lookup(owner_home: Path, workspace_root: Path) -> tuple[str, ...]:
