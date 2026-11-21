@@ -312,7 +312,15 @@ def _reap_hosts(p):
     cursor = p.result["cursor"]
     position = cursor.get("reap_directory", {})
     while p.available():
-        name, resume, visited, complete = lane_directory_entry(p.root, (), position)
+        # 活跃目录原先按路径枚举；严格描述符打开不可用的平台沿用目录分页的可移植续读。
+        try:
+            name, resume, visited, complete = lane_directory_entry(p.root, (), position, require_dir_fd=False)
+        except (TypeError, ValueError):
+            # 续点或目录项无法续读时只结束本轮回收并上报，下次到期从头重扫，不阻塞后续独立阶段。
+            cursor.pop("reap_directory", None)
+            p.skip("process_state_unknown")
+            p.error("process_session_scan_failed")
+            return True
         p.result["items"] += visited
         if complete:
             cursor.pop("reap_directory", None)
@@ -361,14 +369,18 @@ def _prune(p):
     else:
         # 冷维护不占用按 owner 定界的热缓存，也不为历史读口创建第二把目录锁。
         records, errors = ProcessSessionTransaction(history).list_records()
-    if errors:
-        for error in errors:
-            if error.get("error_type") == "BlockingIOError":
-                p.skip("lock_busy")
-            else:
-                p.skip("process_state_unknown")
-                p.error("process_session_scan_failed")
+    busy = False
+    for error in errors:
+        if error.get("error_type") == "BlockingIOError":
+            p.skip("lock_busy")
+            busy = True
+        else:
+            p.skip("process_state_unknown")
+            p.error("process_session_scan_failed")
+    if busy:
         return False
+    # 坏历史行只上报并原样保留，从不被选为可删；其余完整记录照常按各自 TTL 核对。检查点照常前进，
+    # 坏行在下次到期时有界重查，活跃目录回收和后续独立阶段不再等待它被修复。
     candidates = [row for row in records
                   if row["status"] in PROCESS_TERMINAL_STATUSES
                   and not row.get("retain_until_consumed")

@@ -2,7 +2,7 @@
 # 模块用途: 将持续目标的精确身份写入已有 wake 队列，不创建另一套定时轮询或任务状态。
 from __future__ import annotations
 
-from .goal_progress_fuse import WAKE_SNAPSHOT_KEY, goal_progress_snapshot
+from .goal_progress_fuse import WAKE_SNAPSHOT_KEY, frozen_goal_disposition, goal_progress_snapshot
 
 """Single wake authority for continuing one persisted thread goal."""
 
@@ -47,6 +47,16 @@ def raise_goal_continuation_wake(
     }
     if now is not None:
         request["now"] = now
+    storage = getattr(store, "storage", None)
+    if storage is not None:
+        from .store_wake_publication import published_signal
+
+        # 同键 pending 若已被本目标记账（该片裁决已冻结），它只剩原处理者确认，不能再吸收新的续跑请求；
+        # 显式接替为新一代，锁内仍核对它就是当前那条 pending。
+        current = published_signal(storage, request["thread_id"], request["dedupe_key"])
+        if current is not None and current.status == "pending" and frozen_goal_disposition(
+                goal, current.wake_signal_id) is not None:
+            request["supersedes"] = current.wake_signal_id
     return store.wakes.raise_signal(request)
 
 

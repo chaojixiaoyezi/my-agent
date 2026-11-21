@@ -309,18 +309,38 @@ def credential_authenticated_request(agent, reference, request, *, send, credent
         if isinstance(result, RawResponseParts) and headers:
             proof = protected_resource_check(current, credential_ref=effective_ref, generation=generation,
                 method=request.method, http_status=result.status)
-            if proof is not None and _confirmed_response_origin(result.url, row['origin']):
+            if proof is not None and _confirmed_protected_read(request, result, row, send):
                 result = replace(result, protected_resource_check=proof)
         return _with_credential_selection(result, selection), secret_tuple
     finally:
         values.clear()
 
 
-def _confirmed_response_origin(url, origin):
-    try:
-        return credential_origin(url) == origin
-    except ValueError:
+# LLM: 只在本片已可出证（凭据就绪唤醒、GET/HEAD、2xx）之后调用。请求与实际响应都须是凭据记录的原目标资源，
+#   scheme/host/port/path 只在内存比较、不落盘 URL；保护证据是同一目标不带任何凭据头时被要求认证（401/403）。
+#   同源其它资源、跳到别处的响应或公开目标都不出证；只为这一次出证读取补发一个无凭据请求，普通认证读取不发。
+# 函数用途: 判定一次成功的认证读取是否证明了原目标受保护资源的访问；证据读不到时不出证，业务结果照常返回。
+def _confirmed_protected_read(request, result, row, send):
+    target = _resource_identity(row.get('target_url'))
+    if target is None or _resource_identity(request.url) != target or _resource_identity(result.url) != target:
         return False
+    # 只留 User-Agent：模型自带的其它头可能被目标当作（错误的）认证而拒绝，不能让它伪造保护证据。
+    probe = replace(request, headers={key: value for key, value in request.headers.items()
+                                      if key.lower() == 'user-agent'}, data=None, authorization_origin='')
+    try:
+        challenged = send(probe)
+    except Exception:  # noqa: BLE001 - 保护证据只决定是否出证，不能让已取得的业务结果失败。
+        return False
+    return credential_http_status(challenged) in (401, 403)
+
+
+def _resource_identity(url):
+    if not isinstance(url, str):
+        return None
+    try:
+        return credential_origin(url), urlsplit(url).path or '/'
+    except ValueError:
+        return None
 
 
 def _notify_http_secret_sinks(

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -30,6 +31,8 @@ class UsageIntent:
     before_stamp: object
     store: object
     epoch: int | None = None
+    # 写者在原账本锁内、自身目录变更结束后记录的目录身份；None 时沿用排空时观察。
+    after_stamp: object = None
 
 
 class _InstallMeta:
@@ -47,6 +50,8 @@ class _InstallMeta:
         self.generation = int(self.original.get('generation', '0'))
         self._observed_for = None
         self._observed_stamp = None
+        # 当前完整身份是否取自写者锁内记录；是则锁外后来的目录变化留给读者实时核验和下一写者接续判定。
+        self.writer_stamp = False
 
     def observe_stamp(self, index, before_stamp):
         # 相同写前身份共享一次观察。目录后来变化时，覆盖读取仍以实时身份核验。
@@ -76,6 +81,10 @@ def _text(value):
     return json.dumps(value, separators=(',', ':'))
 
 
+def _valid_token(token):
+    return type(token) is str and len(token) == 32 and all(ch in '0123456789abcdef' for ch in token)
+
+
 class UsageSourcePlan:
     """只保存已核代次与时间范围，重读时仍须核完整性及每源canonical版本。"""
     def __init__(self, index, since, until, generation):
@@ -100,6 +109,7 @@ class UsageSourceIndex:
         self.directory = Path(directory)
         self.path = self.directory.parent / ('.' + self.directory.name + '_sources') / 'sources.sqlite3'
         self.pending_directory = self.path.parent / 'pending'
+        self.quarantine_directory = self.path.parent / 'quarantine'
         self._needs_prepare = False
 
     def stamps(self):
@@ -138,7 +148,7 @@ class UsageSourceIndex:
             raise
 
     @contextmanager
-    def write_connection(self, *, deadline_s=None, committed_tokens=(), pending_fd=None):
+    def write_connection(self, *, deadline_s=None, committed_tokens=(), pending_fd=None, isolated_tokens=()):
         ensure_private_dir(self.path.parent)
         options = {} if deadline_s is None else {'deadline_s': deadline_s}
         with locked_json_path(self.path, blocking=False, **options):
@@ -157,6 +167,20 @@ class UsageSourceIndex:
                     raise
                 if committed_tokens:
                     self._unlink_committed_tokens(committed_tokens, parent=pending_fd)
+                if isolated_tokens:
+                    self._quarantine_tokens(isolated_tokens)
+
+    def _quarantine_tokens(self, tokens):
+        """重建义务已在同一事务提交；损坏凭据原字节随原文件身份改名移出待提交目录，留作恢复证据，不删除。"""
+        ensure_private_dir(self.quarantine_directory)
+        for token in tokens:
+            name = token + '.json'
+            try:
+                os.replace(self.pending_directory / name, self.quarantine_directory / name)
+            except FileNotFoundError:
+                continue  # 另一修复者已隔离同一凭据。
+            logging.getLogger(__name__).warning(
+                'USAGE_SOURCE_INTENT_ISOLATED token=%s effect=canonical_preserved next=full_source_rebuild', token)
 
     @contextmanager
     def _pending_fd(self):
@@ -240,7 +264,7 @@ class UsageSourceIndex:
             return UsageSourcePlan(self, since, until, self._get(conn, 'generation', '0'))
 
     def _pending_record(self, token, *, parent=None):
-        if type(token) is not str or len(token) != 32 or any(ch not in '0123456789abcdef' for ch in token):
+        if not _valid_token(token):
             raise ValueError('usage source intent name invalid')
         name = token + '.json'
         if parent is None:
@@ -273,7 +297,13 @@ class UsageSourceIndex:
                     if not entry.name.endswith('.json'):
                         raise ValueError('usage source intent name invalid')
                     token = entry.name[:-5]
-                    record = self._pending_record(token)
+                    if not _valid_token(token):
+                        raise ValueError('usage source intent name invalid')
+                    try:
+                        record = self._pending_record(token)
+                    except (ValueError, RecursionError):
+                        # 合法凭据名下的内容无法解析：仍是未结清义务，由修复者隔离并全量重建后才可完整。
+                        return {'token': token, 'damaged': True}
                     if record is not None:
                         return {'token': token, **record}
                 raise ValueError('usage source pending probe incomplete')
@@ -305,24 +335,33 @@ class UsageSourceIndex:
         """同一事务按提交顺序安装来源。提交后仍持原文件锁，收走本批已应用的凭据。"""
         if not intents:
             return []
-        committed = []
+        committed, isolated = [], []
         seen = set()
         with self._pending_fd() as parent, self.write_connection(
-            deadline_s=deadline, committed_tokens=committed, pending_fd=parent,
+            deadline_s=deadline, committed_tokens=committed, pending_fd=parent, isolated_tokens=isolated,
         ) as conn:
             meta = _InstallMeta(conn)
             for intent in intents:
                 if intent.token in seen:
                     continue
                 seen.add(intent.token)
-                record = self._pending_record(intent.token, parent=parent)
+                try:
+                    record = self._pending_record(intent.token, parent=parent)
+                except (ValueError, RecursionError):
+                    if not _valid_token(intent.token):
+                        raise
+                    record = {}  # 持久记录损坏，按不可信凭据隔离。
                 if record is None:
                     continue  # 另一进程或恢复通道已完成该凭据。
-                if record['thread_id'] != intent.thread_id:
-                    raise ValueError('usage source intent thread_id does not match its durable record')
+                if record.get('thread_id') != intent.thread_id:
+                    # 坏凭据不能证明它覆盖的来源：本批其余凭据照常提交，同一事务把覆盖退回全量重建，提交后再隔离原文件。
+                    isolated.append(intent.token)
+                    meta.scan, meta.complete = {}, False
+                    continue
                 snapshot = intent.store._usage_source_snapshot(intent.thread_id)
                 result = self._install(conn, intent.thread_id, snapshot, before_stamp=intent.before_stamp,
-                                       epoch=intent.epoch, store=intent.store, registered=True, meta=meta)
+                                       after_stamp=intent.after_stamp, epoch=intent.epoch, store=intent.store,
+                                       registered=True, meta=meta)
                 if result is not False:
                     committed.append(intent.token)
             if parent is not None:
@@ -330,15 +369,15 @@ class UsageSourceIndex:
                 opened = os.fstat(parent)
                 if current is None or current[:2] != (opened.st_dev, opened.st_ino):
                     raise ValueError('usage source intent directory changed before commit')
-            if meta.complete and meta.stamp != self.stamps():
+            if meta.complete and not meta.writer_stamp and meta.stamp != self.stamps():
                 meta.complete = False
             meta.flush(conn)
             self._needs_prepare = (not meta.complete
                                    or conn.execute('SELECT 1 FROM sources WHERE complete=0 LIMIT 1').fetchone() is not None)
         return committed
 
-    def _install(self, conn, thread_id, snapshot, *, before_stamp=None, epoch=None, token=None, store=None,
-                 registered=None, meta=None):
+    def _install(self, conn, thread_id, snapshot, *, before_stamp=None, after_stamp=None, epoch=None, token=None,
+                 store=None, registered=None, meta=None):
         state = meta if meta is not None else _InstallMeta(conn)
         if epoch is not None and state.epoch != epoch:
             return False
@@ -361,12 +400,16 @@ class UsageSourceIndex:
             registered = intent is not None and intent['thread_id'] == thread_id
         scan_matches = registered and state.scan and state.scan.get('stamp') == before_stamp
         ready_matches = registered and state.complete and state.stamp == before_stamp
-        current_stamp = state.observe_stamp(self, before_stamp) if scan_matches or ready_matches else None
+        current_stamp = None
+        if scan_matches or ready_matches:
+            # 排空异步发生：接续用写者锁内记录的写后身份，不把排空时才观察到的后续写者或锁外变化算作本次已登记变更。
+            current_stamp = after_stamp if after_stamp is not None else state.observe_stamp(self, before_stamp)
         if scan_matches:
             # 只承认同一pending写者的已登记变更；新源已带当前epoch，不因忙owner反复回到目录前缀。
             state.scan['stamp'] = current_stamp
         if ready_matches:
             state.stamp = current_stamp
+            state.writer_stamp = after_stamp is not None
         else:
             state.complete = False
         state.generation += 1
@@ -424,9 +467,17 @@ class UsageSourceIndex:
             raise ValueError('usage source prepare limit must be 1..128')
         if deadline is not None and time.monotonic() >= deadline:
             return {'coverage': 'partial', 'sources_examined': 0, 'cursor': {'budget_exhausted': True}, 'errors': []}
-        with self.write_connection() as conn:
+        isolated = []
+        with self.write_connection(isolated_tokens=isolated) as conn:
             complete = self._get(conn, 'complete') == '1' and self._get(conn, 'stamp') == self.stamps()
             writing = self._pending_one()
+            if writing is not None and writing.get('damaged'):
+                # 坏凭据不知覆盖哪个来源：先在本事务把覆盖退回一次新的全量清点，提交后再隔离原文件，
+                # 中途退出只会重复隔离；完整性只能由隔离之后开始的清点重新签发。
+                self._put(conn, 'scan', '{}')
+                self._put(conn, 'complete', 0)
+                isolated.append(writing['token'])
+                return {'coverage': 'partial', 'sources_examined': 1, 'cursor': {'isolated_intent': True}, 'errors': []}
             after = self._get(conn, 'repair_after')
             pending = conn.execute('SELECT thread_id FROM sources WHERE complete=0 AND thread_id>? ORDER BY thread_id LIMIT 1',
                                    (after,)).fetchone()

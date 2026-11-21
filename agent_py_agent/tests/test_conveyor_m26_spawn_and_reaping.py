@@ -8,12 +8,14 @@ import subprocess
 import sys
 import time
 from contextlib import ExitStack
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.attempt import sandbox
 from agent_py_agent.agent.common import process_spawn
+from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError
 from agent_py_agent.agent.runtime_errors import RecoverableRuntimeError
 from agent_py_agent.agent.tooling import background_process_launch as launch
 from agent_py_agent.agent.tooling import process_registry as registry
@@ -22,6 +24,7 @@ from agent_py_agent.agent.tooling import process_session_retention as retention
 from agent_py_agent.agent.tooling import process_session_store as storage
 from agent_py_agent.agent.tooling import shell
 from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope, ProcessExecutionScope
+from agent_py_agent.agent.user_space import directory_paging, storage_lanes
 from agent_py_agent.agent.user_space.storage_lanes import StorageLaneBudget, StorageLaneRequest
 
 HOST_MODULE = "agent_py_agent.agent.tooling.background_process_host"
@@ -282,6 +285,138 @@ def test_reaping_resumes_past_bad_rows_and_settles_a_host_without_a_child(author
     assert not store.record_path(sid).exists()
     assert store.prune_finished(0) == []  # 当前终态只剩已归档的 TTL 责任。
     assert not _maintain(home, now, cursor=cursor)["errors"]
+
+
+def _lane_clock(monkeypatch):
+    """Deterministic monotonic time for the slice budget; it advances only when a test charges it."""
+    clock = SimpleNamespace(now=0.0)
+    fake_time = SimpleNamespace(monotonic=lambda: clock.now)
+    monkeypatch.setattr(retention, "time", fake_time)
+    monkeypatch.setattr(storage_lanes, "time", fake_time)
+    return clock
+
+
+def _without_dir_fd(monkeypatch, dir_fd):
+    if not dir_fd:
+        # A POSIX platform without dir_fd support: strict descriptor opening is unavailable.
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory descriptors")
+def test_directory_page_pages_portably_without_dir_fd_only_when_the_caller_allows_it(tmp_path, monkeypatch):
+    for index in range(5):
+        (tmp_path / f"entry-{index}").write_bytes(b"")
+    _without_dir_fd(monkeypatch, False)
+    with pytest.raises(NoFollowPathError):
+        directory_paging.directory_page(tmp_path, (), {}, 2)
+    names, cursor, complete = [], {}, False
+    for _ in range(10):
+        page, cursor, complete = directory_paging.directory_page(tmp_path, (), cursor, 2, require_dir_fd=False)
+        names.extend(page)
+        if complete:
+            break
+    assert complete and sorted(names) == [f"entry-{index}" for index in range(5)]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group observation")
+@pytest.mark.parametrize("dir_fd", [True, False], ids=["dir_fd", "no_dir_fd"])
+def test_reaping_advances_when_enumerating_the_directory_takes_whole_slices(authority, group_leader, monkeypatch,
+                                                                            dir_fd):
+    home, store, request = authority
+    host, child = group_leader(finished=True), group_leader(finished=True)
+    rows = {sid: store.write(_managed_record(request, sid, host, child))
+            for sid in (f"bg-m26-wide-{index:02}" for index in range(40))}
+    for index in range(200):
+        (store.root / f"unrelated-{index:03}.txt").write_bytes(b"")
+    _without_dir_fd(monkeypatch, dir_fd)
+    clock = _lane_clock(monkeypatch)
+    page = storage_lanes.directory_page
+
+    def charged_page(root, parts, cursor, limit, **options):
+        names, following, complete = page(root, parts, cursor, limit, **options)
+        if Path(root) == store.root:
+            clock.now += 0.001 * max(1, following.get("last_scanned", len(names)))  # 1 ms per entry read.
+        return names, following, complete
+
+    monkeypatch.setattr(storage_lanes, "directory_page", charged_page)
+    now = time.time()
+    cursor, previous, reap_slices, result = None, None, 0, {}
+    for _ in range(60):
+        result = _maintain(home, now, cursor=cursor)
+        assert not result["errors"], result
+        cursor = result["cursor"]
+        if result["complete"]:
+            break
+        if cursor["phase"] == "reap_hosts":
+            # Every slice inspects at least one entry and moves the scan position forward.
+            assert result["items"] >= 1 and cursor.get("reap_directory") != previous
+            previous = cursor.get("reap_directory")
+            reap_slices += 1
+    assert result["complete"] and reap_slices >= 5
+    for sid, before in rows.items():
+        lost = store.load(sid).record
+        assert (lost["status"], lost["reason"]) == ("exited", "lost")
+        assert lost["revision"] == before["revision"] + 1
+        assert not store.record_path(sid).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group observation")
+def test_damaged_archive_row_is_reported_and_kept_while_active_rows_settle(authority, group_leader, monkeypatch):
+    home, store, request = authority
+    sid = "bg-m26-active"
+    before = store.write(_managed_record(request, sid, group_leader(finished=True), group_leader(finished=True)))
+    history = store.root / "finished"
+    history.mkdir(mode=0o700)
+    damaged = history / "bg-m26-damaged.json"
+    damaged.write_text("{")
+    _lane_clock(monkeypatch)
+    now = time.time()
+    first = _maintain(home, now)
+    assert first["errors"] == [{"code": "process_session_scan_failed"}]
+    assert first["skipped"] == {"process_state_unknown": 1}
+    assert first["complete"] and first["cursor"]["next_prune_at"] == now + 3600
+    lost = store.load(sid).record
+    assert (lost["status"], lost["reason"], lost["exit_code"]) == ("exited", "lost", None)
+    assert lost["revision"] == before["revision"] + 1
+    assert damaged.read_text() == "{"
+    # The archive phase is retried at its next due time: the diagnostic repeats, the damaged row
+    # stays, and the expired valid archive row is pruned on its own evidence.
+    second = _maintain(home, now + 86401, cursor=first["cursor"])
+    assert second["errors"] == [{"code": "process_session_scan_failed"}]
+    assert second["complete"] and second["deleted_items"] == 1
+    assert not store.load(sid).record
+    assert damaged.read_text() == "{"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group observation")
+def test_legacy_reap_cursor_restarts_the_scan(authority, group_leader, monkeypatch):
+    home, store, request = authority
+    sid = "bg-m26-legacy"
+    store.write(_managed_record(request, sid, group_leader(finished=True), group_leader(finished=True)))
+    _lane_clock(monkeypatch)
+    now = time.time()
+    legacy = {"next_prune_at": now + 3600, "log_offset": 0, "phase": "reap_hosts", "reap_after": "bg-zzz.json"}
+    result = _maintain(home, now, cursor=legacy)
+    assert not result["errors"] and result["complete"]
+    assert "reap_after" not in result["cursor"] and "maintenance_input_unknown" not in result["skipped"]
+    assert store.load(sid).record["reason"] == "lost"
+
+
+@pytest.mark.parametrize("dir_fd", [True, False], ids=["dir_fd", "no_dir_fd"])
+def test_unreadable_reap_position_is_reported_and_later_phases_run(authority, monkeypatch, dir_fd):
+    home, store, request = authority
+    store.write(launch._reservation(request, "bg-m26-position"))
+    _without_dir_fd(monkeypatch, dir_fd)
+    _lane_clock(monkeypatch)
+    info = store.root.stat()
+    now = time.time()
+    # Invalid for both the native checkpoint (offset, pending) and the portable replay count (visited).
+    stale = {"directory_identity": [info.st_dev, info.st_ino], "offset": -1, "pending": "not base64",
+             "visited": -1}
+    cursor = {"next_prune_at": now + 3600, "log_offset": 0, "phase": "reap_hosts", "reap_directory": stale}
+    result = _maintain(home, now, cursor=cursor)
+    assert result["errors"] == [{"code": "process_session_scan_failed"}]
+    assert result["complete"] and "reap_directory" not in result["cursor"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process identity observation")

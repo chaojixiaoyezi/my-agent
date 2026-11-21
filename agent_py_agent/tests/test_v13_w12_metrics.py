@@ -354,6 +354,17 @@ def _append_usage(case, thread_id, task_id, event_id, input_tokens, age=-60):
                     'input_tokens': input_tokens, 'input_tokens_reported_call_count': 1}}}}}})
 
 
+# LLM: 追加返回时来源投影可能仍在复用池上排空，覆盖由原维护入口分片补全；读前先等本进程排空者退役，
+#   再按维护入口推进到完整，用例的 FD、读取计量和断言只覆盖请求本身。
+# 函数用途: 把刚追加的用量来源结清到完整覆盖。
+def _settle_usage(store):
+    assert store.model_usage.wait_window_sources(5)
+    for _ in range(64):
+        if store.model_usage.prepare_window_sources(limit=128)['coverage'] == 'complete':
+            return
+    pytest.fail('usage source coverage did not settle')
+
+
 # LLM: 默认 reader 必须配套生产观察服务以核验聚合范围证明；不伪造事件时间、reader 返回或冻结 usage.get。
 # 函数用途: 建立可查询真实用量的 owner 原生宿主。
 @pytest.fixture
@@ -402,6 +413,7 @@ def usage_case(metrics_case, monkeypatch):
     _append_usage(case, 'agent-other', case.task_ids['agent-other'], 'event-other', 900)
     _append_usage(case, 'agent-a', case.task_ids['agent-a'], 'old-event', 5000, -100000)
     _append_usage(case, 'agent-a', case.task_ids['agent-a'], 'future-event', 7000, 0)
+    _settle_usage(store)
     runtime = RuntimeRepository(case.home / 'usage-runtime.db')
     previous_metrics = concurrency_metrics._METRICS
     monkeypatch.setattr(concurrency_metrics, '_METRICS', None)

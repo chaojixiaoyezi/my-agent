@@ -70,6 +70,8 @@ def test_usage_append_cost_is_independent_of_history(tmp_path, monkeypatch, hist
     before = len(os.listdir("/dev/fd")) if os.path.isdir("/dev/fd") else None
     first = append(_request(thread, "new", scope="same-scope"))
     assert append(_request(thread, "new", scope="same-scope")) == first
+    # 来源投影在复用池上排空：等本进程排空者退役后再计 FD，其解析仍记入本次追加。
+    assert store.model_usage.wait_window_sources(5)
     if before is not None:
         assert len(os.listdir("/dev/fd")) == before
     assert counts["json"] <= 40, counts
@@ -242,6 +244,7 @@ def test_usage_hot_loop_io_and_fd_stay_flat(tmp_path, monkeypatch, history):
         size = path.stat().st_size
         event = store.model_usage.append_snapshot_once(request)
         assert store.model_usage.append_snapshot_once(request) == event
+        assert store.model_usage.wait_window_sources(5)
         assert path.stat().st_size - size < 16384
         assert counts["read_bytes"] < 16384 and counts["json_loads"] < 40, counts
         append_counts = dict(counts)

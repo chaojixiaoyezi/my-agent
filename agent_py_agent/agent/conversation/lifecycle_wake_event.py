@@ -114,7 +114,7 @@ def _input_resolution_facts(reason, signal, metadata):
 
 
 def protected_resource_check(params, *, credential_ref, generation, method, http_status):
-    """从已认证的实际业务响应与宿主回合身份构造审计事实。"""
+    """从已认证的实际业务响应与宿主回合身份构造审计事实；调用方另须确认原目标资源及其访问保护证据才可附上。"""
     trigger = getattr(params, 'turn_trigger', None)
     if (not isinstance(trigger, TurnTrigger) or trigger.kind != TURN_TRIGGER_LIFECYCLE_WAKE
             or trigger.reason != 'task_input_resolved' or not trigger.credential_ready):

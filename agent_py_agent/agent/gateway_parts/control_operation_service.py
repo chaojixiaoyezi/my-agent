@@ -20,11 +20,13 @@ import stat
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+from ..common import nofollow_fs
+from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath, unlink_file_beneath
 from ..common.strict_json import load_strict_json
 from ..concurrency.lock_order import LockLevel
 from ..conversation.control_commands import (
@@ -77,6 +79,8 @@ _CONTROL_GENERATION_FILENAME = re.compile(r"[0-9a-f]{64}\.json")
 # 各根只保留一个续扫句柄，上限防止长期开启的维护进程累计句柄。
 _CONTROL_RETENTION_MAX_CURSORS = 32
 _CONTROL_RETENTION_SCANS = OrderedDict()
+# 各根一份代次引用续扫视图，与回执续扫句柄共用上限与锁。
+_CONTROL_REFERENCE_VIEWS = OrderedDict()
 _CONTROL_RETENTION_SCAN_LOCK = threading.Lock()
 _CONTROL_RESULT_PROJECTION_FIELDS = {
     "kind",
@@ -314,8 +318,38 @@ def try_gateway_control_operation_transition(paths: GatewayPaths, operation_id: 
     return try_gateway_turn_transition(paths, f"control-operation:{normalized}")
 
 
-def _control_generation_refs(root, *, deadline, max_entries):
-    from .multiprocess_bootstrap_publish import WorkerRegistryError, read_worker_registry
+# LLM: 视图身份只取原来源权威：代次目录身份/大小/时间戳、当前登记规范摘要与本进程服务代；任一变化使完整引用证明失效。
+# 函数用途: 读取当前引用来源身份及登记，登记不可读时抛原WorkerRegistryError。
+def _control_reference_identity(root, lease):
+    from .multiprocess_bootstrap_publish import read_worker_registry
+    from .multiprocess_generation_metadata import require_generation_source
+    from .multiprocess_records import serialize_record
+
+    registry = read_worker_registry(root)
+    serving = ""
+    if registry is not None and lease is not None and registry["c_run_id"] == lease.c_run_id:
+        # 当前登记即本进程服务代：只认原lease/PID/出生一致的原C，其未封口v2才是正常服务记录。
+        require_generation_source(root, registry, lease)
+        serving = registry["c_run_id"]
+    try:
+        descriptor = open_directory_beneath(root, ("workers", "generations"), require_dir_fd=True)
+    except FileNotFoundError:
+        stamp = None
+    else:
+        try:
+            info = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        stamp = info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+    digest = None if registry is None else hashlib.sha256(serialize_record(registry)).hexdigest()
+    return (stamp, digest, serving), registry
+
+
+# LLM: 代次引用跨片续扫：同一来源身份下保存目录续点、未处理名和已收集引用，全部页覆盖后才发布完整视图；
+#   身份变化即丢弃重扫；坏记录或非本服务代的未封口v2使引用不明，缓存为None直到来源变化，全部回执保留。
+# 函数用途: 返回(完整引用集或None, 来源身份, 本片消耗条目, 是否预算耗尽)。
+def _control_generation_refs(root, lease, *, deadline, max_entries):
+    from ..user_space.directory_paging import directory_page
     from .multiprocess_generation_metadata import (
         _GENERATION_METADATA_MAX_BYTES,
         generation_metadata_parts,
@@ -323,57 +357,149 @@ def _control_generation_refs(root, *, deadline, max_entries):
     )
     from .multiprocess_records import deserialize_record
 
-    # 当前登记的无路由回执也可能出现在原 drain 快照，整个目录须留给该代。
     try:
-        registry = read_worker_registry(root)
-    except WorkerRegistryError:
-        return None, False
-    if registry is not None:
-        metadata = read_generation_metadata(root, registry["c_run_id"])
-        closure = metadata[0].get("closure") if metadata is not None else None
-        if closure is None or closure["registry"] != registry:
-            return None, False
-    directory = ('workers', 'generations')
+        identity, registry = _control_reference_identity(root, lease)
+    except ValueError:
+        return None, None, 0, False
+    with _CONTROL_RETENTION_SCAN_LOCK:
+        view = _CONTROL_REFERENCE_VIEWS.pop(root, None)
+    if view is None or view["identity"] != identity:
+        view = dict(identity=identity, cursor={}, pending=[], refs=set(), complete=identity[0] is None)
+        if registry is not None and not identity[2]:
+            # 当前登记的无路由回执也可能出现在原 drain 快照；非本服务代须已封口且闭包登记一致。
+            try:
+                metadata = read_generation_metadata(root, registry["c_run_id"])
+            except (OSError, ValueError):
+                metadata = None
+            closure = metadata[0].get("closure") if metadata is not None else None
+            if closure is None or closure["registry"] != registry:
+                view["refs"] = None
+    used, directory = 0, ("workers", "generations")
     try:
-        descriptor = open_directory_beneath(root, directory, require_dir_fd=True)
-    except FileNotFoundError:
-        return set(), False
-    refs = set()
-    try:
-        with os.scandir(descriptor) as entries:
-            for index, entry in enumerate(entries):
-                if index >= max_entries or time.monotonic() >= deadline:
-                    return None, True
-                if not _CONTROL_GENERATION_FILENAME.fullmatch(entry.name):
-                    continue
-                raw = read_bytes_beneath(root, (*directory, entry.name), max_bytes=_GENERATION_METADATA_MAX_BYTES,
-                                         require_dir_fd=True)
-                value = deserialize_record(raw)
-                if (value['schema_version'] not in {'multiprocess_c_generation.v1', 'multiprocess_c_generation.v2'}
-                        or generation_metadata_parts(value['c_run_id'])[-1] != entry.name):
-                    return None, False
-                closure = value.get('closure')
-                if value['schema_version'] == 'multiprocess_c_generation.v2' and closure is None:
-                    return None, False
-                if closure is not None:
-                    refs.update(name.removeprefix('control_operations/') for name in closure['source_files']
-                                if name.startswith('control_operations/'))
-        return refs, False
+        while view["refs"] is not None and (view["pending"] or not view["complete"]):
+            if used >= max_entries or time.monotonic() >= deadline:
+                return None, identity, used, True
+            if not view["pending"]:
+                view["pending"], view["cursor"], view["complete"] = directory_page(
+                    root, directory, view["cursor"], max_entries - used, require_dir_fd=True)
+                continue
+            name = view["pending"].pop()
+            used += 1
+            if not _CONTROL_GENERATION_FILENAME.fullmatch(name):
+                continue
+            try:
+                value = deserialize_record(read_bytes_beneath(
+                    root, (*directory, name), max_bytes=_GENERATION_METADATA_MAX_BYTES, require_dir_fd=True))
+                closure = value.get("closure")
+                if (value["schema_version"] not in {"multiprocess_c_generation.v1", "multiprocess_c_generation.v2"}
+                        or generation_metadata_parts(value["c_run_id"])[-1] != name
+                        or (value["schema_version"] == "multiprocess_c_generation.v2" and closure is None
+                            and value["c_run_id"] != identity[2])):
+                    view["refs"] = None
+                elif closure is not None:
+                    view["refs"].update(source.removeprefix("control_operations/") for source in closure["source_files"]
+                                        if source.startswith("control_operations/"))
+            except (OSError, ValueError, TypeError, KeyError):
+                view["refs"] = None
+        return (None if view["refs"] is None else frozenset(view["refs"])), identity, used, False
     finally:
-        os.close(descriptor)
+        with _CONTROL_RETENTION_SCAN_LOCK:
+            _CONTROL_REFERENCE_VIEWS[root] = view
+            while len(_CONTROL_REFERENCE_VIEWS) > _CONTROL_RETENTION_MAX_CURSORS:
+                _CONTROL_REFERENCE_VIEWS.popitem(last=False)
+
+
+# LLM: 多进程登记/代次记录只有dir_fd原读者；无该能力的宿主不能按原规范核验，存在即全部保留，不放宽多进程读取。
+# 函数用途: 无dir_fd宿主仅在没有多进程引用来源时返回空引用集，否则None。
+def _portable_generation_refs(root):
+    for parts in (("workers", "registry.json"), ("workers", "generations")):
+        try:
+            nofollow_fs._portable_path(root, parts, create=False).lstat()
+        except FileNotFoundError:
+            continue
+        return None
+    return frozenset()
+
+
+# LLM: 只认本进程已有生命周期权威：服务期原C lease（drain准入/登记发布/封存共用其原门）、Count0原生命周期锁，
+#   或无人持有时本片非阻塞取得的coordinator.lock；最终删除前在同一权威内复核引用来源身份。
+# 类用途: 保存本片退役权威与完整引用视图身份，不签发业务或多进程执行权。
+class _ControlRetentionFence:
+    # 函数用途: 记录根、目录能力分支与所用权威。
+    def __init__(self, root, *, native, lease=None, lifecycle=None):
+        self.root, self.native, self.lease, self.lifecycle = root, native, lease, lifecycle
+        self.identity = None
+
+    # 函数用途: 复核完整引用视图仍对应当前来源身份；无dir_fd宿主复核多进程来源仍不存在。
+    def _references_current(self):
+        try:
+            if not self.native:
+                return _portable_generation_refs(self.root) is not None
+            return _control_reference_identity(self.root, self.lease)[0] == self.identity
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+
+    # 函数用途: 在原权威内放行一次最终删除；服务期C用非阻塞原生命周期门，Count0复核原锁仍由本进程持有。
+    @contextmanager
+    def final(self):
+        from .multiprocess_coordinator import coordinator_serving_window
+
+        if self.lease is not None:
+            with coordinator_serving_window(self.lease) as serving:
+                yield serving and self._references_current()
+            return
+        if self.lifecycle is not None:
+            try:
+                self.lifecycle.require_held()
+            except (RuntimeError, OSError):
+                yield False
+                return
+        yield self._references_current()
+
+
+# LLM: 进程内原C lease存在但未绑代（启动/接手取证）、closing或已drain准入时不退役；Count0原锁身份失效同样保留。
+# 函数用途: 产出本片退役权威，None表示本片不得删除任何回执。
+@contextmanager
+def _control_retention_fence(root, *, native):
+    from .multiprocess_coordinator import coordinator_role_present, serving_coordinator
+    from .standalone_lifecycle import _HELD
+
+    if coordinator_role_present(root):
+        lease = serving_coordinator(root)
+        yield None if lease is None else _ControlRetentionFence(root, native=native, lease=lease)
+        return
+    target = Path(os.path.abspath(root)) / "coordinator.lock"
+    lifecycle = next((held for held in tuple(_HELD) if held.path == target), None)
+    if lifecycle is not None:
+        try:
+            lifecycle.require_held()
+        except (RuntimeError, OSError):
+            yield None
+            return
+        yield _ControlRetentionFence(root, native=native, lifecycle=lifecycle)
+        return
+    # 复用原 C 生命周期的 coordinator.lock：无人持有时本片独占，避免与启动或 drain 取证交错。
+    with try_locked_file_transition(root / "coordinator", category=LockLevel.CG) as stable:
+        yield _ControlRetentionFence(root, native=native) if stable else None
 
 
 def _control_retention_raw(root, name):
-    return read_bytes_beneath(root, ('control_operations', name), max_bytes=GATEWAY_STATE_MAX_BYTES, require_dir_fd=True)
+    return read_bytes_beneath(root, ('control_operations', name), max_bytes=GATEWAY_STATE_MAX_BYTES)
 
 
-def _retire_control_receipt(paths, directory_fd, entry, *, cutoff, refs, deadline, result):
+def _control_receipt_stat(directory, name):
+    if type(directory) is int:
+        return os.stat(name, dir_fd=directory, follow_symlinks=False)
+    return os.lstat(directory / name)
+
+
+def _retire_control_receipt(paths, directory, directory_info, entry, *, cutoff, refs, deadline, result, fence):
     name = entry.name
     operation_id = name.removesuffix('.json')
     result["examined"] += 1
     try:
-        # 游标跨分片保留，元数据必须通过本片重新核验的目录句柄读取。
-        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        # 游标跨分片保留，元数据必须通过本片重新核验的目录句柄或路径链读取。
+        info = _control_receipt_stat(directory, name)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             return
         raw = _control_retention_raw(paths.root, name)
@@ -400,27 +526,36 @@ def _retire_control_receipt(paths, directory_fd, entry, *, cutoff, refs, deadlin
             with try_locked_file_transition(path, category=LockLevel.JSON_PATH) as locked:
                 if not locked or _control_retention_raw(paths.root, name) != raw:
                     return
-                latest = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                latest = _control_receipt_stat(directory, name)
+                parent = (path.parent.lstat() if fence.native
+                          else nofollow_fs._portable_directory(paths.root, ("control_operations",), create=False).lstat())
                 if (not os.path.samestat(info, latest) or latest.st_nlink != 1
-                        or not os.path.samestat(os.fstat(directory_fd), path.parent.lstat())
+                        or not os.path.samestat(directory_info, parent)
                         or time.monotonic() >= deadline):
                     return
-                os.unlink(name, dir_fd=directory_fd)
+                # drain准入、登记发布、封存或新引用发布后，原权威内复核失败即保留原件。
+                with fence.final() as allowed:
+                    if not allowed:
+                        return
+                    if fence.native:
+                        os.unlink(name, dir_fd=directory)
+                    else:
+                        unlink_file_beneath(paths.root, ("control_operations", name))
                 result["removed"] += 1
     except (OSError, ValueError, DataCorruptionError, TypeError, KeyError):
         return
 
 
-def _scan_control_receipts(paths, descriptor, *, cutoff, refs, max_entries, deadline, result):
+def _scan_control_receipts(paths, directory, *, cutoff, refs, max_entries, deadline, result, fence):
     key = paths.root
-    info = os.fstat(descriptor)
+    info = os.fstat(directory) if fence.native else directory.lstat()
     identity = info.st_dev, info.st_ino
     with _CONTROL_RETENTION_SCAN_LOCK:
         cached = _CONTROL_RETENTION_SCANS.pop(key, None)
     if cached is not None and cached[0] != identity:
         cached[1].close()
         cached = None
-    entries = cached[1] if cached is not None else os.scandir(descriptor)
+    entries = cached[1] if cached is not None else os.scandir(directory)
     try:
         for _ in range(max_entries):
             if time.monotonic() >= deadline:
@@ -429,7 +564,8 @@ def _scan_control_receipts(paths, descriptor, *, cutoff, refs, max_entries, dead
             if entry is None:
                 return
             if entry.name.endswith(".json") and _CONTROL_OPERATION_ID.fullmatch(entry.name[:-5]):
-                _retire_control_receipt(paths, descriptor, entry, cutoff=cutoff, refs=refs, deadline=deadline, result=result)
+                _retire_control_receipt(paths, directory, info, entry, cutoff=cutoff, refs=refs,
+                                        deadline=deadline, result=result, fence=fence)
         result["budget_exhausted"] = True
         with _CONTROL_RETENTION_SCAN_LOCK:
             _CONTROL_RETENTION_SCANS[key] = (identity, entries)
@@ -452,25 +588,32 @@ def prune_terminal_control_operations(
         result["budget_exhausted"] = True
         return result
     deadline = time.monotonic() + max_ms / 1000
+    # 缺少 dir_fd/no-follow 目录能力的宿主（如 Windows）走已校验路径链的可移植分支，其余保持原描述符链。
+    native = nofollow_fs._supports_dir_fd() and bool(getattr(os, "O_NOFOLLOW", 0) and getattr(os, "O_DIRECTORY", 0))
     try:
-        descriptor = open_directory_beneath(paths.root, ("control_operations",), require_dir_fd=True)
+        directory = (open_directory_beneath(paths.root, ("control_operations",), require_dir_fd=True) if native
+                     else nofollow_fs._portable_directory(paths.root, ("control_operations",), create=False))
     except OSError:
         return result
     try:
-        # 复用原 C 生命周期的 coordinator.lock，避免清理与启动或 drain 取证交错。
-        with try_locked_file_transition(paths.root / "coordinator", category=LockLevel.CG) as stable:
-            if not stable:
+        with _control_retention_fence(paths.root, native=native) as fence:
+            if fence is None:
                 return result
-            refs, exhausted = _control_generation_refs(paths.root, max_entries=max_entries, deadline=deadline)
-            if exhausted:
+            if native:
+                refs, fence.identity, used, exhausted = _control_generation_refs(
+                    paths.root, fence.lease, max_entries=max_entries, deadline=deadline)
+            else:
+                refs, used, exhausted = _portable_generation_refs(paths.root), 0, False
+            if exhausted or used >= max_entries:
                 result["budget_exhausted"] = True
                 return result
-            _scan_control_receipts(paths, descriptor, cutoff=now - retention_days * 86400,
-                                   refs=refs, max_entries=max_entries, deadline=deadline, result=result)
+            _scan_control_receipts(paths, directory, cutoff=now - retention_days * 86400, refs=refs,
+                                   max_entries=max_entries - used, deadline=deadline, result=result, fence=fence)
     except (OSError, ValueError, TypeError, KeyError):
         pass  # 原代次来源无法核验时结束本片，保留未消费回执。
     finally:
-        os.close(descriptor)
+        if native:
+            os.close(directory)
     return result
 
 

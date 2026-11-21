@@ -468,6 +468,9 @@ def test_writer_past_thread_precheck_cannot_recreate_retired_ledger(tmp_path, mo
             return writer.append({"thread_id": thread, "_observation_id": f"queued-{number}", "now": OLD})
 
     append(0)
+    if kind == "usage":
+        # 规划前等首条用量的后台来源投影退役，退休只与排队写者竞争。
+        assert writer.wait_window_sources(5)
     for name in ("channel_bindings.json", "user_latest_threads.json"):
         index = store.storage.root / name
         values = json.loads(index.read_text())

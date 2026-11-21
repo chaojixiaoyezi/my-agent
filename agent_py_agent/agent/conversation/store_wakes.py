@@ -380,6 +380,7 @@ class WakeStore:
         if signal.dedupe_key:
             return publish_deduped(
                 self.storage, signal, retain_handled=request.get("retain_handled", False), blocking=blocking,
+                supersedes=str(request.get("supersedes") or ""),
             )[1]
         return self._publish_unkeyed(signal, blocking=blocking)
 

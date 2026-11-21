@@ -481,7 +481,8 @@ def _install(storage: ConversationStorage, path: Path, record: dict[str, Any], *
 # LLM: 非阻塞只透传同一原锁；prepared/installed/published顺序不变，paired半提交保原账而非假原子成功。
 # 函数用途: C可立即拒绝发布锁忙，后续仍重放原同键内容。
 def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observation: ObservationEvent | None = None,
-                     retain_handled: bool = False, blocking: bool = True) -> tuple[ObservationEvent | None, WakeSignal]:
+                     retain_handled: bool = False, blocking: bool = True,
+                     supersedes: str = "") -> tuple[ObservationEvent | None, WakeSignal]:
     if type(retain_handled) is not bool:
         raise ValueError("wake retain_handled must be boolean")
     path = storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key)
@@ -500,8 +501,11 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
             existing = _installed_signal(storage, frozen)
             if existing is None:
                 raise DataCorruptionError("published wake signal is missing")
+            # 调用方显式接替准确的 pending 前驱（其工作已结算、只待原处理者确认）时发布新一代；前驱信号留给原处理者确认。
+            superseded = (bool(supersedes) and not retain_handled and existing.status == "pending"
+                          and existing.wake_signal_id == supersedes)
             # 已结案的同一事件不能靠再次发布自己复活，只能人工重放。
-            if existing.status in {"pending", WAKE_STATUS_FAILED_PERMANENTLY} or retain_handled:
+            if not superseded and (existing.status in {"pending", WAKE_STATUS_FAILED_PERMANENTLY} or retain_handled):
                 if existing.status == "pending":
                     register_task_locator(storage, existing, blocking=blocking)
                 return previous_observation, existing
