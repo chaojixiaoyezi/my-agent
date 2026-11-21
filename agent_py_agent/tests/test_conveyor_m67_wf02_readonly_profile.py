@@ -196,3 +196,28 @@ def test_profile_binding_refuses_an_unrelated_turn(flow):
     wrong_turn = replace(flow.params, run_id="another-turn", task_id="another-task")
     with pytest.raises(PermissionError, match="WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH"):
         _run_background_model_attempt(flow.host, "核验", wrong_turn)
+
+
+def test_resumed_profile_settles_selected_subscription_refusal(flow, monkeypatch):
+    from agent_py_agent.agent.agent_core.tool_model_generation import _generate_with_request_options
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
+
+    backend = OpenAIResponsesBackend(BackendOptions("https://example.test/v1", "", "model", stream_enabled=False))
+    backend.auth_ref = {"mode": "chatgpt"}
+    monkeypatch.setattr(backend, "request_json", lambda *args, **kwargs: pytest.fail("unexpected provider send"))
+
+    def run(prompt, *, params):
+        state = SimpleNamespace(agent=flow.host, params=params, tools=None, messages=None, on_chunk=None,
+                                first_token_timeout_seconds=3.0, token_budget=None)
+        return _generate_with_request_options(backend, prompt, state)
+
+    flow.host.run = run
+    flow.tasks.bind_turn(flow.task.task_id, turn_id=flow.task.task_id)
+    with pytest.raises(RuntimeError, match="MODEL_CAPABILITY_MISMATCH"):
+        _run_background_model_attempt(flow.host, "Inspect", flow.params)
+    task = flow.tasks.require(flow.task.task_id)
+    assert task.metadata[AGENT_TASK_PROFILE_KEY] == flow.task.metadata[AGENT_TASK_PROFILE_KEY]
+    receipt = flow.port.completion(flow.run, flow.run.steps[0])
+    assert receipt["status"] == "failed" and receipt["error_code"] == "MODEL_CAPABILITY_MISMATCH"
+    assert "Select a provider route" in receipt["error_message"]

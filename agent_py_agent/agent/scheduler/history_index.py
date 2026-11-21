@@ -15,6 +15,7 @@ from contextlib import closing
 from itertools import islice
 from pathlib import Path
 
+from ..common import nofollow_fs
 from ..common.json_io import (
     append_private_jsonl_records_unlocked,
     locked_json_path,
@@ -59,9 +60,33 @@ class _ProofReadBudget:
         return raw
 
 
+def _open_history_source(path):
+    if (nofollow_fs._supports_dir_fd() and getattr(os, "O_NOFOLLOW", 0)
+            and getattr(os, "O_DIRECTORY", 0)):
+        return open_readonly_file_beneath(path.parent, (path.name,))
+    parts = (path.name,)
+    target = nofollow_fs._portable_path(path.parent, parts, create=False)
+    parents = nofollow_fs._portable_snapshot_parents(path.parent, parts)
+    before, changed = nofollow_fs.file_identity_snapshot(target)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise nofollow_fs.NoFollowPathError("scheduler history must be a regular single-link file")
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(descriptor)
+        nofollow_fs._portable_snapshot_identity(
+            target, before, opened, changed, nofollow_fs.file_descriptor_change_ns(descriptor, opened))
+        if parents != nofollow_fs._portable_snapshot_parents(path.parent, parts):
+            raise nofollow_fs.NoFollowPathError("scheduler history parent changed during open")
+    except BaseException as error:
+        nofollow_fs._close_snapshot_fds([descriptor], error)
+        raise
+    return descriptor
+
+
 def _snapshot(path, *, prefix=None, read_budget=None):
     try:
-        descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+        descriptor = _open_history_source(path)
     except FileNotFoundError:
         return {"stamp": [], "head": "", "tail": ""}
     with os.fdopen(descriptor, "rb") as handle:
@@ -77,7 +102,7 @@ def _snapshot(path, *, prefix=None, read_budget=None):
         check = [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns]
         if stamp != check:
             raise BlockingIOError("history changed during snapshot")
-        current = path.stat(follow_symlinks=False)
+        current, _ = nofollow_fs.file_identity_snapshot(path)
         if current.st_ino != before.st_ino or current.st_dev != before.st_dev:
             raise BlockingIOError("history identity changed")
     return {"stamp": stamp, "head": hashlib.sha256(head).hexdigest(), "tail": hashlib.sha256(tail).hexdigest()}
@@ -86,7 +111,8 @@ def _snapshot(path, *, prefix=None, read_budget=None):
 def _verify_exact_source(path, handle, snapshot):
     expected = snapshot["stamp"]
     try:
-        observed = os.fstat(handle.fileno()), path.stat(follow_symlinks=False)
+        current, _ = nofollow_fs.file_identity_snapshot(path)
+        observed = os.fstat(handle.fileno()), current
     except OSError as exc:
         raise BlockingIOError(errno.EAGAIN, "scheduler history could not be verified after exact read") from exc
     for info in observed:
@@ -250,7 +276,7 @@ class SchedulerHistoryIndex:
             pending = bytes.fromhex(state.pop("pending", ""))
             skipping = state.pop("skipping", False)
             if state["cursor"] < size:
-                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                descriptor = _open_history_source(self.source)
                 with os.fdopen(descriptor, "rb") as handle:
                     handle.seek(state["cursor"])
                     while rows < max_rows and used < max_bytes:
@@ -332,7 +358,7 @@ class SchedulerHistoryIndex:
                                        "WHERE e.generation=? AND e.run_id=?", (state["generation"], run_id)).fetchone()
                     if row is None:
                         return [], sorted(set(errors))
-                    descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                    descriptor = _open_history_source(self.source)
                     with os.fdopen(descriptor, "rb") as handle:
                         raw = self._read_line(handle, row["position"], row["line_length"], size)
                         _verify_exact_source(self.source, handle, snapshot)
@@ -359,7 +385,7 @@ class SchedulerHistoryIndex:
                 candidates = list(islice(candidates, limit + 1))
                 if not candidates:
                     return [], sorted(set(errors))
-                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                descriptor = _open_history_source(self.source)
                 with os.fdopen(descriptor, "rb") as handle:
                     filtered = []
                     for row in candidates:
@@ -394,7 +420,7 @@ class SchedulerHistoryIndex:
                 generation = state["generation"]
                 size = snapshot["stamp"][2]
                 chunk_size = 500
-                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                descriptor = _open_history_source(self.source)
                 with os.fdopen(descriptor, "rb") as handle:
                     for offset in range(0, len(targets), chunk_size):
                         batch = targets[offset : offset + chunk_size]
@@ -429,7 +455,7 @@ class SchedulerHistoryIndex:
                     return {}
                 size = snapshot["stamp"][2]
                 terminals = {}
-                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                descriptor = _open_history_source(self.source)
                 with os.fdopen(descriptor, "rb") as handle:
                     for run_id in run_ids:
                         rows = conn.execute(
@@ -491,7 +517,7 @@ class SchedulerHistoryIndex:
                 # 留出第二次源快照的准确head/tail额度；不得读完行后才发现本片已超支。
                 if length > meter.remaining() - 2 * min(4096, size):
                     raise _ProofBudgetExceeded("剩余额度不足以同时重读原行及复核源快照；保留候选。")
-                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                descriptor = _open_history_source(self.source)
                 with os.fdopen(descriptor, "rb") as handle:
                     try:
                         payload = self._read_line(handle, position, length, size, meter=meter, require_newline=True)

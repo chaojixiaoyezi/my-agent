@@ -336,3 +336,16 @@ def test_scheduler_history_locators_match_physical_bytes_under_newline_translati
     found = existing_terminals(repo, [{**failed, "status": "running"}, {**later, "status": "running"}])
     assert found[failed["run_id"]]["status"] == "failed"
     assert found[later["run_id"]]["status"] == "skipped"
+
+
+def test_scheduler_history_reads_without_native_directory_handles(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
+
+    repo = _repository(tmp_path)
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
+    failed = _run(repo, 1, status="failed", trigger="manual")
+    repo._history_index.append([_run(repo, 0), failed])
+    rows, errors = repo.history(statuses=("failed",), trigger="manual", limit=5)
+    assert errors == []
+    assert [row["run_id"] for row in rows] == [failed["run_id"]]
+    assert repo._history_index.read(run_id=failed["run_id"])[0][0]["run_id"] == failed["run_id"]

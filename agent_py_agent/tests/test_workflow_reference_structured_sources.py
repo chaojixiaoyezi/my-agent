@@ -151,9 +151,10 @@ def test_paused_schedule_uses_canonical_workflow_target_not_prompt_or_script():
             )
         )
     )
-    blockers = []
-    assert reader._check_scheduler("target", blockers)
+    blockers, generations = [], {}
+    assert reader._check_scheduler("target", blockers, generations)
     assert [row["ref"] for row in blockers] == ["paused"]
+    assert generations == {}
 
 
 def test_subscription_policy_is_exact_and_paused_reference_remains_live():
@@ -172,9 +173,10 @@ def test_subscription_policy_is_exact_and_paused_reference_remains_live():
             },
         },
     }
-    blockers = []
-    assert WorkflowReferenceReader(space_store=catalog)._check_spaces("target", blockers)
+    blockers, generations = [], {}
+    assert WorkflowReferenceReader(space_store=catalog)._check_spaces("target", blockers, generations)
     assert {row["ref"] for row in blockers} == {"active", "paused"}
+    assert generations == {}
 
 
 def _derived(name, source):

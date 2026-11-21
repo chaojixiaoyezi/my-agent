@@ -14,8 +14,13 @@ import unicodedata
 import uuid
 from pathlib import Path
 
+from ..common.cache_freshness import cache_stat_signature
 from ..common.directory_lock import locked_private_directory
-from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
+from ..common.nofollow_fs import (
+    inspect_file_snapshot_beneath,
+    read_bytes_beneath,
+    write_bytes_atomic_beneath,
+)
 from ..plugin_host.business_action_specs import (
     BUSINESS_LIST_DEFAULT_ROWS,
     BUSINESS_LIST_MAX_ROWS,
@@ -95,11 +100,12 @@ class BusinessSpaceService:
 
     # LLM: 同一 journal 前后采样，目录、revision 与回执提交保持单笔逻辑视图；不执行恢复写。
     # 函数用途: 读取有界目录快照或已提交日志的覆盖状态。
-    def _read(self):
+    def _read(self, *, allow_legacy_references=False):
         rows = ReceiptRows(self)
         for _attempt in range(3):
             before = rows.pending()
-            state = self._read_snapshot(allow_missing=True)
+            options = {"allow_legacy_references": True} if allow_legacy_references else {}
+            state = self._read_snapshot(allow_missing=True, **options)
             after = rows.pending()
             if before == after:
                 if after is not None:
@@ -109,9 +115,20 @@ class BusinessSpaceService:
                 return state
         raise BusinessError('HOST_NOT_READY')
 
+    def reference_source_identity(self):
+        """Identify the catalog and its commit journal without reading either body."""
+        def identity(parts):
+            try:
+                item = inspect_file_snapshot_beneath(self.owner_root, parts)
+            except FileNotFoundError:
+                return None
+            return None if item is None else (cache_stat_signature(item.stat), item.parents, item.changed_ns)
+
+        return identity(self.state_parts), identity(ReceiptRows(self).journal)
+
     # LLM: 缺失快照但有永久行时必须拒绝；采样读者仅由同笔有效journal覆盖这种缺失。
     # 函数用途: 读取有界目录，区分首次初始化与canonical损坏。
-    def _read_snapshot(self, *, allow_missing=False):
+    def _read_snapshot(self, *, allow_missing=False, allow_legacy_references=False):
         raw = read_bytes_beneath(self.owner_root, self.state_parts)
         if raw is None:
             if not allow_missing and ReceiptRows(self).has_history():
@@ -123,6 +140,10 @@ class BusinessSpaceService:
             value = json.loads(raw)
         except (ValueError, UnicodeError) as error:
             raise BusinessError('STORE_UNAVAILABLE') from error
+        if (allow_legacy_references and type(value) is dict and "spaces" in value
+                and set(value) <= {"spaces", "bindings", "subscriptions"}):
+            # A schema-less reference catalog is read-only and checked by the reference projection.
+            return value
         return self._validate_catalog(value)
 
     # LLM: 原实体约束保持不变；同一校验也用于 journal 覆盖，坏源不能变成空成功。
