@@ -5,7 +5,14 @@ from __future__ import annotations
 from .anthropic import AnthropicCompatibleBackend
 from .base import BackendOptions
 from .gateway_helpers import GatewayRequest
-from .http import StreamCall, StreamCallOptions, stream_call_deadline, stream_call_parts
+from .gateway_request_limits import remaining_deadline_seconds
+from .http import (
+    StreamCall,
+    StreamCallOptions,
+    stream_call_deadline,
+    stream_call_parts,
+    stream_call_timeout,
+)
 from .openai_chat import OpenAICompatibleBackend
 from .provider_headers import endpoint_parts, request_headers
 from .responses import OpenAIResponsesBackend
@@ -38,8 +45,13 @@ class _OAuthMixin:
     @property
     def api_key(self):
         from ..settings.model_oauth import request_credentials
+        from .request_scope import provider_request_deadline
 
-        return request_credentials(self.auth_ref, self.api_base)[0]
+        deadline = provider_request_deadline()
+        remaining_deadline_seconds(deadline)
+        key, _headers = request_credentials(self.auth_ref, self.api_base)
+        remaining_deadline_seconds(deadline)
+        return key
 
     # LLM: 原后端初始化会赋 api_key；OAuth 不保存该占位值，唯一秘密源仍是 owner provider。
     # 函数用途: 保持原构造协议但拒绝混入 API Key。
@@ -56,19 +68,20 @@ class _OAuthMixin:
     # 函数用途: 用原传输信封携带账号与物理并发限制，不增加自动重试或新后台线程。
     def _gateway_request(self, call, payload=None, headers=None, *, options=None):
         from ..settings.model_oauth import request_credentials
-        from .request_scope import provider_request_timeout
 
         path, payload, headers = stream_call_parts(call, payload, headers)
         options = options or StreamCallOptions()
+        deadline = stream_call_deadline(options)
+        remaining_deadline_seconds(deadline)
         key, account_headers = request_credentials(self.auth_ref, self.api_base)
         clean = {name: value for name, value in headers.items() if name.lower() not in {"authorization", "x-api-key", "chatgpt-account-id"}}
         clean.update(Authorization="Bearer " + key, **account_headers)
         base, suffix = endpoint_parts(self.api_base, path)
         request = GatewayRequest(api_base=base, path=suffix, api_key=key, payload=payload,
             headers=request_headers(clean, self.custom_headers, self.session_header),
-            timeout=provider_request_timeout(self.request_timeout),
+            timeout=stream_call_timeout(self.request_timeout, deadline),
             connect_timeout=self.connect_timeout, first_event_timeout=options.first_event_timeout_seconds,
-            deadline=stream_call_deadline(options), allow_redirects=False,
+            deadline=deadline, allow_redirects=False,
             provider_max_concurrent_requests=self.provider_max_concurrent_requests)
         if isinstance(self, OpenAIResponsesBackend) and self.auth_ref["mode"] != "chatgpt":
             return self._prepare_http_responses_request(request)

@@ -456,8 +456,11 @@ def _remember_write_result(action: str, promotion_results: list[dict[str, object
     required_repairs = _remember_required_repairs(promotion_results)
     copy_commands = _remember_copy_commands(promotion_results)
     hint = _remember_result_hint(action, active_changed, required_repairs, promotion_results)
-    if any(item.get("project_binding_status") == "pending" for item in promotion_results):
+    pending_bindings = [item for item in promotion_results if item.get("project_binding_status") == "pending"]
+    if any(item.get("promoted") is True for item in pending_bindings):
         hint += " 有工作区绑定待补写。可重试对应的记忆操作；已提交的正式记忆会去重。"
+    if any(item.get("promoted") is not True for item in pending_bindings):
+        hint += " 工作区绑定暂时无法核验，对应正式记忆尚未写入。退避结束后可用原参数重试。"
     body: dict[str, object] = {
         "ok": True,
         "saved": _remember_saved(promotion_results),

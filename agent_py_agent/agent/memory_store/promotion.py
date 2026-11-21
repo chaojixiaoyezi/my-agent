@@ -1688,7 +1688,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
             return early_result
         if (automatic and candidate.commit_obligation and candidate.obligation_retry_after
                 and datetime.fromisoformat(candidate.obligation_retry_after) > datetime.now(timezone.utc)):
-            return MemoryPromotionResult(candidate_id, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF")
+            return MemoryPromotionResult(candidate_id, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF",
+                project_binding_status=_deferred_project_binding_status(candidate.obligation_blocked_reason))
         evidence_code = self._verify_evidence(candidate)
         if evidence_code:
             return self._block_missing_evidence(candidate, reviewer, evidence_code)
@@ -1858,7 +1859,8 @@ def _prepare_promotion_batch(service, rows, reviewer, automatic):
             continue
         if (automatic and candidate.commit_obligation and candidate.obligation_retry_after
                 and datetime.fromisoformat(candidate.obligation_retry_after) > datetime.now(timezone.utc)):
-            results[cid] = MemoryPromotionResult(cid, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF")
+            results[cid] = MemoryPromotionResult(cid, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF",
+                project_binding_status=_deferred_project_binding_status(candidate.obligation_blocked_reason))
             continue
         code = service._verify_evidence(candidate)
         if code:
@@ -1982,7 +1984,8 @@ def _finish_promotion_batch(service, prepared, outcomes, deferred, results, revi
             results[cid] = service._finalize_promotion(updated, reviewer, outcome)
         else:
             results[cid] = MemoryPromotionResult(cid, False, updated.status, deferred[cid],
-                outcome.reference if outcome else "", formal_memory_changed=bool(outcome and outcome.changed))
+                outcome.reference if outcome else "", formal_memory_changed=bool(outcome and outcome.changed),
+                project_binding_status=_deferred_project_binding_status(deferred[cid]))
 
 
 # LLM: owner_home由真实Persona仓库注入，只读原宿主治理；原AGENTS/来源/权威/精确目标门不放宽。
@@ -2190,11 +2193,13 @@ def _long_term_commit_attributes(service, candidate):
     basis = {}
     for workspace in _project_binding_workspaces(candidate):
         try:
-            basis[workspace.workspace_ref] = project_bindings.generation(service.persona.owner_home, workspace.root)
-        except (OSError, UnicodeError, ValueError) as exc:
-            # An unreadable registry can only be repaired if the root still has no binding.
-            basis[workspace.workspace_ref] = ""
+            basis[workspace.workspace_ref] = project_bindings.capture_generation(
+                service.persona.owner_home, workspace.root,
+            )
+        except (OSError, ValueError) as exc:
             _warn_project_binding(exc, "basis")
+            # Keep the original candidate retryable until its predecessor can be established.
+            raise _PromotionBlocked(candidate.status, project_bindings.PROJECT_BINDINGS_UNREADABLE) from exc
     if basis:
         # The formal commit is the durable proof. Workspace paths remain in candidate evidence.
         attributes[_PROJECT_BINDING_BASIS] = basis
@@ -2231,6 +2236,10 @@ def _warn_project_binding(error, phase):
         "PROJECT_BINDING_IO_FAILED phase=%s error_type=%s next_action=retry_promotion",
         phase, type(error).__name__,
     )
+
+
+def _deferred_project_binding_status(reason: str) -> str:
+    return "pending" if reason == project_bindings.PROJECT_BINDINGS_UNREADABLE else ""
 
 
 def _long_term_commit(service, candidate, record, *, changed):
@@ -2430,7 +2439,8 @@ def _defer_promotion_failure(service, candidate, reason):
             return changed
         service.candidates.defer_commit(current, reason)
         return changed
-    return MemoryPromotionResult(candidate.candidate_id, False, saved.status, reason)
+    return MemoryPromotionResult(candidate.candidate_id, False, saved.status, reason,
+                                 project_binding_status=_deferred_project_binding_status(reason))
 
 
 # LLM: 只准确policy锁FD出生，原scope每次核当前来源；不保存callback或扩大权限。

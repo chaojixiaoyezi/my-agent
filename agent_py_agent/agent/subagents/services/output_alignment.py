@@ -60,13 +60,24 @@ def anchored_output_refs(task: Any) -> OutputAnchoring:
         )
         if len(warnings) != previous and getattr(task, "output_dir", ""):
             staged.append(warnings[-1])
-    # 每个不同绝对目标一个暂存位置；同名不同目录不会落到同一暂存文件。
-    locations = staging_relative_locations([row["target_path"] for row in staged], refused)
+    locations = staging_relative_locations(
+        [row["target_path"] for row in staged], refused,
+        existing_file=lambda parts: _staged_file_present(Path(task.output_dir), parts),
+    )
     for warning in staged:
         warning.update(staging_fields(task, Path(warning["target_path"]),
                                       expected=locations[warning["target_path"]]))
         warning["message_zh"] += " 请将文件写入 staging_ref，再由父任务按精确版本采用并落地。"
     return OutputAnchoring(anchored_refs=refs, warnings=warnings)
+
+
+def _staged_file_present(root: Path, parts: tuple[str, ...]) -> bool:
+    try:
+        descriptor = open_workspace_delivery_file(root, parts)
+    except (OSError, ValueError):
+        return False
+    os.close(descriptor)
+    return True
 
 
 # LLM: 不从 run/output、权限根列表或宿主进程 cwd 猜目标；父目录引用保留真实目标，由工具判断权限。

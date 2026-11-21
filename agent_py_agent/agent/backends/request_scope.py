@@ -320,6 +320,14 @@ _DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
 )
 
 
+def provider_request_deadline(*, explicit: float | None = None) -> float | None:
+    """Intersect an absolute call deadline with the active provider budget."""
+    scoped = _DEADLINE.get()
+    if scoped is None:
+        return explicit
+    return scoped if explicit is None else min(scoped, explicit)
+
+
 # LLM: 资源身份取真实后端的 HTTP origin；不按模型名、用户或 localhost 字样猜测服务器。
 # 函数用途: 为同 Gateway 内共用模型端点的请求生成无凭据资源键；代理别名不自动合并。
 def _endpoint_key(backend: object) -> tuple[str, str, int | None] | None:

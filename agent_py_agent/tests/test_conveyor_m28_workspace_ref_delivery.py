@@ -6,6 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime.loop_support import (
@@ -384,6 +386,80 @@ def test_staging_locations_keep_unique_names_and_honour_unambiguous_hints():
         "/a/out": "a/out", "/b/out": "b/out"}
     assert staging_relative_locations(["/a/x.txt", "/a/y.txt"], {"/a/x.txt": "keep/x.txt"}) == {
         "/a/x.txt": "keep/x.txt", "/a/y.txt": "y.txt"}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_staging_files_coexist_and_land_in_both_write_orders(agent, tmp_path, reverse):
+    first = agent.root / "package" / "app" / "LICENSE"
+    second = agent.root / "package" / "lib" / "LICENSE"
+    third = agent.root / "bin" / "app"
+    entries = [(first, b"application license"), (second, b"library license"), (third, b"binary")]
+    if reverse:
+        entries.reverse()
+    destinations, contents = zip(*entries, strict=True)
+    for destination in destinations:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    _, _, rows, tool = _assets(agent, contents)
+    child, refs = _staged_child(agent, destinations, contents)
+    assert child.staged_workspace_outputs() == agent.subagents.load(child.id).staged_workspace_outputs()
+    manifest = {row["destination"]: row for row in child.staged_workspace_outputs()}
+    assert manifest[str(second)]["expected_relative_location"] == "lib/LICENSE"
+    for destination, content in entries:
+        row = manifest[str(destination)]
+        assert row["files_written"] and row["sha256"] == sha256(content).hexdigest()
+        assert row["staging_ref"] == refs[str(destination)]
+    workspace = freeze_workspace_ref(agent.root)
+    _parent_turn(agent, tmp_path, child.parent_id, workspace)
+    for index, destination in enumerate(destinations):
+        args = {**rows[index], "staged_file": {"child_run_id": child.id, "destination": str(destination)}}
+        assert _adopt(agent, tool, args, tmp_path / f"approval-{index}", f"p6-op-{index}").ok
+    params = _closeout_params({"allowed_write_roots": [str(agent.root)], "workspace_ref": workspace.to_record()})
+    assert deliverable_closeout_block(params, agent=agent) is None, deliverable_report(params)
+    assert [destination.read_bytes() for destination in destinations] == list(contents)
+
+
+def test_staging_hints_and_generated_locations_are_jointly_prefix_free():
+    from agent_py_agent.agent.path_access_policy import staging_relative_locations
+
+    targets = ["/pkg/app/LICENSE", "/pkg/lib/LICENSE", "/bin/app"]
+    hints = {targets[0]: "app/LICENSE", targets[1]: "persisted/LICENSE", targets[2]: "app"}
+    locations = staging_relative_locations(targets, hints)
+    assert locations == staging_relative_locations(list(reversed(targets)) + targets[:1], hints)
+    assert locations[targets[1]] == hints[targets[1]]
+    paths = [Path(path) for path in locations.values()]
+    assert all(not left.is_relative_to(right) for left in paths for right in paths if left is not right)
+
+
+def test_legacy_staging_keeps_a_verified_file_when_its_old_path_blocks_a_child(agent):
+    directories = [agent.root / "package" / name / "LICENSE" for name in ("app", "lib")]
+    executable = agent.root / "bin" / "app"
+    child, _ = _staged_child(agent, directories + [executable], [None, None, None])
+    legacy = Path(child.output_dir) / "app"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"existing executable")
+    reloaded = agent.subagents.load(child.id)
+    rows = {row["destination"]: row for row in reloaded.staged_workspace_outputs()}
+    assert rows[str(executable)]["staging_ref"] == str(legacy)
+    assert rows[str(executable)]["sha256"] == sha256(b"existing executable").hexdigest()
+    for destination in directories:
+        path = Path(rows[str(destination)]["staging_ref"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"license")
+    settled = {row["destination"]: row for row in agent.subagents.load(child.id).staged_workspace_outputs()}
+    assert all(row["files_written"] and row["staging_ref"] == rows[key]["staging_ref"]
+               for key, row in settled.items())
+    assert legacy.read_bytes() == b"existing executable"
+
+
+def test_staging_compares_equivalent_macos_path_components(monkeypatch):
+    from agent_py_agent.agent import path_access_policy
+
+    monkeypatch.setattr(path_access_policy, "sys", SimpleNamespace(platform="darwin"))
+    targets = ["/package/café/LICENSE", "/other/lib/LICENSE", "/bin/CAFE\u0301"]
+    locations = path_access_policy.staging_relative_locations(targets)
+    assert locations[targets[0]] == "café/LICENSE"
+    assert locations[targets[1]] == "lib/LICENSE"
+    assert locations[targets[2]] == "bin/CAFE\u0301"
 
 
 def test_same_named_children_land_their_own_exact_versions(agent, tmp_path):

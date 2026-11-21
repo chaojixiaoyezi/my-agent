@@ -30,6 +30,7 @@ from .errors import (
     ProviderRecoverableError,
 )
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
+from .gateway_request_limits import remaining_deadline_seconds
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .provider_headers import current_probe_accounting, endpoint_parts, request_headers
 from .request_budget import RequestBudgetExceeded, RequestTokenBudget
@@ -671,13 +672,22 @@ def stream_call_parts(
     return call, payload, headers
 
 
-# LLM: cabfix：调用方给的绝对墙钟上界换算成 monotonic 时刻，放进信封的 deadline 字段（传输层发送前、读正文、
-#   流式共用这一条时限）。None 或非正数表示不设总期限，主模型与旧调用方语义不变。基类与 OAuth 共用这一处。
-# 函数用途: 由请求选项算出信封里的绝对截止时刻；不设总期限时返回 None。
 def stream_call_deadline(options: StreamCallOptions) -> float | None:
+    """Freeze the call deadline before request setup can consume its budget."""
+    from .request_scope import provider_request_deadline
+
+    explicit = None
     if options.total_deadline_seconds is not None and float(options.total_deadline_seconds) > 0:
-        return time.monotonic() + float(options.total_deadline_seconds)
-    return None
+        explicit = time.monotonic() + float(options.total_deadline_seconds)
+    return provider_request_deadline(explicit=explicit)
+
+
+def stream_call_timeout(default: float, deadline: float | None) -> float:
+    """Check the frozen deadline and retain the unscoped idle timeout."""
+    from .request_scope import provider_request_deadline
+
+    remaining = remaining_deadline_seconds(deadline)
+    return remaining if remaining is not None and provider_request_deadline() is not None else default
 
 
 # LLM: 所有内置 HTTP backend 都必须把 system_instruction 映射到供应商真实高优先级字段，而非拼回 user prompt。
@@ -1117,12 +1127,11 @@ class HttpBackend(BaseBackend):
     ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
         from .keepalive_transport import main_connection_pool
-        from .request_scope import provider_request_timeout
 
         path, payload, headers = stream_call_parts(call, payload, headers)
         options = options or StreamCallOptions()
-        api_base, path = endpoint_parts(self.api_base, path)
         deadline = stream_call_deadline(options)
+        api_base, path = endpoint_parts(self.api_base, path)
         capacity = getattr(self, "model_http_max_idle_connections", 0)
         pool = main_connection_pool(capacity) if payload is not None and capacity > 0 else None
         return GatewayRequest(
@@ -1131,7 +1140,7 @@ class HttpBackend(BaseBackend):
             path=path,
             payload=payload,
             headers=request_headers(headers, self.custom_headers, self.session_header),
-            timeout=provider_request_timeout(self.request_timeout),
+            timeout=stream_call_timeout(self.request_timeout, deadline),
             connect_timeout=self.connect_timeout,
             first_event_timeout=options.first_event_timeout_seconds,
             # 按本次配置冻结退避序列；空值保持原传输默认，不热改共享后端。

@@ -3,6 +3,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from datetime import datetime
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from agent_py_agent.agent.memory_store.recall import (
     runtime_recall_predicate,
 )
 from agent_py_agent.agent.tooling.registry_workspace import freeze_workspace_ref
+from agent_py_agent.tests.test_memory_promotion import _advance_obligation_clock
 from agent_py_agent.tests.test_memory_tool import _agent_with_current_user
 
 QUERY = "thermometer atlas"
@@ -390,3 +392,78 @@ def test_project_binding_acknowledges_already_published_generation(tmp_path, mon
     assert not replay.formal_memory_changed and replay.project_binding_status == "settled"
     after = registry.stat()
     assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
+
+
+@pytest.mark.parametrize("intervening_rebind", [False, True])
+def test_project_rebind_recovers_after_one_predecessor_read_error(tmp_path, monkeypatch, intervening_rebind):
+    agent = _agent_with_current_user(tmp_path / "agent", content=QUERY)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent._current_run_params.workspace_ref = freeze_workspace_ref(workspace)
+    home = agent.home_paths.owner_home_dir
+    project_bindings.record(home, X, workspace)
+    original_read = project_bindings.generation
+    failures = []
+
+    def read(owner_home, root):
+        if not failures:
+            failures.append(root)
+            raise OSError("simulated predecessor read failure")
+        return original_read(owner_home, root)
+
+    tool = RememberTool(agent)
+    request = _project_request(Y)
+    with monkeypatch.context() as fault:
+        fault.setattr(project_bindings, "generation", read)
+        if intervening_rebind:
+            def unavailable(*args, **kwargs):
+                raise OSError("simulated binding publication failure")
+
+            fault.setattr(project_bindings, "write_json_file_atomic_unlocked", unavailable)
+        first = json.loads(tool.execute(request).output)
+    assert failures == [workspace.resolve()]
+    assert first["active_memory_changed"]
+    assert first["results"][0]["project_binding_status"] == ("pending" if intervening_rebind else "settled")
+    formal_before = agent.memory.path.read_bytes()
+    if intervening_rebind:
+        project_bindings.record(home, "project:z", workspace)
+    replay = json.loads(tool.execute(request).output)
+    assert replay["results"][0]["project_binding_status"] == ("superseded" if intervening_rebind else "settled")
+    assert project_bindings.lookup(home, workspace) == (("project:z",) if intervening_rebind else (Y,))
+    assert not replay["active_memory_changed"]
+    assert agent.memory.path.read_bytes() == formal_before
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_unavailable_project_predecessor_defers_before_formal_commit(tmp_path, monkeypatch, batch):
+    agent = _agent_with_current_user(tmp_path / "agent", content=QUERY)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent._current_run_params.workspace_ref = freeze_workspace_ref(workspace)
+    home = agent.home_paths.owner_home_dir
+    project_bindings.record(home, X, workspace)
+    [draft] = _prepare_observations(agent, agent.memory, [_project_request(Y)], scope=None)
+    candidate = agent.memory_candidates.observe(draft)
+    service = agent.memory_promotion
+
+    def promote():
+        if batch:
+            return service.promote_batch([agent.memory_candidates.get(candidate.candidate_id)],
+                                         reviewer="test", automatic=True)[0]
+        return service.promote(candidate.candidate_id, automatic=True)
+
+    def unavailable(*args):
+        raise OSError("simulated predecessor read failure")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(project_bindings, "generation", unavailable)
+        blocked = promote()
+    assert not blocked.promoted and not blocked.formal_memory_changed
+    assert blocked.status == "approved" and blocked.project_binding_status == "pending"
+    assert project_bindings.lookup(home, workspace) == (X,)
+    waiting = promote()
+    assert waiting.reason_code == "COMMIT_OBLIGATION_BACKOFF" and waiting.project_binding_status == "pending"
+    obligation = agent.memory_candidates.get(candidate.candidate_id)
+    _advance_obligation_clock(monkeypatch, datetime.fromisoformat(obligation.obligation_retry_after))
+    assert promote().project_binding_status == "settled"
+    assert project_bindings.lookup(home, workspace) == (Y,)
