@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import sqlite3
 import time
-import uuid
 from collections.abc import Callable, Mapping
 from functools import lru_cache
 from itertools import islice
@@ -52,9 +50,7 @@ _active_run_statuses = (
     "paused_for_resume",
     "cancelling",
 )
-# 会话任务的created_at取于创建门与业务上下文工厂之前、发表索引之前；追加头部补查向前多看这段秒数。
-_session_task_append_margin = 10.0
-_session_task_state_keys = frozenset({"cycle", "walk", "done", "stamp", "index", "floor", "watch"})
+_session_task_state_keys = frozenset({"epoch", "walk", "done", "position"})
 _max_open_ref_backfill_batches = 32
 
 
@@ -206,18 +202,14 @@ def _extract_owner_home(host_or_owner_home: Any) -> Path | None:
 
 
 def _session_task_refs(items, target_id):
-    """把显式引用本工作流的任务分成未结与已结两组编号；引用字段创建后不可变。"""
     from ..conversation.session_tasks import has_open_obligation
 
-    open_ids, settled_ids = [], []
-    for task in items:
-        metadata = getattr(task, "metadata", {}) or {}
-        task_id = getattr(task, "task_id", "") or str(task)
-        if not task_id or not _explicit_workflow_reference(metadata, target_id):
-            continue
-        is_open = has_open_obligation({"status": getattr(task, "status", None), "metadata": getattr(task, "metadata", {})})
-        (open_ids if is_open else settled_ids).append(str(task_id))
-    return open_ids, settled_ids
+    return [
+        str(getattr(task, "task_id", "") or task)
+        for task in items
+        if _explicit_workflow_reference(getattr(task, "metadata", None), target_id)
+        and has_open_obligation({"status": getattr(task, "status", None), "metadata": task.metadata})
+    ]
 
 
 def _session_task_blockers(blockers, task_ids):
@@ -235,7 +227,7 @@ def _session_task_slice(task_store, target_id, blockers, budget):
         items = page.get("items") if isinstance(page, dict) else None
         if not isinstance(items, list):
             return False
-        open_ids, _ = _session_task_refs(items, target_id)
+        open_ids = _session_task_refs(items, target_id)
         _session_task_blockers(blockers, open_ids)
         following = page.get("next_cursor")
         # 读错误、覆盖不明、游标循环或预算耗尽都属"未知"，不能当作"没有引用"放行。
@@ -249,83 +241,25 @@ def _session_task_slice(task_store, target_id, blockers, budget):
         cursor = following
 
 
-def _session_task_generation(identity, cycle):
-    return hashlib.sha256(json.dumps(["session_task_reference.v1", identity, cycle]).encode()).hexdigest()
-
-
-def _session_task_projection(task_store):
-    """列表索引投影库的文件身份：重建换文件，追加只改内容。"""
-    index = getattr(task_store, "_list_index", None)
-    path = getattr(index(), "path", None) if callable(index) else None
-    if not isinstance(path, Path):
-        return None
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    return [info.st_dev, info.st_ino]
-
-
-def _int_pair(value):
-    return isinstance(value, list) and len(value) == 2 and all(type(item) is int for item in value)
-
-
-def _fresh_session_task_state(stamp, projection):
-    return {"cycle": uuid.uuid4().hex, "walk": None, "done": False, "stamp": stamp, "index": projection,
-            "floor": time.time() - _session_task_append_margin, "watch": []}
+def _session_task_generation(identity, epoch):
+    return hashlib.sha256(json.dumps(["session_task_reference.v2", identity, epoch]).encode()).hexdigest()
 
 
 def _session_task_state(previous, identity):
-    """只接受本目录身份与周期令牌签发且字段有界的续点；其余一律从新周期开始。"""
+    """Accept only bounded continuations from this canonical directory and publication epoch."""
     try:
         state = json.loads(previous[1]) if previous else None
     except (TypeError, ValueError, RecursionError):
         return None
-    if not isinstance(state, dict) or set(state) != _session_task_state_keys:
-        return None
-    watch, floor = state["watch"], state["floor"]
-    if (isinstance(state["cycle"], str) and previous[0] == _session_task_generation(identity, state["cycle"])
-            and (state["walk"] is None or isinstance(state["walk"], dict)) and type(state["done"]) is bool
-            and _int_pair(state["stamp"]) and (state["index"] is None or _int_pair(state["index"]))
-            and type(floor) in (int, float) and math.isfinite(floor)
-            and (watch is None or isinstance(watch, list) and len(watch) <= _max_blockers_page
-                 and all(isinstance(item, str) and item for item in watch))):
+    if (isinstance(state, dict) and set(state) == _session_task_state_keys
+            and isinstance(state["epoch"], str) and len(state["epoch"]) == 32
+            and previous[0] == _session_task_generation(identity, state["epoch"])
+            and (state["walk"] is None or isinstance(state["walk"], dict))
+            and type(state["done"]) is bool and (not state["done"] or state["walk"] is None)
+            and type(state["position"]) is int and state["position"] >= 0):
         return state
     return None
 
-
-def _session_task_watch(state, task_ids):
-    """记下已越过的已结引用任务供重开复核；超出上限只能在目录变化时重开周期。"""
-    watch = state["watch"]
-    if watch is None:
-        return
-    for task_id in task_ids:
-        if task_id not in watch:
-            watch.append(task_id)
-    if len(watch) > _max_blockers_page:
-        state["watch"] = None
-
-
-def _session_task_head(task_store, target_id, state, budget):
-    """按创建时间倒序补查下限之后创建的任务，返回(未结引用编号, done|partial|overflow)。
-    列表索引的追平批每次都会推进其版本，使跨页游标过期；故每轮从最新一行重读并倍增页长。"""
-    limit = 1
-    while True:
-        page = task_store.list_page(limit=limit)
-        items = page.get("items") if isinstance(page, dict) else None
-        if not isinstance(items, list) or page.get("load_errors") or page.get("coverage") not in ("complete", "partial"):
-            return [], "partial"
-        budget.charge(entries=max(1, len(items)))
-        recent = [task for task in items if getattr(task, "created_at", 0) >= state["floor"]]
-        open_ids, settled_ids = _session_task_refs(recent, target_id)
-        if open_ids:
-            return open_ids, "partial"
-        _session_task_watch(state, settled_ids)
-        if len(recent) < len(items) or page.get("next_cursor") is None and len(items) < limit:
-            return [], "done"
-        limit = min(100, 2 * limit)
-        if len(items) >= 100 or limit > budget.max_entries - budget.entries:
-            return [], "overflow"
 
 class WorkflowReferenceReader:
     """Authoritative bounded read-only workflow reference reader."""
@@ -867,7 +801,7 @@ class WorkflowReferenceReader:
 
             # 每次调用只按已加载预算的条目维度推进；耗尽即报告部分覆盖并留下续点。
             budget = RetentionScanBudget.default(getattr(self.host, "config", None))
-            if self.owner_home is None or not callable(getattr(task_store, "obligation_source_version", None)):
+            if self.owner_home is None or not callable(getattr(task_store, "obligation_change_page", None)):
                 return _session_task_slice(task_store, target_id, blockers, budget)
             return self._session_task_coverage(task_store, target_id, blockers, budget)
         except (OSError, ValueError, sqlite3.Error, KeyError):
@@ -876,97 +810,72 @@ class WorkflowReferenceReader:
             return False
 
     def _session_task_coverage(self, task_store, target_id, blockers, budget):
-        """C21续扫规范任务目录：首个未结引用即停，未取尽报告部分覆盖；追加由头部补查覆盖而不换代，
-        目录或列表索引重建、已列名任务被移除、已越过的引用任务重开时换新周期。"""
+        """Cover the canonical baseline and subsequent publications through a verified boundary."""
         version = task_store.obligation_source_version()
         if version is None:
             return True
-        identity, stamp = [version[0], version[1]], [version[2], version[3]]
+        identity = list(version[:2])
         index = RunListIndex(self.owner_home)
         source_id = f"session_tasks:{target_id}"
-        # 与运行源一致：投影库缺失时不为一次读完的小Owner建库，需要续扫时才经CAS发布。
         previous = (index.reference_cursor(source_id)
                     if (self.owner_home / "data" / "workflow_run_index.sqlite3").exists() else None)
         state = _session_task_state(previous, identity)
-        if state is not None and state["done"] and state["stamp"] == stamp:
-            return True
-        projection = _session_task_projection(task_store)
-        resumed = state is not None and state["index"] in (None, projection)
-        if not resumed:
-            state = _fresh_session_task_state(stamp, projection)
+        # Reserve at least one entry for the canonical walk while it is still in progress.
+        reserve = int(state is None or not state["done"])
+        limit = min(_max_blockers_page, max(0, budget.max_entries - reserve))
+        epoch, head, changes = task_store.obligation_change_page(
+            state["epoch"] if state else None, state["position"] if state else 0, limit=limit,
+        )
+        if state is None or state["epoch"] != epoch or state["position"] > head:
+            state = {"epoch": epoch, "walk": None, "done": False, "position": head}
+        elif state["done"] and state["position"] == head:
+            return task_store.obligation_source_version() == version
 
-        def restart():
-            state.clear()
-            state.update(_fresh_session_task_state(stamp, projection))
+        def commit(complete):
+            generation = _session_task_generation(identity, epoch)
+            cursor = json.dumps(state, ensure_ascii=True, separators=(",", ":"))
+            if previous != (generation, cursor) and (previous is not None or not complete):
+                if not index.advance_reference_cursor(
+                    source_id, previous=previous, generation=generation, cursor=cursor, now=time.time(),
+                ):
+                    return False
+            return complete and task_store.obligation_source_version() == version
 
-        def commit(result):
-            if previous is None and result:
-                return True
-            if state["index"] is None:
-                state["index"] = _session_task_projection(task_store)
-            committed = index.advance_reference_cursor(
-                source_id, previous=previous, generation=_session_task_generation(identity, state["cycle"]),
-                cursor=json.dumps(state, ensure_ascii=True, separators=(",", ":")), now=time.time(),
-            )
-            return result and committed
-
-        head_done = True
-        if resumed:
-            started = time.time()
-            found, outcome = _session_task_head(task_store, target_id, state, budget)
-            if found:
-                _session_task_blockers(blockers, found)
+        blockers_seen = []
+        for position, path in changes:
+            budget.charge(entries=1)
+            if not isinstance(path, str) or not path.endswith(".json"):
                 return commit(False)
-            if outcome == "overflow":
-                # 下限后的追加超出一片预算且索引游标不能跨写入续页：换新周期，由目录遍历覆盖这批任务。
-                restart()
+            task = task_store.load(path.removesuffix(".json"))
+            if task is None or task.task_id != path.removesuffix(".json"):
                 return commit(False)
-            head_done = outcome == "done"
-            if head_done:
-                state["floor"] = started - _session_task_append_margin
-        walked = not state["done"]
-        while not state["done"]:
-            limit = max(1, min(100, budget.max_entries - budget.entries))
-            try:
-                page = task_store.list_page(limit=limit, cursor=state["walk"], read_only=True)
-            except (OSError, ValueError, TypeError):
-                page = None
+            blockers_seen.extend(_session_task_refs([task], target_id))
+            if not blockers_seen:
+                state["position"] = position
+        if not blockers_seen and limit and len(changes) < limit:
+            state["position"] = head
+        if blockers_seen:
+            _session_task_blockers(blockers, blockers_seen)
+            last_change = bool(changes and position == head)
+            return commit(state["done"] and last_change)
+
+        while not state["done"] and budget.entries < budget.max_entries:
+            page = task_store.list_page(limit=min(_max_blockers_page, budget.max_entries - budget.entries),
+                                        cursor=state["walk"], read_only=True)
             items = page.get("items") if isinstance(page, dict) else None
             if (not isinstance(items, list) or page.get("load_errors")
                     or page.get("coverage", "complete") != "complete"):
-                # 坏账、失效续点或已列名任务被移除：续点不可信，从新周期重扫。
-                restart()
                 return commit(False)
             following = page.get("next_cursor")
-            open_ids, settled_ids = _session_task_refs(items, target_id)
+            if following is not None and following == state["walk"]:
+                return commit(False)
+            open_ids = _session_task_refs(items, target_id)
             if open_ids:
-                # 停在首个未结义务所在页之前，下次重读本页即得到最新阻断，不保存会过期的阻断项。
                 _session_task_blockers(blockers, open_ids)
-                return commit(following is None and head_done)
+                return commit(following is None and state["position"] == head)
             budget.charge(entries=max(1, page.get("read_count") or len(items)))
-            _session_task_watch(state, settled_ids)
             state["walk"], state["done"] = following, following is None
-            if not state["done"] and budget.entries >= budget.max_entries:
-                return commit(False)
-        if state["stamp"] != stamp and head_done:
-            # 周期内目录有写入：已越过的已结引用任务逐一复核，重开或被移除即换新周期；
-            # 头部补查未越过下限时不推进已核目录版本，免得下次快路径跳过未核的追加。
-            watch = state["watch"]
-            if watch is None:
-                restart()
-                return commit(False)
-            if walked and budget.max_entries - budget.entries < len(watch):
-                return commit(False)
-            for task_id in watch:
-                budget.charge(entries=1)
-                task = task_store.load(task_id)
-                open_ids = _session_task_refs([task], target_id)[0] if task is not None else []
-                if task is None or open_ids:
-                    _session_task_blockers(blockers, open_ids)
-                    restart()
-                    return commit(False)
-            state["stamp"] = stamp
-        return commit(head_done)
+        return commit(state["done"] and state["position"] == head)
 
     def __call__(
         self,

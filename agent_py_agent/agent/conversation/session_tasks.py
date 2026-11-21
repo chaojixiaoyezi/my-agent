@@ -12,7 +12,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -129,7 +129,7 @@ def _write_completion_metadata(host, task, updater):
             raise ValueError("COMPLETION_CONTEXT_MISMATCH")
         return replace(current, metadata=updater(current)).to_dict()
     store = host.conversation_store.session_tasks
-    saved = SessionTask.from_dict(update_json_file_atomic(store._path(task.task_id), update, require_existing=True))
+    saved = SessionTask.from_dict(store._update_task(task.task_id, update))
     store._learning_index().publish(store._path(task.task_id))
     return saved
 
@@ -691,6 +691,24 @@ class SessionTaskStore:
                 return {}, {"code": "SESSION_TASK_INVALID", "path": str(path)}
         return SessionListIndex(self._dir(), kind="session_task", reader=read)
 
+    def _update_task(self, task_id, updater, *, after_write=None):
+        path = self._path(task_id)
+        index = self._list_index()
+        with ExitStack() as locks:
+            def prepare(payload):
+                updated = updater(payload)
+                # Acquire the publication lock only after the canonical read and validation.
+                locks.enter_context(index.track_task_change(path))
+                return updated
+
+            saved = update_json_file_atomic(path, prepare, require_existing=True)
+            if after_write is not None:
+                after_write(saved)
+            return saved
+
+    def obligation_change_page(self, epoch, after, *, limit):
+        return self._list_index().task_change_page(epoch, after, limit=limit)
+
     def obligation_source_version(self):
         """原任务原子替换会改变目录版本，供一次分页链与最终决策复核。"""
         try:
@@ -783,17 +801,18 @@ class SessionTaskStore:
                 "goal_sha256": hashlib.sha256(goal).hexdigest(), "summary_sha256": hashlib.sha256(summary).hexdigest(),
                 "goal_bytes": len(goal), "summary_bytes": len(summary)}}}
 
-        saved = update_json_file_atomic(self._path(task_id), updater, require_existing=True)
-        if changed:
+        def retire(saved):
+            if not changed:
+                return
             task = SessionTask.from_dict(saved)
             if task.body_dedupe_key and _real_directory(self.storage.root, ("session_tasks", "body")):
-                path = self._body_index_path(task.body_dedupe_key)
-                # 与正文索引原写者共锁；先释放任务锁，不嵌套另一把记录锁。
-                with locked_json_path(path):
-                    report = read_json_file_report(path, context="session_task.retire.body_index")
+                body_index = self._body_index_path(task.body_dedupe_key)
+                with locked_json_path(body_index):
+                    report = read_json_file_report(body_index, context="session_task.retire.body_index")
                     if report.load_error is None and report.payload.get("task_id") == task_id:
-                        path.unlink(missing_ok=True)
-            self._list_index().publish(self._path(task_id))
+                        body_index.unlink(missing_ok=True)
+
+        self._update_task(task_id, updater, after_write=retire)
         return changed
 
     # LLM: 原任务元数据是唯一取消账；同一执行/claim CAS，不能以新current覆写原责任，更新后发布原索引。
@@ -850,8 +869,7 @@ class SessionTaskStore:
                 **({"resources_prepared": resources_prepared} if resources_prepared is not None else {}),
                 **({"resources_confirmed": resources_confirmed} if resources_confirmed is not None else {})}}).to_dict()
 
-        saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
-        self._list_index().publish(self._path(task_id))
+        saved = SessionTask.from_dict(self._update_task(task_id, update))
         return saved
 
     # LLM: 原claim被替换/归档前调用；只按其invocation_run_id直达原SessionTask，同锁CAS补claim_finished，不新建取消权威或运行身份。
@@ -865,10 +883,10 @@ class SessionTaskStore:
         if current is None or current.task_id != locator or _claim_cancellation_control(current, claim) is None:
             # 普通回合的请求号可能不是任务ID；缺失、他人记录或已结清的取消都不是本claim的证明对象。
             return False
-        proven = changed = False
+        proven = False
 
         def update(payload):
-            nonlocal proven, changed
+            nonlocal proven
             task = SessionTask.from_dict(payload)
             if task.task_id != locator:
                 raise ValueError("SESSION_TASK_CLAIM_PROOF_CONFLICT")
@@ -879,14 +897,11 @@ class SessionTaskStore:
             proven = True
             if control.get("claim_finished") is True:
                 return payload
-            changed = True
             # 只补原取消账的claim_finished；执行/后代/资源引用与其它字段原样保留，claim结束不代表物理退出。
             return {**payload, "metadata": {**task.metadata,
                                             "cancellation_control": {**control, "claim_finished": True}}}
 
-        update_json_file_atomic(self._path(locator), update, require_existing=True)
-        if changed:
-            self._list_index().publish(self._path(locator))
+        self._update_task(locator, update)
         return proven
 
     # LLM: 只有准确执行的确认可解除其引用；普通会话取消不能清独立执行或后代责任，终态结果及其它元数据不变。
@@ -926,8 +941,7 @@ class SessionTaskStore:
             metadata = {**task.metadata, "cancellation_control": control}
             return replace(task, metadata=metadata).to_dict()
 
-        saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
-        self._list_index().publish(self._path(task_id))
+        saved = SessionTask.from_dict(self._update_task(task_id, update))
         return saved
 
     # LLM: 与原取消账同一canonical写者：锁内核任务/业务owner/任务运行/原执行attempt、主范围线程，以及已冻结选中的
@@ -940,10 +954,8 @@ class SessionTaskStore:
         if not isinstance(execution_ref, HostParentExecutionRef) or not execution_ref.observed_attempt_id:
             raise ValueError("invalid resource cleanup proof")
         expected_ref, normalized = _validated_resource_cleanup_proof(resource_ref, proof)
-        changed = False
 
         def update(payload):
-            nonlocal changed
             task = SessionTask.from_dict(payload)
             context = BusinessExecutionContext.from_dict(task.metadata.get("business_context"))
             control = task.metadata.get("cancellation_control", {})
@@ -966,13 +978,10 @@ class SessionTaskStore:
                     return payload
             if len(proofs) >= 1000:
                 raise ValueError("cancellation resource proof limit")
-            changed = True
             return {**payload, "metadata": {**task.metadata, "cancellation_control": {
                 **control, "resource_cleanup_proofs": [*proofs, {"resource_ref": expected_ref, "proof": normalized}]}}}
 
-        saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
-        if changed:
-            self._list_index().publish(self._path(task_id))
+        saved = SessionTask.from_dict(self._update_task(task_id, update))
         return saved
 
     # LLM: 目录不存在时按"没有任务"返回；读坏文件进 load_errors，不静默跳过。
@@ -1086,9 +1095,10 @@ class SessionTaskStore:
                 dedupe_key=key, origin_task_id=str(draft.origin_task_id or ""),
                 created_at=current, updated_at=current, metadata=metadata,
             )
-            write_json_file_atomic(self._path(task.task_id), task.to_dict())
-            self._write_lookup_indexes(key, str(draft.body_dedupe_key or "").strip(), task.task_id)
-            self._list_index().publish(self._path(task.task_id))
+            path = self._path(task.task_id)
+            with self._list_index().track_task_change(path):
+                write_json_file_atomic(path, task.to_dict())
+                self._write_lookup_indexes(key, str(draft.body_dedupe_key or "").strip(), task.task_id)
             return task
 
     def _validate_business_owner(self, draft: SessionTaskDraft, owner_id: str) -> None:
@@ -1169,24 +1179,19 @@ class SessionTaskStore:
             return None
         if not guidance_id:
             return self.load(selected)
-        changed = False
 
         def bind(payload):
-            nonlocal changed
             latest = SessionTask.from_dict(payload)
             if latest.task_id != selected:
                 raise ValueError(f"conversation session task is unreadable: {selected}")
             if latest.body_guidance_id:
                 return payload
-            changed = True
             return {**payload, "body_guidance_id": guidance_id, "updated_at": time.time()}
 
         try:
-            saved = update_json_file_atomic(self._path(selected), bind, require_existing=True)
+            saved = self._update_task(selected, bind)
         except FileNotFoundError:
             return None
-        if changed:
-            self._list_index().publish(self._path(selected))
         return SessionTask.from_dict(saved)
 
     # LLM: 绑定只在非终态且尚未绑定其它回合时生效；同回合重复确认幂等，不覆盖已有绑定。
@@ -1266,8 +1271,7 @@ class SessionTaskStore:
             return updated.to_dict()
 
         with path_category(self._path(task_id), LockLevel.TASK_STORE):
-            update_json_file_atomic(self._path(task_id), updater, require_existing=True)
-        self._list_index().publish(self._path(task_id))
+            self._update_task(task_id, updater)
         self._learning_index().publish(self._path(task_id))
         loaded = self.load(task_id)
         assert loaded is not None
@@ -1282,7 +1286,7 @@ class SessionTaskStore:
                 raise ValueError("session task execution binding conflict")
             return replace(task, task_run_id=task_run_id).to_dict()
 
-        payload = update_json_file_atomic(self._path(task_id), bind, require_existing=True)
+        payload = self._update_task(task_id, bind)
         return SessionTask.from_dict(payload)
 
     # LLM: 续跑交付回执与回复编号绑定：锁内核对或合并 non-empty reply_message_id 与 result_report_receipt，
@@ -1303,10 +1307,7 @@ class SessionTaskStore:
         if not reply_id and not report_receipt:
             return self.load(selected)
 
-        changed = False
-
         def update(payload: dict[str, Any]) -> dict[str, Any]:
-            nonlocal changed
             task = SessionTask.from_dict(payload)
             metadata = dict(task.metadata or {})
             updates: dict[str, Any] = {}
@@ -1316,15 +1317,12 @@ class SessionTaskStore:
                 updates["result_report_receipt"] = report_receipt
             if not updates:
                 return payload
-            changed = True
             return replace(task, metadata={**metadata, **updates}).to_dict()
 
         try:
-            saved = update_json_file_atomic(self._path(selected), update, require_existing=True)
+            saved = self._update_task(selected, update)
         except FileNotFoundError:
             return None
-        if changed:
-            self._list_index().publish(self._path(selected))
         return SessionTask.from_dict(saved)
 
     # LLM: 链深按 origin_task_id 结构化遍历，不信任模型传的深度；环或坏链返回一个足够大的值让调用方拒绝。

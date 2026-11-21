@@ -13,8 +13,9 @@ import sqlite3
 import stat
 import threading
 import time
+import uuid
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
@@ -74,9 +75,10 @@ class SessionListIndex:
         self.scope = hashlib.sha256(f"{self.root.resolve()}:{kind}".encode()).hexdigest()[:24]
 
     @contextmanager
-    def _connection(self, *, blocking=True):
+    def _connection(self, *, blocking=True, lock_held=False):
         ensure_private_dir(self.path.parent)
-        with locked_json_path(self.path, **({} if blocking else {"blocking": False})):
+        guard = nullcontext() if lock_held else locked_json_path(self.path, blocking=blocking)
+        with guard:
             if not self.path.exists():
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 os.close(fd)
@@ -130,6 +132,13 @@ class SessionListIndex:
                     conn.execute('CREATE TRIGGER IF NOT EXISTS artifact_entry_deleted AFTER DELETE ON entries BEGIN '
                                  'DELETE FROM artifact_refs WHERE task_path=OLD.path; '
                                  'DELETE FROM artifact_errors WHERE task_path=OLD.path; END')
+                if self._tracks_task_changes:
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_changes'").fetchone() is None:
+                        conn.execute("CREATE TABLE task_changes "
+                                     "(path TEXT PRIMARY KEY, position INTEGER NOT NULL UNIQUE)")
+                        conn.execute("DELETE FROM meta WHERE key IN ('task_change_epoch','task_change_source')")
+                    conn.execute("CREATE TRIGGER IF NOT EXISTS task_change_entry_deleted AFTER DELETE ON entries BEGIN "
+                                 "DELETE FROM task_changes WHERE path=OLD.path; END")
                 version = conn.execute("PRAGMA schema_version").fetchone()[0]
                 conn.commit()
                 _remember_projection_ddl(key, version)
@@ -159,8 +168,9 @@ class SessionListIndex:
         else:
             sort_at = float(payload.get("created_at" if self.kind == "session_task" else "updated_at") or 0)
             filter_key = str(payload.get(self._filter_field()) or "")
-        conn.execute("INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?)",
-                     (relative, sort_at, filter_key, version, generation))
+        conn.execute("INSERT INTO entries VALUES (?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
+                     "sort_at=excluded.sort_at,filter_key=excluded.filter_key,stamp=excluded.stamp,"
+                     "generation=excluded.generation", (relative, sort_at, filter_key, version, generation))
         if self.kind == 'session_task':
             conn.execute('DELETE FROM artifact_refs WHERE task_path=?', (relative,))
             conn.execute('DELETE FROM artifact_errors WHERE task_path=?', (relative,))
@@ -177,12 +187,60 @@ class SessionListIndex:
             if invalid:
                 conn.execute('INSERT OR IGNORE INTO artifact_errors VALUES(?)', (relative,))
 
-    def publish(self, path: Path) -> None:
-        """只在原成功提交后调用；索引写失败不回滚已提交的canonical。"""
-        with self._connection() as conn:
+    @property
+    def _tracks_task_changes(self):
+        return self.kind == "session_task" and type(self)._record is SessionListIndex._record
+
+    @contextmanager
+    def track_task_change(self, path: Path):
+        """Hold the list lock across the canonical replacement and its publication."""
+        with locked_json_path(self.path):
+            source_before = _stamp(self.root)
+            file_before = _stamp(path)
+            yield
+            if _stamp(path) != file_before or _stamp(self.root) != source_before:
+                self.publish(path, source_before=source_before, lock_held=True)
+
+    def publish(self, path: Path, *, source_before=None, lock_held=False) -> None:
+        """Publish a canonical locator and record its latest change in the same transaction."""
+        with self._connection(lock_held=lock_held) as conn:
             self._record(conn, path, int(self._meta(conn, "generation", "0")))
             self._put_meta(conn, "revision", int(self._meta(conn, "revision", "0")) + 1)
-            # 不用目录mtime认证内容；它只发现新旧写者的新增/删除，原位更新仍读文件身份。
+            if not self._tracks_task_changes:
+                return
+            source = _stamp(self.root)
+            position = int(self._meta(conn, "task_change_position", "0")) + 1
+            if path.exists():
+                conn.execute("INSERT INTO task_changes VALUES (?,?) ON CONFLICT(path) "
+                             "DO UPDATE SET position=excluded.position", (path.name, position))
+            self._put_meta(conn, "task_change_position", position)
+            if source_before is not None and self._meta(conn, "task_change_source") == source_before:
+                self._put_meta(conn, "task_change_source", source)
+                # A known replacement does not invalidate an in-progress list rebuild.
+                if self._meta(conn, "directory") == source_before:
+                    self._put_meta(conn, "directory", source)
+
+    def task_change_page(self, epoch, after, *, limit):
+        """Return an indexed change page at a canonical directory boundary.
+
+        A projection created, rebuilt or separated from the source by an
+        unaccounted write starts a new epoch. Readers then need a canonical walk.
+        """
+        with self._connection() as conn:
+            source = _stamp(self.root)
+            current = self._meta(conn, "task_change_epoch")
+            head = int(self._meta(conn, "task_change_position", "0"))
+            if not current or self._meta(conn, "task_change_source") != source:
+                current = uuid.uuid4().hex
+                self._put_meta(conn, "task_change_epoch", current)
+                self._put_meta(conn, "task_change_source", source)
+            if epoch != current or after > head:
+                return current, head, []
+            rows = conn.execute(
+                "SELECT position,path FROM task_changes WHERE position>? AND position<=? ORDER BY position LIMIT ?",
+                (after, head, limit),
+            )
+            return current, head, [(row["position"], row["path"]) for row in rows]
 
     def _filter_field(self):
         return {"session": "user_id", "session_task": "target_thread_id", "thread": "owner_id"}[self.kind]
