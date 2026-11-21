@@ -1584,3 +1584,96 @@ def test_workflow_pause_emits_canonical_step_progress(api, tmp_path):
     assert workflow_step_event(events[-1])['status'] == 'paused_for_resume'
     assert '已暂停／待恢复' in public_workflow_step_display(events[-1])['text']
     assert not workflow_step_event({**events[-1], 'status': 'made-up-paused'})
+
+
+def _qualified_dag_tool(tmp_path, handler, *, queue_limit=None):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.reference_sources import WorkflowManagementService
+    from agent_py_agent.tests.test_wf_07_08_foreach_and_dag import _flow
+
+    class Engine(WorkflowEngine):
+        def run_workflow(self, *args, **kwargs):
+            if queue_limit is not None:
+                kwargs["queue_limit"] = queue_limit
+            return super().run_workflow(*args, **kwargs)
+
+    caller = SimpleNamespace(owner_id="alice")
+    service = WorkflowManagementService(tmp_path, owner_id=caller.owner_id,
+        authorize=lambda current, action, ref: current is caller,
+        engine_factory=lambda home, **options: Engine(home, analysis_handler=handler, **options))
+    definition = _flow([{"step_id": "one", "mode": "llm_skill_analysis"}], execution_mode="dag",
+                       descriptor={"access_targets": [], "data_sources": [], "credential_refs": [], "io_contract": {}})
+    definition["descriptor"].pop("owner_id")
+    service.execute("workflows.create", {"definition": definition,
+        "scope": {"scope_mode": "owner_global", "space_ids": []}}, actor=caller, idempotency_key="create")
+    tool = WorkflowsTool(tmp_path, business_service=service, business_actor_provider=lambda: caller)
+    return tool, service
+
+
+def test_qualified_dag_run_returns_its_completed_receipt(tmp_path):
+    effects = []
+
+    def analyze(*_):
+        effects.append(1)
+        return {"value": "complete"}
+
+    tool, service = _qualified_dag_tool(tmp_path, analyze)
+    params = {"action": "workflows.run", "workflow_ref": "dag-flow", "idempotency_key": "run-dag"}
+    first = tool.execute(params)
+    assert first.ok, first.output
+    body = json.loads(first.output)
+    assert body["state"] == "completed"
+    run = service._run_store().load_run(body["workflow_run_id"])
+    assert run.status == "succeeded"
+    assert run.final_output == {"value": "complete"}
+    replay = tool.execute(params)
+    assert replay.ok and json.loads(replay.output) == body
+    assert effects == [1]
+
+
+@pytest.mark.parametrize(("policy", "queue_limit", "state", "stored_status"), [
+    ("queue", None, "pending", "queued"),
+    ("skip_if_running", None, "completed", "skipped"),
+    ("queue", 0, "blocked", "skipped"),
+])
+def test_qualified_dag_projects_only_run_admission(tmp_path, policy, queue_limit, state, stored_status):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    executing, release = Event(), Event()
+    def analyze(spec, context, skills):
+        if context.run_inputs.get("holder"):
+            executing.set()
+            assert release.wait(10)
+        return {"value": "complete"}
+
+    tool, service = _qualified_dag_tool(tmp_path, analyze, queue_limit=queue_limit)
+    request = {"action": "workflows.run", "workflow_ref": "dag-flow"}
+    held = {**request, "concurrency_policy": "skip_if_running", "idempotency_key": "holder",
+            "inputs": {"holder": True}}
+    contender = {**request, "concurrency_policy": policy, "idempotency_key": "contender"}
+    with ThreadPoolExecutor(max_workers=1) as driver:
+        first = driver.submit(tool.execute, held)
+        try:
+            assert executing.wait(5)
+            result = tool.execute(contender)
+            body = json.loads(result.output)
+            assert body["state"] == state
+            assert result.ok is (state != "blocked")
+            bound = service._run_store().load_run(body["workflow_run_id"])
+            assert bound.status == stored_status
+            replay = json.loads(tool.execute(contender).output)
+            assert replay["workflow_run_id"] == body["workflow_run_id"]
+            assert replay["state"] == state
+        finally:
+            release.set()
+        assert first.result(timeout=10).ok
+    if stored_status == "queued":
+        deadline = time.monotonic() + 5
+        while (status := service._run_store().load_run(bound.workflow_run_id).status) != "succeeded":
+            assert time.monotonic() < deadline, status
+            time.sleep(0.01)

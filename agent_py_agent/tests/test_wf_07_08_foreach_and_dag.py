@@ -892,3 +892,130 @@ def test_dag_success_run_persists_effect_started_and_excludes_skipped_steps(tmp_
             assert step.escalation_result.get('effect_started') is True
         elif step.status == 'skipped':
             assert not step.escalation_result.get('effect_started')
+
+
+@pytest.mark.parametrize("configured", [8, 12])
+def test_nested_maps_share_host_capacity_and_allow_independent_progress(tmp_path, monkeypatch, configured):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, Lock
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(batching, "_configured_max_parallel", batching.resolved_max_parallel())
+    monkeypatch.setattr(batching, "_configured_host_parallel", batching._configured_host_parallel)
+    batching.configure_from_config(SimpleNamespace(
+        workflow_foreach_max_parallel=configured, gateway_http_max_request_workers=2,
+    ))
+    two_started, small_queued, release_one, release_all = Event(), Event(), Event(), Event()
+    from agent_py_agent.agent.workflows import dag_scheduler
+
+    submit = dag_scheduler.submit_workflow_step
+
+    def observe_submission(engine, *args, **kwargs):
+        result = submit(engine, *args, **kwargs)
+        if engine.owner_home == tmp_path / "small":
+            small_queued.set()
+        return result
+
+    monkeypatch.setattr(dag_scheduler, "submit_workflow_step", observe_submission)
+    lock = Lock()
+    active = peak = started = 0
+
+    def large(spec, context, skills):
+        nonlocal active, peak, started
+        with lock:
+            active += 1
+            started += 1
+            number = started
+            peak = max(peak, active)
+            if started == 2:
+                two_started.set()
+        try:
+            assert (release_one if number == 1 else release_all).wait(10)
+            return {"batch": context.step_inputs["batch"]}
+        finally:
+            with lock:
+                active -= 1
+
+    def small(*_):
+        with lock:
+            assert active < 2
+        return {"value": "small"}
+
+    wide = _flow([{"step_id": f"map-{index}", "mode": "llm_skill_analysis",
+                   "foreach": {"from": "inputs.items", "batch_size": 1, "max_parallel": configured, "as": "batch"}}
+                  for index in range(2)], execution_mode="dag", max_parallel_steps=configured)
+    independent = _flow([{"step_id": "small", "mode": "llm_skill_analysis"}], execution_mode="dag")
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        big = callers.submit(WorkflowEngine(tmp_path / "large", analysis_handler=large).run_workflow,
+                             wide, {"items": list(range(configured))})
+        try:
+            assert two_started.wait(10)
+            ready = callers.submit(WorkflowEngine(tmp_path / "small", analysis_handler=small).run_workflow, independent)
+            assert small_queued.wait(5)
+            release_one.set()
+            assert ready.result(timeout=5).status == "succeeded"
+            assert not big.done()
+        finally:
+            release_one.set()
+            release_all.set()
+        result = big.result(timeout=10)
+    assert result.status == "succeeded"
+    assert peak == 2
+    for step in result.steps:
+        assert step.output_snapshot == [{"batch": [value]} for value in range(configured)]
+
+
+def test_cancelled_queued_dag_leaf_does_not_need_a_host_grant(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from agent_py_agent.agent.common.cancellation import (
+        CancellationToken,
+        ToolCancelled,
+        bind_cancellation_token,
+    )
+    from agent_py_agent.agent.workflows import dag_scheduler
+
+    monkeypatch.setattr(batching, "_configured_host_parallel", 1)
+    holder_started, release_holder, queued = Event(), Event(), Event()
+    def hold(*_):
+        holder_started.set()
+        assert release_holder.wait(10)
+        return {"held": True}
+
+    token = CancellationToken()
+    effects = []
+    small = WorkflowEngine(tmp_path / "small", analysis_handler=lambda *_: effects.append("effect") or {"ok": True})
+    flow = _flow([{"step_id": "step", "mode": "llm_skill_analysis"}], execution_mode="dag")
+    submit = dag_scheduler.submit_workflow_step
+
+    def observe(engine, *args, **kwargs):
+        result = submit(engine, *args, **kwargs)
+        if engine.owner_home == small.owner_home:
+            queued.set()
+        return result
+
+    monkeypatch.setattr(dag_scheduler, "submit_workflow_step", observe)
+
+    def invoke():
+        with bind_cancellation_token(token):
+            return small.run_workflow(flow)
+
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        active = callers.submit(WorkflowEngine(tmp_path / "holder", analysis_handler=hold).run_workflow, flow)
+        try:
+            assert holder_started.wait(5)
+            waiting = callers.submit(invoke)
+            assert queued.wait(5)
+            token.cancel()
+            with pytest.raises(ToolCancelled) as caught:
+                waiting.result(timeout=5)
+            assert not effects and not active.done()
+            workflow_run_id = caught.value.record.workflow_run_id
+            paused = small.store.load_run(workflow_run_id)
+            assert paused.status == "paused_for_resume" and paused.effect_outcome == "not_started"
+        finally:
+            release_holder.set()
+        assert active.result(timeout=5).status == "succeeded"
+    assert small.resume_workflow_run(workflow_run_id).status == "succeeded"
+    assert effects == ["effect"]

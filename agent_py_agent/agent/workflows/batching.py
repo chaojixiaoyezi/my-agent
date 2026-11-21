@@ -3,10 +3,16 @@
 import json
 import keyword
 import re
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections import OrderedDict
+from concurrent.futures import Future, wait
 from contextvars import copy_context
+from functools import partial
+from threading import Lock
 
-from ..settings.config import DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT
+from ..concurrency.daemon_executor import DurableDaemonThreadPoolExecutor
+from ..concurrency.interrupt import set_interrupt
+from ..concurrency.work_item_pool import TOOL_WAIT_POOL
+from ..settings.config import DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT, AgentConfig
 
 
 class ForeachInvalid(ValueError):
@@ -21,14 +27,18 @@ class ForeachInvalid(ValueError):
 
 
 _configured_max_parallel = DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT
+_configured_host_parallel = AgentConfig.gateway_http_max_request_workers
 
 
 def configure_from_config(config: object) -> None:
-    global _configured_max_parallel
+    global _configured_max_parallel, _configured_host_parallel
     limit = getattr(config, 'workflow_foreach_max_parallel', DEFAULT_WORKFLOW_FOREACH_MAX_PARALLEL_COUNT)
     if type(limit) is not int or limit < 1:
         raise ValueError('workflow_foreach_max_parallel 必须为正整数')
-    _configured_max_parallel = limit
+    host_limit = getattr(config, 'gateway_http_max_request_workers', AgentConfig.gateway_http_max_request_workers)
+    if type(host_limit) is not int or host_limit < 1:
+        raise ValueError('gateway_http_max_request_workers must be a positive integer')
+    _configured_max_parallel, _configured_host_parallel = limit, host_limit
 
 
 def resolved_max_parallel() -> int:
@@ -247,33 +257,173 @@ def batch_summary(rows):
     return counts
 
 
-# LLM: 在途Future严格不超过max_parallel；所有publish都在协调线程，退出前等待已启动体结束。
-# 函数用途: 调度尚未完成批，保留上下文并在每个完成边界发表账本。
-def dispatch_batches(indices, execute, publish, *, prepare=None, max_parallel=1, fail_fast=True):
-    if max_parallel == 1:
-        for index in indices:
-            if prepare is not None:
-                prepare(index)
-            if publish(index, execute(index)) and fail_fast:
+class _WorkflowDispatchPool:
+    """Round-robin workflow grants. The shared work-item pool retains its own admission rules."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._ready = OrderedDict()
+        self._last_owner = None
+        self._last_runs = {}
+        self._active = 0
+        self._executor = None
+        self._capacity = 0
+
+    def submit(self, key, fn, *args):
+        owner, run_id = key
+        future = Future()
+        item = copy_context(), partial(fn, *args)
+        with self._lock:
+            runs = self._ready.setdefault(owner, OrderedDict())
+            runs.setdefault(run_id, OrderedDict())[future] = item
+        future.add_done_callback(partial(self._discard_cancelled, key))
+        self._dispatch()
+        return future
+
+    def _discard_cancelled(self, key, future):
+        if not future.cancelled():
+            return
+        owner, run_id = key
+        with self._lock:
+            runs = self._ready.get(owner)
+            queue = runs.get(run_id) if runs is not None else None
+            if queue is not None:
+                queue.pop(future, None)
+                if not queue:
+                    del runs[run_id]
+                if not runs:
+                    del self._ready[owner]
+                    self._last_runs.pop(owner, None)
+
+    def _next(self):
+        with self._lock:
+            if self._ready and not self._active and self._capacity != _configured_host_parallel:
+                if self._executor is not None:
+                    self._executor.shutdown(wait=False)
+                self._capacity = _configured_host_parallel
+                self._executor = DurableDaemonThreadPoolExecutor(
+                    max_workers=self._capacity, thread_name_prefix='workflow-execution',
+                )
+            while self._ready and self._active < min(self._capacity, _configured_host_parallel):
+                if len(self._ready) > 1 and self._last_owner in self._ready:
+                    self._ready.move_to_end(self._last_owner)
+                owner, runs = self._ready.popitem(last=False)
+                last_run = self._last_runs.get(owner)
+                if len(runs) > 1 and last_run in runs:
+                    runs.move_to_end(last_run)
+                run_id, pending = runs.popitem(last=False)
+                future, (context, call) = pending.popitem(last=False)
+                if pending:
+                    runs[run_id] = pending
+                if runs:
+                    self._ready[owner] = runs
+                else:
+                    self._last_runs.pop(owner, None)
+                if not future.set_running_or_notify_cancel():
+                    continue
+                self._last_owner = owner
+                if runs:
+                    self._last_runs[owner] = run_id
+                self._active += 1
+                return self._executor, future, context, call
+        return None
+
+    def _dispatch(self):
+        while (item := self._next()) is not None:
+            executor, future, context, call = item
+            try:
+                executor.submit(context.run, self._execute, future, call)
+            except Exception as error:
+                self._release()
+                future.set_exception(error)
+
+    def _release(self):
+        with self._lock:
+            self._active -= 1
+
+    def _execute(self, future, call):
+        set_interrupt(False)
+        try:
+            result = call()
+        except BaseException as error:
+            self._release()
+            future.set_exception(error)
+        else:
+            self._release()
+            future.set_result(result)
+        finally:
+            set_interrupt(False)
+            self._dispatch()
+
+
+_WORKFLOW_DISPATCH = _WorkflowDispatchPool()
+
+
+def submit_workflow_step(engine, run, fn, *args, coordinator=False):
+    if not coordinator:
+        return _WORKFLOW_DISPATCH.submit((str(engine.owner_home), run.workflow_run_id), fn, *args)
+    future = Future()
+
+    def coordinate():
+        if future.set_running_or_notify_cancel():
+            try:
+                future.set_result(fn(*args))
+            except BaseException as error:
+                future.set_exception(error)
+
+    TOOL_WAIT_POOL.submit(coordinate, context=copy_context())
+    return future
+
+
+class BatchDispatch:
+    """Advance a foreach fan-in on the run coordinator as batch futures settle."""
+
+    def __init__(self, indices, execute, publish, *, submit, prepare, max_parallel, fail_fast):
+        self._remaining = iter(indices)
+        self._execute, self._publish = execute, publish
+        self._submit, self._prepare = submit, prepare
+        self._max_parallel, self._fail_fast = max_parallel, fail_fast
+        self.active = {}
+        self._stopped = False
+
+    def advance(self):
+        completed = sorted((future for future in self.active if future.done()), key=self.active.__getitem__)
+        for future in completed:
+            index = self.active.pop(future)
+            if self._publish(index, future.result()) and self._fail_fast:
+                self._stopped = True
+        while not self._stopped and len(self.active) < self._max_parallel:
+            index = next(self._remaining, None)
+            if index is None:
+                self._stopped = True
                 break
-        return
-    remaining = iter(indices)
-    stopped = False
-    with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix='workflow-batch') as pool:
-        active = {}
-        while active or not stopped:
-            while not stopped and len(active) < max_parallel:
-                index = next(remaining, None)
-                if index is None:
-                    stopped = True
-                    break
-                if prepare is not None:
-                    prepare(index)
-                active[pool.submit(copy_context().run, execute, index)] = index
-            if not active:
-                break
-            completed, _ = wait(active, return_when=FIRST_COMPLETED)
-            for future in sorted(completed, key=lambda item: active[item]):
-                index = active.pop(future)
-                if publish(index, future.result()) and fail_fast:
-                    stopped = True
+            if self._prepare is not None:
+                self._prepare(index)
+            self.active[self._submit(self._execute, index)] = index
+        return self._stopped and not self.active
+
+    def drain(self, *, cancel_queued=False):
+        self._stopped = True
+        if cancel_queued:
+            for future in self.active:
+                future.cancel()
+        wait(future for future in self.active if not future.cancelled())
+
+
+class BatchContinuation(Exception):
+    """Return a prepared foreach to its existing run coordinator."""
+
+    def __init__(self, dispatch, finish):
+        super().__init__()
+        self.dispatch, self.finish = dispatch, finish
+
+
+def dispatch_batches(dispatch):
+    from .step_retry import wait_for_workflow_completion
+
+    try:
+        while not dispatch.advance():
+            wait_for_workflow_completion(dispatch.active)
+    finally:
+        if dispatch.active:
+            dispatch.drain(cancel_queued=True)

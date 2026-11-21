@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from ..assets import safe_asset_id
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     ensure_private_dir,
+    inspect_file_snapshot_beneath,
     read_text_beneath,
     write_text_atomic_beneath,
 )
@@ -36,7 +39,6 @@ def _get_spec_val(spec: Any, key: str, default: Any = None) -> Any:
 def _watermark_parts(workflow_id, step_id, scope_key):
     if not scope_key:
         return ('data', 'workflow_watermarks', workflow_id, f'{step_id}.json')
-    import hashlib
     digest = hashlib.sha256(scope_key.encode()).hexdigest()
     return ('data', 'workflow_watermarks', workflow_id, step_id, digest[:2], f'{digest}.json')
 
@@ -45,7 +47,7 @@ def load_workflow_step_watermark(
     owner_home: str | Path,
     workflow_id: str,
     step_id: str,
-    *, scope_key: str = '',
+    *, scope_key: str = '', strict: bool = False,
 ) -> dict[str, Any] | None:
     """加载特定工作流特定步骤的持久化水位检查点 (WF-10)。
 
@@ -63,9 +65,34 @@ def load_workflow_step_watermark(
         return None
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+        if isinstance(data, dict):
+            return data
+        if strict:
+            raise ValueError('invalid watermark checkpoint')
+    except ValueError:
+        if strict:
+            raise
+    return None
+
+
+class _WatermarkConflict(ValueError):
+    """Another checkpoint is present or the predecessor cannot be verified."""
+
+    def __init__(self):
+        super().__init__('WORKFLOW_RUN_REVISION_CONFLICT')
+
+
+def _predecessor_fingerprint(owner_home, parts):
+    try:
+        snapshot = inspect_file_snapshot_beneath(owner_home, parts)
+    except FileNotFoundError:
+        snapshot = None
+    if snapshot is None:
+        return 'absent'
+    stat = snapshot.stat
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+                snapshot.changed_ns, snapshot.parents)
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
 def save_workflow_step_watermark(
@@ -80,6 +107,8 @@ def save_workflow_step_watermark(
     scope_key: str = '',
     operation_id: str = '',
     expected_revision: int | None = None,
+    expected_predecessor: str | None = None,
+    attempt_started_at: float = 0,
 ) -> dict[str, Any]:
     """保存特定工作流特定步骤的持久化水位检查点 (WF-10)。
 
@@ -99,25 +128,33 @@ def save_workflow_step_watermark(
 
     with locked_json_path(target_path):
         prev_rev = 0
+        guarded = expected_revision is not None or expected_predecessor is not None
         raw = read_text_beneath(owner_home, relative_parts)
         if raw is not None:
             try:
                 existing = json.loads(raw)
-                if isinstance(existing, dict):
-                    same_attempt = (bool(run_id) and existing.get('last_run_id') == run_id
-                                    and existing.get('attempt_id') == step_attempt_id)
-                    same_operation = bool(scope_key and operation_id) and existing.get('operation_id') == operation_id
-                    if (same_attempt or same_operation) and existing.get('watermark') == payload(watermark):
-                        return existing
-                    prev_rev = int(existing.get('revision', 0))
-                elif expected_revision is not None:
-                    raise ValueError('无效的水位检查点')
+                if not isinstance(existing, dict):
+                    raise ValueError('invalid watermark checkpoint')
+                same_attempt = (bool(run_id) and existing.get('last_run_id') == run_id
+                                and existing.get('attempt_id') == step_attempt_id)
+                same_operation = bool(scope_key and operation_id) and existing.get('operation_id') == operation_id
+                if (same_attempt or same_operation) and existing.get('watermark') == payload(watermark):
+                    return existing
+                prev_rev = int(existing.get('revision', 0))
             except (ValueError, TypeError):
-                if expected_revision is not None:
+                if guarded:
                     raise
-                prev_rev = 0
+                existing = {}
+            published_attempt = existing.get('attempt_started_at', 0)
+            if (attempt_started_at and type(published_attempt) in (int, float)
+                    and published_attempt >= attempt_started_at):
+                raise _WatermarkConflict()
+        if expected_predecessor is not None and (
+            not expected_predecessor or _predecessor_fingerprint(owner_home, relative_parts) != expected_predecessor
+        ):
+            raise _WatermarkConflict()
         if expected_revision is not None and prev_rev != expected_revision:
-            raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+            raise _WatermarkConflict()
 
         checkpoint: dict[str, Any] = {
             'schema_version': 'workflow-step-watermark.v1',
@@ -130,6 +167,8 @@ def save_workflow_step_watermark(
             'updated_at': time.time(),
             'revision': prev_rev + 1,
         }
+        if attempt_started_at > 0 and math.isfinite(attempt_started_at):
+            checkpoint['attempt_started_at'] = attempt_started_at
         if scope_key:
             checkpoint.update(scope_key=scope_key, operation_id=operation_id)
         write_text_atomic_beneath(
@@ -222,16 +261,21 @@ def commit_verified_watermark(
 
     observation_error = None
     if not publication and store is not None:
+        # Freeze the exact leaf before reading the contents. A later successful read
+        # may supply its revision only while that same predecessor still occupies the slot.
+        parts = _watermark_parts(safe_asset_id(workflow_id), safe_asset_id(step.step_id), scope_key)
+        facts['watermark_predecessor'] = ''
         try:
-            base = load_workflow_step_watermark(owner_home, workflow_id, step.step_id, scope_key=scope_key)
+            facts['watermark_predecessor'] = _predecessor_fingerprint(owner_home, parts)
+            base = load_workflow_step_watermark(owner_home, workflow_id, step.step_id, scope_key=scope_key, strict=True)
             facts['watermark_base_revision'] = int((base or {}).get('revision', 0))
         except (OSError, TypeError, ValueError) as error:
-            # 无法确认旧版本时只允许后续恢复写空槽或认领本次已发表的水位。
-            facts['watermark_base_revision'] = 0
+            facts['watermark_base_revision'] = None
             observation_error = error
         facts['watermark_publication'] = {'state': 'pending', 'value': step.watermark}
         run.revision = store.save_step_result(run_id, step).revision
 
+    conflict = False
     try:
         if observation_error is not None:
             raise observation_error
@@ -239,6 +283,10 @@ def commit_verified_watermark(
             owner_home, workflow_id, step.step_id, step.watermark, run_id=run_id,
             step_attempt_id=attempt_id, effect_id=effect_id, scope_key=scope_key, operation_id=operation_id,
             expected_revision=facts.get('watermark_base_revision'),
+            expected_predecessor=(facts.get('watermark_predecessor', '')
+                                  if store is not None and facts.get('watermark_base_revision') is None
+                                  else facts.get('watermark_predecessor')),
+            attempt_started_at=getattr(step, 'started_at', 0),
         )
     except (OSError, RuntimeError, ValueError, TypeError) as error:
         if store is None:
@@ -248,14 +296,32 @@ def commit_verified_watermark(
             'step_id': step.step_id, 'error_type': type(error).__name__, 'phase': 'watermark_publication',
         })
         state = 'repair'
+        conflict = isinstance(error, _WatermarkConflict)
         checkpoint = None
     else:
         state = 'published'
     if store is not None:
         changes = {'state': state, 'value': step.watermark}
-        updated = store.save_step_watermark(run_id, step.step_id, step.watermark,
-                                            publication=changes, expected_attempt_id=attempt_id)
-        step.escalation_result = updated.escalation_result
+        if conflict:
+            changes['error_code'] = 'WORKFLOW_RUN_REVISION_CONFLICT'
+        try:
+            updated = store.save_step_watermark(run_id, step.step_id, step.watermark,
+                                                publication=changes, expected_attempt_id=attempt_id)
+        except OSError as error:
+            # The step leaf may already contain the ACK. Its durable attempt and
+            # publication state take precedence over the local pending snapshot.
+            _LOG.warning('workflow watermark acknowledgement needs repair', extra={
+                'workflow_run_id': run_id, 'step_id': step.step_id,
+                'error_type': type(error).__name__, 'phase': 'watermark_ack',
+            })
+            try:
+                current = store.load_run(run_id)
+            except OSError:
+                return checkpoint
+            updated = next((item for item in current.steps if item.step_id == step.step_id
+                            and item.escalation_result.get('attempt_id', '') == attempt_id), None)
+        if updated is not None:
+            step.escalation_result = updated.escalation_result
     return checkpoint
 
 

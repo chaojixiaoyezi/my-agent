@@ -37,11 +37,14 @@ from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from ..concurrency.interrupt import is_interrupted
 from .analysis_gate import apply_analysis_gate, isolation_params, query_health
 from .batching import (
+    BatchContinuation,
+    BatchDispatch,
     batch_summary,
     dispatch_batches,
     merge_outputs,
     pack_items,
     resolve_items,
+    submit_workflow_step,
     validate_foreach,
 )
 from .concurrency_policy import _reconcile_workflow_claim, dispatch
@@ -1251,6 +1254,70 @@ class WorkflowEngine(_WorkflowRunLifecycle):
 
     # LLM: execution_state只属于本次调用栈，发表异常沿原run保存成功前缀，不在engine实例上放跨运行可变状态。
     # 函数用途: 执行原顺序步骤并在每个IO边界更新当前事实。
+    def _run_sequential_retry(self, step, spec, outputs, definition, record, state):
+        """Keep the synchronous run coordinator across reservations and dispatch only eligible attempts."""
+        from .dag_scheduler import _run_step_worker, settle_batch_work
+        from .step_retry import RetryWake, start_retry, wait_for_retry, wait_for_workflow_completion
+
+        while True:
+            waiting = pending_retry(step)
+            step.escalation_result.setdefault('effect_state', 'reserved')
+            if waiting:
+                state.update(record=record, phase='retry_backoff', started=any(
+                    item.escalation_result.get('effect_started') for item in record.steps
+                ))
+                sleeper = getattr(self, 'retry_sleep', None)
+                if sleeper is None:
+                    observed_at = wait_for_retry(self, waiting['next_eligible_at'])
+                else:
+                    observed_at = wait_for_retry(self, waiting['next_eligible_at'], sleeper=sleeper)
+                _check_stop()
+                step.started_at = observed_at
+                start_retry(step, reserve_effect=True)
+                current = self.store.start_step_retry(record.workflow_run_id, step, observed_at=observed_at)
+                if current is None:
+                    raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+                record = current
+            else:
+                record = self.store.save_step_result(record.workflow_run_id, step)
+            state.update(record=record, phase='started', started=True)
+            local = replace_run_record(record, {})
+            local._batch_worker = True
+            local._defer_step_retry = True
+            local._defer_foreach = True
+            future = submit_workflow_step(self, local, _run_step_worker,
+                self, step, spec, dict(outputs), definition, local,
+                coordinator=step.mode == 'subworkflow' and spec.get('foreach') is None,
+            )
+            try:
+                wait_for_workflow_completion((future,))
+                step, result = future.result()
+            except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as interruption:
+                from .run_store import settle_step_effect
+
+                if future.cancel():
+                    settle_step_effect(step, marker=False, interrupted=True)
+                else:
+                    # Keep the run lock until the assigned attempt hands back its effect facts.
+                    step, result = future.result()
+                    if isinstance(result, BatchContinuation):
+                        step, _ = result.settle_step(interruption)
+                state['started'] = bool(step.escalation_result.get('effect_started') or any(
+                    item.step_id != step.step_id and item.escalation_result.get('effect_started')
+                    for item in record.steps
+                ))
+                return record, step, interruption
+            if not isinstance(result, RetryWake):
+                if isinstance(result, BatchContinuation):
+                    step, result = settle_batch_work(result)
+                return record, step, result
+            current = self.store.reserve_step_retry(
+                record.workflow_run_id, result.step, expected_attempt_id=result.expected_attempt_id,
+            )
+            if current is None:
+                raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+            record, step = current, result.step
+
     def _drive_steps(self, record, definition, start, *, execution_state=None):
         state = execution_state
         progress = {'seq': record.progress_seq}
@@ -1284,7 +1351,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                     step.escalation_result.pop('effect_outcome', None)
                     step.escalation_result['effect_started'] = False
             state.update(record=record, phase='step_publish')
-            record = self.store.save_step_result(record.workflow_run_id, step)
+            if not retry:
+                record = self.store.save_step_result(record.workflow_run_id, step)
             clock = time.monotonic()
             self._step_progress(record, step, progress)
             state.update(record=record)
@@ -1297,13 +1365,22 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                     mark_condition_indeterminate(step, error)
                 else:
                     if matched:
-                        state.update(record=record, phase='started', started=True)
-                        self._execute_step_with_retry_and_watermarks(step, spec, outputs, definition, record)
+                        if spec.get('retry_policy'):
+                            record, step, interrupted = self._run_sequential_retry(
+                                step, spec, outputs, definition, record, state,
+                            )
+                            if interrupted is not None:
+                                raise interrupted
+                        else:
+                            state.update(record=record, phase='started', started=True)
+                            self._execute_step_with_retry_and_watermarks(step, spec, outputs, definition, record)
                     else:
                         step.status = 'skipped'
                         step.escalation_result['skip_reason'] = 'condition_false'
                 _check_stop()
             except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError):
+                if state['phase'] == 'retry_backoff':
+                    raise
                 step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
                 state['record'] = replace_run_record(record, dict(steps=tuple(step if item.step_id == step.step_id else item for item in record.steps)))
                 raise
@@ -1313,6 +1390,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
             record = replace_run_record(record, dict(steps=tuple(step if item.step_id == step.step_id else item for item in record.steps)))
             state.update(record=record, phase='step_publish')
+            if step.status in ('succeeded', 'escalated_recovered'):
+                self._publish_step_watermark(step, spec, outputs, record)
             record = self.store.save_step_result(record.workflow_run_id, step)
             if step.status == 'waiting_for_agent':
                 self._step_progress(record, step, progress)
@@ -1462,9 +1541,6 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                          execute_fn=lambda: self._perform(step, spec, outputs, definition, record))
         else:
             self._perform(step, spec, outputs, definition, record)
-
-        if step.status in ('succeeded', 'escalated_recovered') and not getattr(record, '_batch_worker', False):
-            self._publish_step_watermark(step, spec, outputs, record)
 
     def _publish_step_watermark(self, step, spec, outputs, record):
         from .step_watermarks import commit_verified_watermark
@@ -1722,14 +1798,25 @@ class WorkflowEngine(_WorkflowRunLifecycle):
 
         persist()
         indices = [row['index'] for row in record.batches if row['status'] != 'succeeded']
-        dispatch_batches(indices, execute, publish, prepare=prepare, max_parallel=config['max_parallel'],
-                         fail_fast=config['on_batch_error'] == 'fail_fast')
-        values = [row['output'] for row in record.batches if row['status'] == 'succeeded']
-        record.output_snapshot = merge_outputs(values) if config['mode'] == 'aggregate' else values
-        failed = record.batches_summary['failed'] + record.batches_summary['blocked']
-        record.status, record.needs_repair = ('failed', True) if failed and config['on_batch_error'] == 'fail_fast' else ('succeeded', False)
-        record.error_code = 'WORKFLOW_BATCH_FAILED' if record.needs_repair else ''
-        record.error_message = '批处理未完成，见逐批账本' if record.needs_repair else ''
+        dispatcher = BatchDispatch(
+            indices, execute, publish, prepare=prepare, max_parallel=config['max_parallel'],
+            fail_fast=config['on_batch_error'] == 'fail_fast',
+            submit=lambda fn, index: submit_workflow_step(self, run, fn, index, coordinator=record.mode == 'subworkflow'),
+        )
+
+        def finish():
+            values = [row['output'] for row in record.batches if row['status'] == 'succeeded']
+            record.output_snapshot = merge_outputs(values) if config['mode'] == 'aggregate' else values
+            failed = record.batches_summary['failed'] + record.batches_summary['blocked']
+            record.needs_repair = bool(failed and config['on_batch_error'] == 'fail_fast')
+            record.status = 'failed' if record.needs_repair else 'succeeded'
+            record.error_code = 'WORKFLOW_BATCH_FAILED' if record.needs_repair else ''
+            record.error_message = '批处理未完成，见逐批账本' if record.needs_repair else ''
+
+        if getattr(run, '_defer_foreach', False):
+            raise BatchContinuation(dispatcher, finish)
+        dispatch_batches(dispatcher)
+        finish()
 
     # LLM: 仅debug通过副作用门后进入；审批不自批，通知只走原Owner通知账/outbox并保留真实状态，不写正式run。
     # 函数用途: 计算条件/转换、审批等待或显式通知；其它外部节点仍需可信执行器，脚本源合同不变。

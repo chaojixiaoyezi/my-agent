@@ -9,8 +9,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextvars import copy_context
+from concurrent.futures import wait
 from copy import copy
 from dataclasses import replace
 from heapq import heapify, heappop, heappush
@@ -24,11 +23,23 @@ from ..assets.workflow_store import (
 )
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
-from .batching import resolved_max_parallel
+from .batching import (
+    BatchContinuation,
+    dispatch_batches,
+    resolved_max_parallel,
+    submit_workflow_step,
+)
 from .conditions import ConditionIndeterminate, evaluate_condition, mark_condition_indeterminate
 from .models import StepExecutionRecord, payload
 from .run_store import execution_receipt, replace_run_record, settle_step_effect
-from .step_retry import RetryWake, continuing_retry, pending_retry, start_retry, wait_for_retry
+from .step_retry import (
+    RetryWake,
+    continuing_retry,
+    pending_retry,
+    start_retry,
+    wait_for_retry,
+    wait_for_workflow_completion,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -275,12 +286,32 @@ def _worker_with_effect_admission(engine, run_id, step):
     return worker
 
 
+def _finish_worker_step(engine, step, spec, run_id, clock, reserved, error=None):
+    interrupted = isinstance(error, (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError))
+    if error is not None and not interrupted:
+        step.status = 'failed'
+        step.error_code = step.error_code or getattr(error, 'error_code', 'STEP_EXECUTION_ERROR')
+        step.error_message = str(error)
+        step.needs_repair = True
+    step.ended_at = time.time()
+    step.duration_ms = (time.monotonic() - clock) * 1000
+    if reserved:
+        _settle_worker_effect(engine, run_id, step, interrupted=interrupted)
+    else:
+        _clear_unadmitted_worker_effect(step, spec)
+    return step, error if interrupted else None
+
+
 def _run_step_worker(engine, step, spec, local_outputs, definition, local_record):
-    """工作线程只发表准入标记，步骤和运行快照由协调线程提交。"""
+    """Execute one leaf attempt, or return a foreach plan to its coordinator."""
     clock = time.monotonic()
     step._worker_effect_admitted = False
     reserved = step.escalation_result.get('effect_state') == 'reserved'
     run_id = local_record.workflow_run_id
+
+    def finish(error=None):
+        return _finish_worker_step(engine, step, spec, run_id, clock, reserved, error)
+
     try:
         if reserved:
             engine = _worker_with_effect_admission(engine, run_id, step)
@@ -289,35 +320,33 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
             step, spec, local_outputs, definition, local_record
         )
         _check_stop()
-        step.ended_at = time.time()
-        step.duration_ms = (time.monotonic() - clock) * 1000
-        if reserved:
-            _settle_worker_effect(engine, run_id, step)
-        else:
-            _clear_unadmitted_worker_effect(step, spec)
-        return (step, None)
     except RetryWake as retry:
-        return (step, retry)
-    except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
-        step.ended_at = time.time()
-        step.duration_ms = (time.monotonic() - clock) * 1000
-        if reserved:
-            _settle_worker_effect(engine, run_id, step, interrupted=True)
-        return (step, exc)
-    except Exception as exc:
-        step.status = 'failed'
-        step.error_code = step.error_code or getattr(
-            exc, 'error_code', 'STEP_EXECUTION_ERROR'
-        )
-        step.error_message = str(exc)
-        step.needs_repair = True
-        step.ended_at = time.time()
-        step.duration_ms = (time.monotonic() - clock) * 1000
-        if reserved:
-            _settle_worker_effect(engine, run_id, step)
-        else:
-            _clear_unadmitted_worker_effect(step, spec)
-        return (step, None)
+        return step, retry
+    except BatchContinuation as work:
+        complete_batches = work.finish
+
+        def settle(error=None):
+            if error is None:
+                try:
+                    _check_stop()
+                    complete_batches()
+                except (Exception, KeyboardInterrupt, SystemExit) as failure:
+                    error = failure
+            return finish(error)
+
+        work.settle_step = settle
+        return step, work
+    except (Exception, KeyboardInterrupt, SystemExit) as error:
+        return finish(error)
+    return finish()
+
+
+def settle_batch_work(work):
+    try:
+        dispatch_batches(work.dispatch)
+    except (Exception, KeyboardInterrupt, SystemExit) as error:
+        return work.settle_step(error)
+    return work.settle_step()
 
 
 # LLM: 核心 DAG 并行调度执行入口；所有账本写操作在协调线程原子发生。
@@ -378,6 +407,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
 
     readiness = _ReadySteps(deps, reverse_deps, step_status)
     delayed = []
+    active_batches = {}
     admission_observer = getattr(engine, 'concurrency_admission_observer', None)
 
     halt_event = False
@@ -414,6 +444,9 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
 
     def _process_completed_step(sid: str, completed_step: StepExecutionRecord, exc: BaseException | None) -> None:
         nonlocal record, halt_event
+        if isinstance(exc, BatchContinuation):
+            active_batches[sid] = exc
+            return
         if isinstance(exc, RetryWake):
             current = engine.store.reserve_step_retry(
                 record.workflow_run_id, exc.step, expected_attempt_id=exc.expected_attempt_id)
@@ -470,14 +503,13 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 outputs[sid] = payload(completed_step.output_snapshot)
 
     ready = readiness.ready
-    with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix='workflow-dag') as pool:
-        active_futures: dict[Any, tuple[str, dict[str, Any]]] = {}
-
-        while (ready or delayed or active_futures) and not halt_event:
+    active_futures: dict[Any, tuple[str, dict[str, Any]]] = {}
+    try:
+        while (ready or delayed or active_futures or active_batches) and not halt_event:
             now = time.time()
             while delayed and delayed[0][0] <= now:
                 readiness.enqueue(heappop(delayed)[1])
-            while ready and len(active_futures) < max_parallel and not halt_event:
+            while ready and len(active_futures) + len(active_batches) < max_parallel and not halt_event:
                 _, sid = heappop(ready)
                 spec = step_specs[sid]
                 prev = previous_steps.get(sid)
@@ -534,7 +566,13 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 step.escalation_result.pop('effect_outcome', None)
 
                 state.update(record=record, phase='step_publish')
-                record = engine.store.save_step_result(record.workflow_run_id, step)
+                if retry:
+                    current = engine.store.start_step_retry(record.workflow_run_id, step, observed_at=time.time())
+                    if current is None:
+                        raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+                    record = current
+                else:
+                    record = engine.store.save_step_result(record.workflow_run_id, step)
                 engine._step_progress(record, step, progress)
                 state.update(record=record, phase='started', started=True)
 
@@ -553,40 +591,66 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 local_record = replace_run_record(record, {})
                 local_record._batch_worker = True
                 local_record._defer_step_retry = True
-                local_outputs = dict(outputs)
-                ctx = copy_context()
-                fut = pool.submit(
-                    ctx.run,
-                    _run_step_worker,
-                    engine,
-                    step,
-                    spec,
-                    local_outputs,
-                    definition,
-                    local_record,
+                local_record._defer_foreach = True
+                fut = submit_workflow_step(engine, local_record, _run_step_worker,
+                    engine, step, spec, dict(outputs), definition, local_record,
+                    coordinator=step.mode == 'subworkflow' and spec.get('foreach') is None,
                 )
                 active_futures[fut] = (sid, spec)
 
             if halt_event:
                 break
 
-            if active_futures:
-                timeout = max(0.0, delayed[0][0] - time.time()) if delayed and len(active_futures) < max_parallel else None
-                done, _ = wait(active_futures, timeout=timeout, return_when=FIRST_COMPLETED)
-                for fut in done:
+            for sid, work in tuple(active_batches.items()):
+                try:
+                    complete = work.dispatch.advance()
+                except (Exception, KeyboardInterrupt, SystemExit) as error:
+                    work.dispatch.drain(cancel_queued=True)
+                    active_batches.pop(sid)
+                    _process_completed_step(sid, *work.settle_step(error))
+                else:
+                    if complete:
+                        active_batches.pop(sid)
+                        _process_completed_step(sid, *work.settle_step())
+                if halt_event:
+                    break
+            if halt_event:
+                break
+
+            futures = set(active_futures)
+            for work in active_batches.values():
+                futures.update(work.dispatch.active)
+            if futures:
+                has_slot = len(active_futures) + len(active_batches) < max_parallel
+                timeout = max(0.0, delayed[0][0] - time.time()) if delayed and has_slot else None
+                try:
+                    done = wait_for_workflow_completion(futures, timeout=timeout)
+                except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as error:
+                    halt_reason.update(type='cancel', exc=error)
+                    for future in active_futures:
+                        future.cancel()
+                    for work in active_batches.values():
+                        work.dispatch.drain(cancel_queued=True)
+                    break
+                for fut in done & active_futures.keys():
                     done_sid, _ = active_futures.pop(fut)
                     c_step, c_exc = fut.result()
                     _process_completed_step(done_sid, c_step, c_exc)
-            elif delayed:
+            elif delayed and not ready:
                 state['started'] = _run_effect_observed(record)
                 wait_for_retry(engine, delayed[0][0])
 
         if active_futures:
-            wait(active_futures.keys())
+            wait(future for future in active_futures if not future.cancelled())
             for fut in list(active_futures.keys()):
                 done_sid, _ = active_futures.pop(fut)
                 try:
-                    c_step, c_exc = fut.result()
+                    if fut.cancelled():
+                        c_step = next(item for item in record.steps if item.step_id == done_sid)
+                        settle_step_effect(c_step, marker=False, interrupted=True)
+                        c_exc = halt_reason['exc']
+                    else:
+                        c_step, c_exc = fut.result()
                     _process_completed_step(done_sid, c_step, c_exc)
                 except Exception as exc:
                     # 排空错误可能晚于外部效果，保留现有步骤与实际已发表的同伴回执。
@@ -605,6 +669,20 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     settle_step_effect(step, marker=None, drain_failed=True)
                     _process_completed_step(done_sid, step, None)
             active_futures.clear()
+        for sid, work in tuple(active_batches.items()):
+            if halt_reason['type'] == 'cancel':
+                work.dispatch.drain(cancel_queued=True)
+                completed = work.settle_step(halt_reason['exc'])
+            else:
+                completed = settle_batch_work(work)
+            active_batches.pop(sid)
+            _process_completed_step(sid, *completed)
+    finally:
+        for future in active_futures:
+            future.cancel()
+        wait(future for future in active_futures if not future.cancelled())
+        for work in active_batches.values():
+            work.dispatch.drain(cancel_queued=True)
 
     if halt_reason['type'] == 'cancel':
         state['started'] = _run_effect_observed(record)
