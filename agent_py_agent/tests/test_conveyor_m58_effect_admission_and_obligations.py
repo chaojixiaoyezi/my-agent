@@ -404,10 +404,13 @@ def _put_task(store, task_id, *, status="done", created_at=1_000.0, refers=False
     if refers:
         metadata["workflow_ref"] = f"workflow:{_REFERENCE_TARGET}"
     path = store.storage.session_tasks_dir / f"{task_id}.json"
-    write_json_file_atomic(path, {"schema_version": "session_task.v1", "task_id": task_id, "status": status,
-                                  "created_at": created_at, "updated_at": created_at, "metadata": metadata})
+    payload = {"schema_version": "session_task.v1", "task_id": task_id, "status": status,
+               "created_at": created_at, "updated_at": created_at, "metadata": metadata}
     if publish:
-        store._list_index().publish(path)
+        with store._list_index().track_task_change(path):
+            write_json_file_atomic(path, payload)
+    else:
+        write_json_file_atomic(path, payload)
 
 
 def _settled_history(store, count, *, referencing_every=0):
@@ -496,7 +499,7 @@ def test_task_appended_mid_cycle_is_covered_without_a_new_generation(tmp_path):
     assert result and _reference_row(tmp_path)[0] == generation
 
 
-def test_reopened_visited_task_restarts_coverage(tmp_path):
+def test_reopened_visited_task_rechecks_only_the_changed_record(tmp_path):
     store, reader = _session_task_reader(tmp_path)
     _settled_history(store, 300, referencing_every=50)
     for _ in range(6):
@@ -506,10 +509,10 @@ def test_reopened_visited_task_restarts_coverage(tmp_path):
     assert result
     generation = _reference_row(tmp_path)[0]
     _put_task(store, "settled-00050", refers=True, publish=True, task_learning_enqueue={"status": "pending"})
-    assert _check(reader) == (False, {"settled-00050"})
-    restarted = _reference_row(tmp_path)
-    assert restarted[0] != generation
-    assert json.loads(restarted[1])["walk"] is None and json.loads(restarted[1])["done"] is False
+    assert _check(reader) == (True, {"settled-00050"})
+    resumed = _reference_row(tmp_path)
+    assert resumed[0] == generation
+    assert json.loads(resumed[1])["done"] is True
     _put_task(store, "settled-00050", refers=True, publish=True, task_learning_enqueue={"status": "done"})
     for _ in range(6):
         result, refs = _check(reader)
@@ -544,21 +547,204 @@ def test_concurrent_cursor_cas_loss_never_reports_complete(tmp_path, monkeypatch
     assert outcomes[-1] == (True, False)
 
 
-def test_append_burst_beyond_one_slice_restarts_the_cycle(tmp_path):
+def test_successive_append_bursts_preserve_coverage_progress(tmp_path):
     store, reader = _session_task_reader(tmp_path)
     _settled_history(store, 300)
     assert _check(reader) == (False, set())
-    first = json.loads(_reference_row(tmp_path)[1])
-    # A burst larger than one budget slice inside the append window; its open task is the oldest member.
-    _put_task(store, "burst-open", status="queued", created_at=first["floor"] + 1e-5, refers=True, publish=True)
-    for index in range(200):
-        _put_task(store, f"burst-{index:03d}", created_at=first["floor"] + 1e-5 * (index + 2), publish=True)
+    generation, raw = _reference_row(tmp_path)
+    first = json.loads(raw)
+    for burst in range(3):
+        for number in range(145):
+            _put_task(store, f"burst-{burst}-{number:03d}", publish=True)
+        complete, refs = _check(reader)
+        assert not complete and not refs
+        current_generation, raw = _reference_row(tmp_path)
+        state = json.loads(raw)
+        assert current_generation == generation
+        assert state["position"] > first["position"]
+        assert state["done"] or state["walk"] != first["walk"]
+        first = state
+    _put_task(store, "burst-open", status="queued", created_at=1.0, refers=True, publish=True)
+    assert _drain_task_coverage(reader)[1] == {"burst-open"}
+    assert _reference_row(tmp_path)[0] == generation
+
+
+def _drain_task_coverage(reader, *, limit=12):
+    for _ in range(limit):
+        complete, refs = _check(reader)
+        if complete or refs:
+            return complete, refs
+    pytest.fail("SessionTask coverage did not converge within its bounded slices")
+
+
+def _create_referencing_task(store, owner_id, *, created_at, at_factory, key="delayed"):
+    from agent_py_agent.agent.conversation.business_contracts import (
+        BusinessContextIntent,
+        BusinessExecutionContext,
+    )
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
+    from agent_py_agent.agent.conversation.store_threads import ThreadStore
+
+    threads = ThreadStore(store.storage)
+    sender = threads.create(owner_id=owner_id)
+    target = threads.create(owner_id=owner_id)
+    selected = (f"workflow:{_REFERENCE_TARGET}",)
+    intent = BusinessContextIntent(owner_id, None, None, None, requested_method_refs=selected)
+
+    def frozen_context(task_id):
+        at_factory(task_id)
+        return BusinessExecutionContext(owner_id, None, None, task_id, None, None,
+                                        selected, (), "business-context.v1")
+
+    return store.create(SessionTaskDraft(sender.thread_id, target.thread_id, "fixture", dedupe_key=key),
+                        now=created_at, business_context_intent=intent, business_context_factory=frozen_context)
+
+
+@pytest.mark.parametrize("during_walk", [False, True])
+def test_delayed_session_task_publication_blocks_workflow_recycle(tmp_path, during_walk):
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+    from agent_py_agent.agent.workflows.business_scope import WorkflowPolicyRefusal
+    from agent_py_agent.agent.workflows.reference_sources import WorkflowManagementService
+    from agent_py_agent.tests.test_wf_g6_reference_sources_recycle import _create_unassigned_flow
+
+    store, reader = _session_task_reader(tmp_path)
+    actor = SimpleNamespace(owner_id="local/main")
+    service = WorkflowManagementService(tmp_path, owner_id=actor.owner_id, reference_reader=reader)
+    _create_unassigned_flow(service, actor, _REFERENCE_TARGET)
+    revision = service._get(_REFERENCE_TARGET).descriptor.revision
+    _settled_history(store, 300)
+    created_at = time.time() - 30
+    if during_walk:
+        assert _check(reader) == (False, set())
+    else:
+        assert _drain_task_coverage(reader) == (True, set())
+
+    def during_creation(_task_id):
+        if during_walk:
+            assert _check(reader) == (False, set())
+
+    task = _create_referencing_task(store, actor.owner_id, created_at=created_at, at_factory=during_creation)
+    assert task.created_at == created_at and task.status == "queued"
+    with pytest.raises(WorkflowPolicyRefusal) as refused:
+        service.execute("workflows.recycle", {"workflow_ref": _REFERENCE_TARGET}, actor=actor,
+                        expected_revision=revision, idempotency_key="blocked-recycle")
+    assert refused.value.code in {"WORKFLOW_CLEANUP_BLOCKED", "WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN", "REFERENCE_COVERAGE_UNKNOWN"}
+    assert _drain_task_coverage(reader)[1] == {task.task_id}
+    store.advance(task.task_id, SessionTaskUpdate(status="cancelled"))
+    assert _drain_task_coverage(reader) == (True, set())
+    result = service.execute("workflows.recycle", {"workflow_ref": _REFERENCE_TARGET}, actor=actor,
+                             expected_revision=revision, idempotency_key="settled-recycle")
+    assert result["lifecycle"] == "recycled"
+
+
+@pytest.mark.parametrize("interruption", ["publication_failure", "projection_rebuild", "change_table_rebuild"])
+def test_canonical_walk_repairs_a_lost_publication_epoch(tmp_path, monkeypatch, interruption):
+    from agent_py_agent.agent.conversation.session_list_index import SessionListIndex
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+
+    store, reader = _session_task_reader(tmp_path)
+    _settled_history(store, 300)
+    assert _drain_task_coverage(reader) == (True, set())
+    generation = _reference_row(tmp_path)[0]
+    captured = []
+
+    if interruption == "publication_failure":
+        def fail_publish(*args, **kwargs):
+            raise OSError("simulated projection publication failure")
+
+        with monkeypatch.context() as failure:
+            failure.setattr(SessionListIndex, "publish", fail_publish)
+            with pytest.raises(OSError, match="simulated projection publication failure"):
+                _create_referencing_task(store, "local/main", created_at=1.0, at_factory=captured.append)
+        _put_task(store, "later-publication", publish=True)
+    else:
+        task = _create_referencing_task(store, "local/main", created_at=1.0, at_factory=captured.append)
+        index = store._list_index()
+        if interruption == "projection_rebuild":
+            index.path.unlink()
+        else:
+            assert _check(reader)[1] == {task.task_id}
+            with index._connection() as conn:
+                conn.execute("DROP TABLE task_changes")
+
+    [task_id] = captured
+    assert store.load(task_id).status == "queued"
+    _, restarted = _session_task_reader(tmp_path)
+    complete, refs = _check(restarted)
+    assert not complete or refs == {task_id}
+    assert _reference_row(tmp_path)[0] != generation
+    assert _drain_task_coverage(restarted)[1] == {task_id}
+    store.advance(task_id, SessionTaskUpdate(status="cancelled"))
+    assert _drain_task_coverage(restarted) == (True, set())
+
+
+def test_legacy_complete_cursor_cannot_allow_recycle_or_orphan_cleanup(tmp_path):
+    import hashlib
+
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+    from agent_py_agent.agent.workflows.business_scope import WorkflowPolicyRefusal, workflow_state
+    from agent_py_agent.agent.workflows.orphan_maintenance import maintain_owner_workflows
+    from agent_py_agent.agent.workflows.reference_sources import WorkflowManagementService
+    from agent_py_agent.agent.workflows.run_list_index import RunListIndex
+    from agent_py_agent.tests.test_wf_g6_reference_sources_recycle import _create_unassigned_flow
+
+    store, reader = _session_task_reader(tmp_path)
+    actor = SimpleNamespace(owner_id="local/main")
+    clock = [time.time()]
+    service = WorkflowManagementService(tmp_path, owner_id=actor.owner_id, reference_reader=reader,
+                                        clock=lambda: clock[0])
+    _create_unassigned_flow(service, actor, _REFERENCE_TARGET)
+    revision = service._get(_REFERENCE_TARGET).descriptor.revision
+    _settled_history(store, 300)
+    task = _create_referencing_task(store, actor.owner_id, created_at=1.0, at_factory=lambda _: None)
+    version = store.obligation_source_version()
+    projection = store._list_index().path.stat()
+    cycle = uuid.uuid4().hex
+    previous = _reference_row(tmp_path)
+    generation = hashlib.sha256(json.dumps(["session_task_reference.v1", list(version[:2]), cycle]).encode()).hexdigest()
+    old = {"cycle": cycle, "walk": None, "done": True, "stamp": list(version[2:]),
+           "index": [projection.st_dev, projection.st_ino], "floor": time.time() - 10, "watch": []}
+    assert RunListIndex(tmp_path).advance_reference_cursor(
+        f"session_tasks:{_REFERENCE_TARGET}", previous=previous, generation=generation,
+        cursor=json.dumps(old), now=time.time(),
+    )
+
+    _, service.reference_reader = _session_task_reader(tmp_path)
+    clock[0] += 100 * 86400
+    with pytest.raises(WorkflowPolicyRefusal):
+        service.execute("workflows.recycle", {"workflow_ref": _REFERENCE_TARGET}, actor=actor,
+                        expected_revision=revision, idempotency_key="legacy-recycle")
+    assert _drain_task_coverage(service.reference_reader)[1] == {task.task_id}
+    assert _reference_row(tmp_path)[0] != generation
+    blocked = maintain_owner_workflows(service, actor=actor, idempotency_key="legacy-orphan-blocked")
+    assert blocked["counts"]["recycled"] == 0
+    assert workflow_state(service._get(_REFERENCE_TARGET))["lifecycle"] == "active"
+
+    store.advance(task.task_id, SessionTaskUpdate(status="cancelled"))
+    assert _drain_task_coverage(service.reference_reader) == (True, set())
+    settled = maintain_owner_workflows(service, actor=actor, idempotency_key="legacy-orphan-settled")
+    assert settled["counts"]["recycled"] == 1
+    assert workflow_state(service._get(_REFERENCE_TARGET))["lifecycle"] == "recycled"
+
+
+def test_source_change_after_cursor_cas_invalidates_absence(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows.run_list_index import RunListIndex
+
+    store, reader = _session_task_reader(tmp_path)
+    _settled_history(store, 260)
     assert _check(reader) == (False, set())
-    restarted = json.loads(_reference_row(tmp_path)[1])
-    assert restarted["cycle"] != first["cycle"] and restarted["walk"] is None
-    for _ in range(6):
-        result, refs = _check(reader)
-        if refs:
-            break
-        assert not result
-    assert refs == {"burst-open"}
+    assert _check(reader) == (False, set())
+    original = RunListIndex.advance_reference_cursor
+    published = []
+
+    def publish_after_cas(self, source_id, *, previous, generation, cursor, now):
+        committed = original(self, source_id, previous=previous, generation=generation, cursor=cursor, now=now)
+        if committed and json.loads(cursor)["done"] and not published:
+            _put_task(store, "after-cas", status="queued", created_at=1.0, refers=True, publish=True)
+            published.append(True)
+        return committed
+
+    monkeypatch.setattr(RunListIndex, "advance_reference_cursor", publish_after_cas)
+    assert _check(reader) == (False, set())
+    assert published
+    assert _drain_task_coverage(reader)[1] == {"after-cas"}
