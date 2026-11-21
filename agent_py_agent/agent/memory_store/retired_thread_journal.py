@@ -59,14 +59,8 @@ def _validate_row(row: dict) -> None:
     _relative_parts(row.get("trash_container"))
 
 
-# LLM: 仅由领域在退休事务提交之后调用；沿用原 JSON 锁与私有追加叶，不重写台账历史。
-# 函数用途: 追加一条所有者相对路径的退休证明。
-def append_retired_thread(
-    home, *, thread_id: str, conversation_root: Path, action_id: str,
-    trash_container: Path, retired_at: float,
-) -> None:
-    from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
-
+def retired_thread_row(home, *, thread_id, conversation_root, action_id, trash_container, retired_at):
+    """Build the same owner-relative receipt from a committed tombstone or the retirement writer."""
     row = {
         "schema": "retired_thread.v1",
         "thread_id": thread_id,
@@ -76,10 +70,26 @@ def append_retired_thread(
         "retired_at": retired_at,
     }
     _validate_row(row)
+    return row
+
+
+# LLM: 仅由领域在退休事务提交之后调用；沿用原 JSON 锁与私有追加叶，不重写台账历史。
+# 函数用途: 追加一条所有者相对路径的退休证明。
+def append_retired_thread(
+    home, *, thread_id: str, conversation_root: Path, action_id: str,
+    trash_container: Path, retired_at: float, confirm=None,
+) -> None:
+    from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
+
+    row = retired_thread_row(
+        home, thread_id=thread_id, conversation_root=conversation_root, action_id=action_id,
+        trash_container=trash_container, retired_at=retired_at,
+    )
     path = Path(home.owner_data_dir) / "retention" / "retired_threads.jsonl"
     _owner_relative(home, path)
     with locked_json_path(path):
-        append_private_jsonl_records_unlocked(path, [row], sort_keys=True)
+        if confirm is None or confirm():
+            append_private_jsonl_records_unlocked(path, [row], sort_keys=True)
 
 
 # LLM: 只读no-follow字节分页；坏完整行（含过深JSON）跳过，末尾半行不消费，I/O失败上抛。

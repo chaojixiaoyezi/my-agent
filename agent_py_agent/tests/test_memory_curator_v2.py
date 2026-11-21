@@ -230,7 +230,7 @@ def _service(
     )
 
 
-def _conversation(tmp_path: Path):
+def _conversation(tmp_path: Path, *, message_at: float = 11.0):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(
         {
@@ -238,7 +238,7 @@ def _conversation(tmp_path: Path):
             "channel": "internal",
             "channel_conversation_id": "chat-1",
             "channel_user_id": "user-1",
-            "now": 10.0,
+            "now": message_at - 1,
         }
     )
     message = store.messages.append(
@@ -253,7 +253,7 @@ def _conversation(tmp_path: Path):
                 "task_id": "task-1",
                 "run_id": "run-1",
             },
-            "now": 11.0,
+            "now": message_at,
         }
     )
     return store, thread, message
@@ -262,30 +262,32 @@ def _conversation(tmp_path: Path):
 def test_background_curator_defers_same_endpoint_without_consuming_memory(tmp_path):
     from agent_py_agent.agent.backends.request_scope import foreground_model_scope
 
-    store, thread, message = _conversation(tmp_path)
+    now = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+    store, thread, message = _conversation(tmp_path, message_at=now.timestamp() - 60)
     backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id, message.content))
     backend.api_base = "http://shared-model.invalid/v1"
     service = _service(tmp_path, backend, store)
-    service.request("task_complete")
+    service.state_store.request("task_complete", requested_at=now.isoformat())
     before = service.state_store.load()
     with foreground_model_scope(SimpleNamespace(api_base=backend.api_base)):
-        result = service.run_if_due()
+        result = service.run_if_due(now=now)
         assert result.status == "busy" and backend.calls == 0
         assert service.state_store.load() == before
-    assert service.run_if_due().status == "succeeded"
+    assert service.run_if_due(now=now).status == "succeeded"
     assert backend.calls == 1
 
 
 def test_precompact_curator_bypasses_foreground_deferral(tmp_path):
     from agent_py_agent.agent.backends.request_scope import foreground_model_scope
 
-    store, thread, message = _conversation(tmp_path)
+    now = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+    store, thread, message = _conversation(tmp_path, message_at=now.timestamp() - 60)
     backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id, message.content))
     backend.api_base = "http://shared-model.invalid/v1"
     service = _service(tmp_path, backend, store)
-    service.request("pre_compact")
+    service.state_store.request("pre_compact", requested_at=now.isoformat())
     with foreground_model_scope(SimpleNamespace(api_base=backend.api_base)):
-        assert service.run_if_due().status == "succeeded"
+        assert service.run_if_due(now=now).status == "succeeded"
     assert backend.calls == 1
 
 

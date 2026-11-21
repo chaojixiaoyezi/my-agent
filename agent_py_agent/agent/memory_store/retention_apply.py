@@ -56,6 +56,7 @@ from .retention_scan import (
     _conversation_ledger_active_paths,
     _conversation_ledger_member_paths,
     _conversation_related_paths,
+    _curator_restore_started,
     _curator_source_current,
     _load_policy,
     _retired_conversation_matches,
@@ -350,7 +351,7 @@ def _apply_action(
         if not complete:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         if action.operation == "conversation_restore":
-            return _restore_curator_conversation(home, action, pins, config=config, now=now)
+            return _restore_curator_conversation(home, action, pins, config=config)
         protected = ((action.record_id in pins.ids or action.path.name in pins.ids
                       or action.category == "conversation" and action.record_id in pins.curator_threads
                       or any(pins.paths.overlaps(path.resolve(strict=False))
@@ -534,10 +535,10 @@ class _ConversationProofChanged(Exception):
     pass
 
 
-def _commit_trash(destination, *, action, payload, now, confirm=None):
+def _commit_trash(destination, *, action, payload, now, confirm=None, members=None):
     if confirm is not None and not confirm():
         raise _ConversationProofChanged
-    _write_tombstone(destination, action=action, payload=payload, now=now, status="trashed")
+    _write_tombstone(destination, action=action, payload=payload, now=now, status="trashed", members=members)
     if confirm is not None and not confirm():
         raise _ConversationProofChanged
     (destination / _TRASH_COMMIT_PENDING).unlink()
@@ -871,14 +872,14 @@ def _trash_conversation(
         moved: list[tuple[Path, Path]] = []
         _begin_trash(destination, action=action, payload=payload_root, now=now)
         try:
+            fingerprints = {}
             if (not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
-                    or not _fingerprint_matches(action.source_fingerprint, paths_fingerprint(action.related_paths))
+                    or not _fingerprint_matches(action.source_fingerprint,
+                        paths_fingerprint(action.related_paths, member_fingerprints=fingerprints))
                     or not conversation_extraction_proof_current(home, config, action, root, thread,
                                                                   budget=scan_budget, pins=pins)):
                 raise _ConversationProofChanged
             for source in action.related_paths:
-                if not source.exists():
-                    continue
                 relative = source.relative_to(root)
                 target = payload_root / relative
                 ensure_private_dir(target.parent)
@@ -888,7 +889,9 @@ def _trash_conversation(
             _remove_conversation_index(bindings_path, thread.thread_id, removed_bindings)
             _remove_conversation_index(latest_path, thread.thread_id, removed_latest)
             index_update_pending = False
-            _commit_trash(destination, action=action, payload=payload_root, now=now, confirm=still_current)
+            members = {str(source.relative_to(root)): digest for source, digest in fingerprints.items()}
+            _commit_trash(destination, action=action, payload=payload_root, now=now, confirm=still_current,
+                          members=members)
         except Exception as exc:
             restored = _rollback_retention_moves(moved)
             restored = restored and not index_update_pending
@@ -916,61 +919,156 @@ def _trash_conversation(
     return replace(action, status="trashed")
 
 
-def _restore_curator_conversation(home, action, pins, *, config, now):
+def _restore_curator_conversation(home, action, pins, *, config):
     owner = Path(home.owner_home_dir)
     row = pins.curator_retirements.get(action.path)
-    if row is None or not pins.curator_recovery_source:
+    if row is None:
         return replace(action, status="state_changed")
     root = owner / row["conversation_root"]
-    trash = Path(home.owner_trash_dir) / "retention"
-    if not action.path.is_relative_to(trash) or action.destination != root or action.record_id != row["thread_id"]:
+    trash = Path(home.owner_trash_dir) / "retention" / "conversation"
+    if action.path.parent != trash or action.destination != root or action.record_id != row["thread_id"]:
         return replace(action, status="state_changed")
     _assert_safe_target(root, (owner,))
-    thread_id = action.record_id
-    target_thread = root / "threads" / f"{thread_id}.json"
-    target_messages = root / "messages" / f"{thread_id}.jsonl"
+    thread = Path("threads") / f"{action.record_id}.json"
     payload = action.path / "payload"
-    source_thread = payload / "threads" / target_thread.name
-    with locked_json_path(target_messages), locked_file_transition(target_thread):
+    with ExitStack() as locks:
+        locks.enter_context(locked_json_path(root / "messages" / f"{action.record_id}.jsonl"))
+        locks.enter_context(locked_file_transition(root / thread))
         tombstone = action.path / "tombstone.json"
         report = read_json_object_report(tombstone, context="memory_retention.curator_restore")
         current = read_live_extraction_switch(home, config)
-        if (target_thread.exists() or report.load_error is not None or action.curator_switch != current
+        meta = report.payload
+        if (report.load_error is not None or action.curator_switch != current
                 or not curator_dependency_proof_current(pins, current)
-                or not _curator_source_current(*pins.curator_recovery_source)
-                or not _retired_conversation_matches(owner, row, action.path, report.payload)
+                or not _retired_conversation_matches(owner, row, action.path, meta)
                 or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(tombstone))
-                or not _fingerprint_matches(action.source_fingerprint, tree_fingerprint(action.path))
-                or _trash_curator_dependency(pins, action.path, report.payload, config) != "needed"):
+                or not _fingerprint_matches(action.source_fingerprint, tree_fingerprint(action.path))):
             return replace(action, status="state_changed")
-        thread = ConversationThread.from_dict(json.loads(source_thread.read_text(encoding="utf-8")))
-        if thread.thread_id != thread_id:
+        started = _curator_restore_started(action.path, row, meta)
+        if not started and _trash_curator_dependency(pins, action.path, meta, config) != "needed":
             return replace(action, status="state_changed")
-        members, errors = _conversation_related_paths(payload, thread)
-        if errors or source_thread not in members or set(members) != set(_walk_files(payload)):
-            return replace(action, status="state_changed")
-        transfers = [(source, root / source.relative_to(payload)) for source in members if source != source_thread]
-        transfers.append((source_thread, target_thread))
-        for source, target in transfers:
-            _assert_safe_target(source, (payload,))
-            _assert_safe_target(target, (root,))
-            if target.exists() or target.is_symlink():
-                return replace(action, status="state_changed")
-        marker = action.path / _TRASH_COMMIT_PENDING
-        write_private_text_file_atomic_unlocked(marker, action.action_id + "\n")
+        intent = meta.get("restore")
+        members = meta.get("members")
+        if "restore" in meta:
+            if not isinstance(intent, dict) or intent.get("action_id") != action.action_id:
+                raise _restore_unresolved("restore intent does not match the recovery action")
+            members = intent.get("members")
+        observation, usage = _conversation_ledger_active_paths(root, action.record_id)
+        for active in (observation, usage):
+            if active.resolve(strict=False) != active:
+                raise _restore_unresolved(f"ledger path is redirected at {active.relative_to(root)}")
+        locks.enter_context(locked_file_transition(usage.with_name(f".{usage.name}.append-once")))
+        locks.enter_context(locked_json_path(usage))
+        locks.enter_context(locked_json_path(UsageIndex(usage, action.record_id).path))
+        locks.enter_context(locked_json_path(observation))
+        if intent is None and "members" not in meta:
+            members = _legacy_restore_members(payload, root, thread, started)
+        transfers = _curator_restore_transfers(payload, root, thread, members, started)
+        if action.path in pins.curator_unpublished and pins.curator_journal_source is not None:
+            # Reuse the bounded journal scan under the append lock. A lost acknowledgment
+            # changes the stamp, so the next pass sees the existing row instead of duplicating it.
+            try:
+                append_retired_thread(home, thread_id=action.record_id, conversation_root=root,
+                    action_id=row["action_id"], trash_container=action.path, retired_at=row["retired_at"],
+                    confirm=lambda: _curator_source_current(*pins.curator_journal_source))
+            except OSError:
+                logging.getLogger(__name__).warning("RETIRED_THREAD_JOURNAL_REPAIR_FAILED %s", action.record_id)
+        if intent is None:
+            meta["restore"] = {"action_id": action.action_id, "members": members}
+            write_private_json_file_atomic(tombstone, meta)
         moved = []
         try:
-            # Publish canonical metadata only after every other family member is present.
             for source, target in transfers:
                 ensure_private_dir(target.parent)
+                if file_fingerprint(target) != "missing":
+                    raise _restore_unresolved(f"destination appeared at {target.relative_to(root)}")
                 _move_retention_payload(source, target)
                 moved.append((source, target))
         except Exception:
-            if _rollback_retention_moves(moved):
-                marker.unlink()
+            # A move can raise after publishing metadata. Never undo its prerequisites.
+            if file_fingerprint(root / thread) == "missing":
+                _rollback_retention_moves(moved)
             raise
-        shutil.rmtree(action.path)
+
+        # Keep the intent until all canonical files are verified and trash cleanup is done.
+        if _curator_restore_transfers(payload, root, thread, members, True):
+            raise _restore_unresolved("the canonical family is incomplete after moving")
+        lock = tombstone.with_suffix(tombstone.suffix + ".lock")
+        marker = action.path / _TRASH_COMMIT_PENDING
+        if any(path not in {tombstone, lock, marker, payload} for path in action.path.iterdir()):
+            raise _restore_unresolved("the trash container contains unexpected recovery data")
+        if payload.exists():
+            shutil.rmtree(payload)
+        marker.unlink(missing_ok=True)
+        # Only this thread-locked transaction writes the tombstone in this container.
+        lock.unlink(missing_ok=True)
+        tombstone.unlink()
+        action.path.rmdir()
     return replace(action, status="restored")
+
+
+def _restore_unresolved(reason):
+    return OSError(
+        f"CURATOR_RETENTION_RESTORE_UNRESOLVED: {reason}. "
+        "Recovery data was retained. Verify the canonical and trash copies before retrying."
+    )
+
+
+def _legacy_restore_members(payload, root, thread_path, started):
+    source = payload / thread_path
+    if file_fingerprint(source) == "missing" and started:
+        source = root / thread_path
+    if not valid_fingerprint(file_fingerprint(source)):
+        raise _restore_unresolved("thread metadata is unavailable")
+    thread = ConversationThread.from_dict(json.loads(source.read_text(encoding="utf-8")))
+    if thread.thread_id != thread_path.stem:
+        raise _restore_unresolved("thread metadata belongs to another thread")
+    trashed, errors = _conversation_related_paths(payload, thread)
+    live, live_errors = _conversation_related_paths(root, thread) if started else ((), [])
+    members = {str(path.relative_to(payload)): file_fingerprint(path) for path in trashed}
+    if errors or live_errors or set(trashed) != set(_walk_files(payload)):
+        raise _restore_unresolved("legacy payload does not match the verified thread family")
+    if live:
+        # The old restore wrote members in lexical order with metadata last.
+        last_live = max((path == root / thread_path, str(path.relative_to(root))) for path in live)
+        if trashed and last_live >= min(
+            (path == payload / thread_path, str(path.relative_to(payload))) for path in trashed
+        ):
+            raise _restore_unresolved("legacy members do not match the original transfer order")
+    for path in live:
+        relative = path.relative_to(root)
+        if str(relative) in members:
+            raise _restore_unresolved(f"both copies exist at {relative}")
+        members[str(relative)] = file_fingerprint(path)
+    return members
+
+
+def _curator_restore_transfers(payload, root, thread, members, started):
+    if not isinstance(members, dict) or str(thread) not in members:
+        raise _restore_unresolved("member manifest does not contain the thread metadata")
+    remaining, transfers = set(), []
+    # Metadata is the publication point, including on retries.
+    for name, digest in sorted(members.items(), key=lambda item: (item[0] == str(thread), item[0])):
+        relative = Path(name)
+        if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                or str(relative) != name or not valid_fingerprint(digest)):
+            raise _restore_unresolved("invalid member identity")
+        source, target = payload / relative, root / relative
+        _assert_safe_target(source, (payload,))
+        _assert_safe_target(target, (root,))
+        if source.resolve(strict=False) != source or target.resolve(strict=False) != target:
+            raise _restore_unresolved(f"member path is redirected at {relative}")
+        old, new = file_fingerprint(source), file_fingerprint(target)
+        if old == digest and new == "missing":
+            remaining.add(source)
+            transfers.append((source, target))
+        elif not (started and old == "missing" and new == digest):
+            raise _restore_unresolved(f"member is missing, changed or duplicated at {relative}")
+    if remaining != set(_walk_files(payload)):
+        raise _restore_unresolved("trash contains files outside the member manifest")
+    if transfers and file_fingerprint(root / thread) != "missing":
+        raise _restore_unresolved("canonical metadata was published before every member arrived")
+    return transfers
 
 
 # LLM: 仅在回收已提交后调用；自底向上只rmdir本线程冷目录内已被本次搬空的子目录，rmdir原子拒绝非空，
@@ -997,7 +1095,7 @@ def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
     if action.category == "trash":
         if report.payload.get("category") in {"daily", "curator_run", "compact"}:
             return False
-        if _trash_transaction_pending(action.path):
+        if "restore" in report.payload or _trash_transaction_pending(action.path):
             return False
         timestamp = _timestamp(report.payload.get("moved_at"))
         return bool(
@@ -1085,6 +1183,7 @@ def _write_tombstone(
     payload: Path,
     now: datetime,
     status: str,
+    members: dict[str, str] | None = None,
 ) -> None:
     # 回收墓碑属宿主运行数据：私有原子写（0600/0700）；内容逐字节不变。
     write_private_json_file_atomic(
@@ -1100,6 +1199,7 @@ def _write_tombstone(
             "authority_status": action.authority_status,
             "moved_at": now.isoformat(),
             "status": status,
+            **({"members": members} if members is not None else {}),
         },
     )
 

@@ -18,6 +18,7 @@ import struct
 from pathlib import Path
 
 from ..common import nofollow_fs
+from ..local_storage.owner_read_index import _ResumableSha256
 
 _WORKSPACE = ("retention", "candidate_nodes")
 _SUFFIX = ".marks"
@@ -154,8 +155,8 @@ def write_index(home, epoch: str, index) -> str:
     return digest
 
 
-def read_marks(home, name: str, size: int) -> bytes | None:
-    """读取工作目录内一个检查点文件的前 size 字节；文件缺失返回 None，读到的字节可能短于请求。"""
+def read_marks(home, name: str, size: int, *, offset: int = 0) -> bytes | None:
+    """Read at most size bytes from a checkpoint, returning None if it is missing."""
     try:
         root = _root(home, create=False)
         parent = _parent(root, create=False)
@@ -167,6 +168,8 @@ def read_marks(home, name: str, size: int) -> bytes | None:
         except FileNotFoundError:
             return None
         try:
+            if offset:
+                os.lseek(descriptor, offset, os.SEEK_SET)
             chunks, remaining = [], size
             while remaining:
                 chunk = os.read(descriptor, remaining)
@@ -180,6 +183,72 @@ def read_marks(home, name: str, size: int) -> bytes | None:
     finally:
         if parent is not None:
             os.close(parent)
+
+
+def _mark_stamp(home, name):
+    try:
+        root = _root(home, create=False)
+        parent = _parent(root, create=False)
+        try:
+            descriptor = _open(root, parent, name, os.O_RDONLY)
+            try:
+                info = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            if parent is not None:
+                os.close(parent)
+    except FileNotFoundError as exc:
+        raise MarkCheckpointUnavailable(name) from exc
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _verify_mark_prefix(home, name, size, digest, budget, state, consume):
+    """Verify one committed prefix, saving its exact byte position and digest between slices."""
+    stamp = _mark_stamp(home, name)
+    if stamp[2] < size:
+        raise MarkCheckpointUnavailable(name)
+    if state.get("stamp") != stamp:
+        state.clear()
+        state["stamp"] = stamp
+    offset = state.get("offset", 0)
+    if type(offset) is not int or not 0 <= offset <= size:
+        raise MarkCheckpointUnavailable(name)
+    if state.get("verified") == digest and offset == size:
+        return True
+    remaining = budget.max_bytes - budget.size
+    if budget.exhausted() or (offset == 0 and remaining < size <= budget.max_bytes):
+        return False
+    streaming = offset > 0 or size > remaining
+    try:
+        hasher = (_ResumableSha256.from_state(state["sha256"], offset) if offset else
+                  _ResumableSha256() if streaming else hashlib.sha256())
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MarkCheckpointUnavailable(name) from exc
+    while offset < size and not budget.exhausted():
+        length = min(size - offset, budget.max_bytes - budget.size)
+        if streaming:
+            length = min(length, _INDEX_BYTES)
+        raw = read_marks(home, name, length, offset=offset) if offset else read_marks(home, name, length)
+        if raw is None or len(raw) != length:
+            raise MarkCheckpointUnavailable(name)
+        budget.charge(size=length)
+        consume(raw, offset, state)
+        hasher.update(raw)
+        offset += length
+        state["offset"] = offset
+    if _mark_stamp(home, name) != stamp:
+        raise MarkCheckpointUnavailable(name)
+    if offset < size:
+        if offset:
+            state["sha256"] = hasher.to_state()
+        return False
+    if hasher.hexdigest() != digest:
+        raise MarkCheckpointUnavailable(name)
+    state.pop("sha256", None)
+    state["verified"] = digest
+    return True
+
 
 
 def _checkpoint_key(name: str) -> str | None:
@@ -238,15 +307,11 @@ class ShardedMarks:
         names = self.shards.get(name[:2])
         return True if names is None else name in names
 
-    def ensure(self, home, shard: str, budget, *, force: bool = False) -> bool:
-        """读回并核对一个分片。True 表示已可用；False 表示本片预算暂停。
-
-        片首（或调用方声明的片首读取）即使超出字节预算也读完，保证淘汰后每片仍能前进。
-        索引或分片缺失、截短或摘要不符时抛 MarkCheckpointUnavailable。
-        """
+    def ensure(self, home, shard: str, budget) -> bool:
+        """Load a full shard and its hasher for mark appends. Sweep uses resumable membership."""
         if shard in self.shards:
             return True
-        started = force or budget.size == 0
+        started = budget.size == 0
         if self.index is None:
             if not started and budget.max_bytes - budget.size < _INDEX_BYTES:
                 return False
@@ -275,6 +340,51 @@ class ShardedMarks:
             raise MarkCheckpointUnavailable(self.epoch)
         self.shards[shard], self.hashers[shard] = names, hasher
         return True
+
+    def membership(self, home, shard, names, budget, state):
+        """Return exact matches for this directory page, or None until both digests are verified."""
+        if shard in self.shards:
+            return names.intersection(self.shards[shard])
+        if self.digest == EMPTY_INDEX_DIGEST:
+            return set()
+        epoch, digest = self.epoch, self.digest
+        prefix = int(shard, 16)
+        record_offset = prefix * _RECORD.size
+
+        def collect_index(raw, offset, checkpoint):
+            start, end = max(offset, record_offset), min(offset + len(raw), record_offset + _RECORD.size)
+            if start < end:
+                checkpoint["record"] = checkpoint.get("record", "") + raw[start - offset:end - offset].hex()
+
+        index = state.setdefault("index", {})
+        if not _verify_mark_prefix(home, index_name(epoch, digest), _INDEX_BYTES, digest, budget, index, collect_index):
+            return None
+        count, checksum = _RECORD.unpack(bytes.fromhex(index["record"]))
+        if not count:
+            if checksum != EMPTY_INDEX[0][1]:
+                raise MarkCheckpointUnavailable(epoch)
+            return set()
+        wanted = {bytes.fromhex(name[:-len(".json")]): name for name in names}
+
+        def collect_matches(raw, _offset, checkpoint):
+            data = bytes.fromhex(checkpoint.get("tail", "")) + raw
+            end = len(data) - len(data) % _WIDTH
+            checkpoint["tail"] = data[end:].hex()
+            found = set(checkpoint.get("found", ()))
+            for start in range(0, end, _WIDTH):
+                record = data[start:start + _WIDTH]
+                if record[0] != prefix:
+                    raise MarkCheckpointUnavailable(epoch)
+                if record in wanted:
+                    found.add(wanted[record])
+            checkpoint["found"] = sorted(found)
+
+        proof = state.setdefault("shard", {})
+        if not _verify_mark_prefix(home, shard_name(epoch, shard), count * _WIDTH, checksum.hex(),
+                                   budget, proof, collect_matches):
+            return None
+        return names.intersection(proof.get("found", ()))
+
 
     def frozen(self) -> ShardedMarks:
         """证明时刻的不可变副本：沿用已读回分片的集合，其余分片按同一已提交索引按需读回。"""
