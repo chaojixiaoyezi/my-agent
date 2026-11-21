@@ -32,7 +32,8 @@ def test_protection_reaches_1500_sources(tmp_path):
     with store.state_lock():
         registry = store.load_registry()
         saved = registry.protection_scan
-        assert saved["generation"] and saved["after"]["scheduler"] > 0
+        # 进度按来源分别保存：监控清单只记自己的下标续点与已读前缀的引用投影。
+        assert saved["schema"] == "skill-protection-progress.v2" and saved["sources"]["scheduler"]["after"] > 0
         store.save_registry(replace(registry, daily_calls=1))
     for _ in range(20):
         result = learning_protection_for_agent(_host(tmp_path, jobs))
@@ -117,3 +118,210 @@ def test_displacement_rechecks_reference_generation(tmp_path, monkeypatch):
     assert store.skill_path("existing-method").read_bytes() == previous
     assert set(store.load_registry().skills) == {"existing-method"}
     assert not store.skill_path("new-method").exists()
+
+
+def _scheduled_runtime_host(tmp_path, job_count):
+    from agent_py_agent.agent.scheduler.repository import (
+        SchedulerJobCreateRequest,
+        SchedulerRepository,
+    )
+    from agent_py_agent.tests.test_skill_learning_maintenance import _protection_runtime
+
+    agent, agent_run, _ = _protection_runtime(tmp_path)
+    scheduler = SchedulerRepository(tmp_path / "data/scheduler", owner_provider="local", owner_kind="main",
+                                    owner_id="local/main")
+    for number in range(job_count):
+        scheduler.create_job(SchedulerJobCreateRequest(
+            name=f"job-{number}", prompt="check", thread_id="thread_fixture",
+            schedule={"kind": "every", "every_seconds": 90, "anchor_at": 1000, "timezone": "UTC"},
+            skill_refs=[{"stable_id": f"owner:job-{number}", "content_sha256": "a" * 64}], now=1000,
+        ))
+    agent.home_paths = SimpleNamespace(owner_home_dir=tmp_path, owner_skill_learning_dir=tmp_path / "learning")
+    agent.scheduler_repository = scheduler
+    agent.subagents = SimpleNamespace(list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[]))
+    # 生产条目与字节预算；墙钟放宽，使每片只受128条约束，结果与机器快慢无关。
+    agent.config = SimpleNamespace(retention_scan_slice_entries=128, retention_scan_slice_bytes=8 * 1024 * 1024,
+                                   retention_scan_slice_ms=60_000)
+    return agent, agent_run
+
+
+def _ordinary_activity(agent, agent_run, tick):
+    """一次运行库心跳写入（落在WAL）与一次监控开工计数更新（原子替换账本文件），都不改变任何引用。"""
+    from agent_py_agent.agent.scheduler.monitor_state import record_start
+
+    with agent.runtime_db.transaction() as conn:
+        conn.execute("UPDATE agent_runs SET updated_at=? WHERE agent_run_id=?", (5000 + tick, agent_run["agent_run_id"]))
+    scheduler = agent.scheduler_repository
+    with scheduler._mutation_scope() as (store, admission):
+        job_id = sorted(store["jobs"])[0]
+        store["jobs"][job_id] = record_start(store["jobs"][job_id], {}, 6000 + tick)
+        scheduler._write_store_unlocked(store, admission)
+
+
+def test_protection_completes_across_runtime_writes_and_scheduler_updates_between_calls(tmp_path):
+    agent, agent_run = _scheduled_runtime_host(tmp_path, 200)
+    for call in range(8):
+        result = learning_protection_for_agent(agent)
+        if result["protection_complete"]:
+            break
+        _ordinary_activity(agent, agent_run, call)
+    else:
+        pytest.fail("protection never completed while the owner stayed active")
+    assert call > 0, "200 jobs must need more than one 128-entry call"
+    assert set(result["protected_ids"]) == {"owner:held", *(f"owner:job-{number}" for number in range(200))}
+    assert result.recheck()
+
+
+def _settled_task_runs(repo, labels, *, first_created_at):
+    """登记若干已确证退出的任务运行，引用只在任务运行元数据里（与 _protection_runtime 同形）；创建时间逐个递增。"""
+    runs = []
+    for offset, label in enumerate(labels):
+        task = repo.create_task(owner_id="owner", thread_id="missing-thread", conversation_task_id=f"link-{label}")
+        run = repo.create_task_run(task_id=task["task_id"], status="created",
+                                   metadata={"allowed_skills": [f"owner:{label}"]})
+        agent_run = repo.create_agent_run(task_run_id=run["task_run_id"], run_id=f"protection-{label}")
+        attempt = repo.create_attempt(agent_run["agent_run_id"])
+        repo.settle_agent_attempt(agent_run_id=agent_run["agent_run_id"], attempt_id=attempt["attempt_id"])
+        with repo.transaction() as conn:
+            conn.execute("UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?", (
+                '{"executor":{"schema_version":"attempt-executor.v1","status":"exited","ended_at":1}}',
+                attempt["attempt_id"],
+            ))
+            conn.execute("UPDATE task_runs SET created_at=? WHERE task_run_id=?",
+                         (first_created_at + offset, run["task_run_id"]))
+        runs.append(run)
+    return runs
+
+
+def test_reference_added_in_an_earlier_runtime_window_fails_the_recheck(tmp_path):
+    agent, agent_run = _scheduled_runtime_host(tmp_path, 0)
+    with agent.runtime_db.transaction() as conn:
+        conn.execute("UPDATE task_runs SET created_at=100 WHERE task_run_id=?", (agent_run["task_run_id"],))
+    runs = _settled_task_runs(agent.runtime_db, ["first", "second", "third"], first_created_at=101)
+    # 每片两条：四组任务运行按创建时间分成 [held, first] 与 [second, third] 两个窗口。
+    for _ in range(8):
+        result = learning_protection_for_agent(agent, scan_limit=2)
+        if result["protection_complete"]:
+            break
+    else:
+        pytest.fail("protection over two runtime windows never completed")
+    assert {"owner:held", "owner:first", "owner:second", "owner:third"} <= set(result["protected_ids"])
+    # 证明之后，第一窗口里已读过的任务运行新增了引用：最后窗口逐组未变，但证明已不覆盖当前事实。
+    with agent.runtime_db.transaction() as conn:
+        conn.execute("UPDATE task_runs SET metadata_json=? WHERE task_run_id=?", (
+            json.dumps({"allowed_skills": ["owner:first", "owner:late"]}), runs[0]["task_run_id"]))
+    assert "owner:late" not in result["protected_ids"]
+    assert not result.recheck()
+
+
+def _append_job_before_cursor(scheduler, tick):
+    """经真实创建路径新建一条带引用的 job（创建时间晚于已有 job），再换成排在所有已有 id 之前的合法 id。
+
+    job_id 是随机值，约一半新建 job 的 id 都会排在续点之前；这里取确定的那一种。
+    """
+    from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
+
+    job, _ = scheduler.create_job(SchedulerJobCreateRequest(
+        name=f"appended-{tick}", prompt="check", thread_id="thread_fixture",
+        schedule={"kind": "every", "every_seconds": 90, "anchor_at": 1000, "timezone": "UTC"},
+        skill_refs=[{"stable_id": f"owner:appended-{tick}", "content_sha256": "a" * 64}], now=2000 + tick,
+    ))
+    with scheduler._mutation_scope() as (store, admission):
+        raw = store["jobs"].pop(job["job_id"])
+        raw["job_id"] = f"job_{tick:032x}"
+        store["jobs"][raw["job_id"]] = raw
+        scheduler._write_store_unlocked(store, admission)
+
+
+def test_scheduler_jobs_created_between_calls_continue_the_keyset(tmp_path):
+    agent, agent_run = _scheduled_runtime_host(tmp_path, 200)
+    appended = set()
+    for call in range(8):
+        result = learning_protection_for_agent(agent)
+        if result["protection_complete"]:
+            break
+        _ordinary_activity(agent, agent_run, call)
+        _append_job_before_cursor(agent.scheduler_repository, call)
+        appended.add(f"owner:appended-{call}")
+    else:
+        pytest.fail("protection never completed while jobs were created between calls")
+    assert call > 0, "200 jobs must need more than one 128-entry call"
+    assert set(result["protected_ids"]) == {
+        "owner:held", *(f"owner:job-{number}" for number in range(200)), *appended,
+    }
+    assert result.recheck()
+
+
+def _discovered(home, jobs):
+    host = _host(home.owner_home_dir, jobs)
+    host.home_paths = home
+    snapshot = learning_protection_for_agent(host)
+    assert snapshot["protection_complete"] and snapshot.recheck()
+    return snapshot
+
+
+@pytest.mark.parametrize("referenced", [True, False])
+@pytest.mark.parametrize("path", ["restore", "usage_receipt", "cap_enforcement"])
+def test_candidate_referenced_after_discovery_is_not_displaced(tmp_path, monkeypatch, path, referenced):
+    from agent_py_agent.agent.capability import skill_learning_protection
+    from agent_py_agent.agent.capability.skill_learning_maintenance import (
+        _select_cap_victim_locked,
+        control_learning,
+        maintain_learning,
+    )
+    from agent_py_agent.agent.capability.skill_usage_ledger import record_skill_usage_event
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.tests.test_sm_w2_usage_strikes import _publish, _store_with_runtime
+
+    home, _, store = _store_with_runtime(tmp_path)
+    if path == "cap_enforcement":
+        _publish(store, "alpha")
+        _publish(store, "beta")
+    else:
+        _publish(store, "target")
+        with store.state_lock():
+            store._transition_archive_locked(store.load_registry(), "target")
+        _publish(store, "victim")
+    jobs = []
+    snapshot = _discovered(home, jobs)
+    registry = store.load_registry()
+    managed = store.managed_records(registry, include_archived=False)
+    victim = _select_cap_victim_locked(store, registry, managed, protected=set(snapshot["protected_ids"]))
+    if referenced:
+        # 发现完成之后才出现的监控引用：保护名单里没有它，只有置换前的复核能看到。
+        jobs.append({"allowed_skills": [f"owner:{victim}"]})
+
+    if path == "restore":
+        def restore():
+            return control_learning(store, "target", operation="restore", max_skills=1,
+                                    protected_ids=snapshot["protected_ids"],
+                                    protection_complete=snapshot["protection_complete"])
+
+        if referenced:
+            with pytest.raises(SkillLearningGateError) as refused:
+                restore()
+            assert refused.value.detail["reason"] == "protection_generation_changed"
+        else:
+            restore()
+    elif path == "usage_receipt":
+        # 回执路径在恢复前自行取保护；这里交回发现时的快照，引用在其后出现。
+        monkeypatch.setattr(skill_learning_protection, "learning_protection_for_agent", lambda _agent: snapshot)
+        target = store.load_registry().skills["target"]
+        agent = SimpleNamespace(skill_learning_store=store, config=AgentConfig(self_learning_max_skills=1))
+        record_skill_usage_event(
+            agent, event="manual_get", skill_id="owner:target", source="learned", task_id="after-discovery",
+            body_chars=240, content_sha256=target.sha256, incarnation_id=target.maintenance["incarnation_id"],
+            activation_id=target.maintenance["activation_id"],
+        )
+    else:
+        result = maintain_learning(
+            store, mode="autonomous", max_skills=1, protected_ids=snapshot["protected_ids"],
+            protection_complete=snapshot["protection_complete"],
+            usage_loader=lambda _store: {"coverage": {"lifetime_summary": "complete"}, "by_skill": {}},
+        )
+        assert result["backlog"] is referenced
+
+    states = {name: record.maintenance.get("state") for name, record in store.load_registry().skills.items()}
+    assert (states[victim] == "archived") is not referenced
+    if path != "cap_enforcement":
+        assert (states["target"] == "archived") is referenced

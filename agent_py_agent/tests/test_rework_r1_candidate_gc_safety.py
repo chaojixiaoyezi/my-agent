@@ -41,13 +41,18 @@ def _service(tmp_path, rows=ROWS):
     return home, path, service, MemoryRetentionService(home_paths=home, candidates=service, config=_config())
 
 
-def _checkpoints(home):
+def _checkpoint_files(home):
     directory = candidate_node_maintenance.workspace(home)
-    return sorted(path.name for path in directory.glob("*.marks")) if directory.exists() else []
+    return sorted(path.name for path in directory.iterdir()) if directory.exists() else []
+
+
+def _checkpoints(home):
+    """磁盘上仍有分片日志或分片索引的周期。"""
+    return sorted({name.split(".", 1)[0] for name in _checkpoint_files(home)})
 
 
 def _referenced(entry):
-    return sorted(item["epoch"] + ".marks" for item in (entry.get("mark"), entry.get("proof")) if item)
+    return sorted({item["epoch"] for item in (entry.get("mark"), entry.get("proof")) if item})
 
 
 def _until(retention, now, done, between=None):
@@ -124,13 +129,13 @@ def test_quiet_passes_reuse_the_single_head_epoch_and_a_publication_rolls_it_ove
     home, path, service, retention = _service(tmp_path)
     later = datetime.now(timezone.utc) + timedelta(days=3)
     loads = []
-    original = candidate_node_maintenance.MarkLoad.advance
+    original = candidate_node_maintenance.read_marks
 
-    def advance(self, *args, **kwargs):
-        loads.append(self.epoch)
-        return original(self, *args, **kwargs)
+    def read_marks(home, name, size):
+        loads.append(name)
+        return original(home, name, size)
 
-    monkeypatch.setattr(candidate_node_maintenance.MarkLoad, "advance", advance)
+    monkeypatch.setattr(candidate_node_maintenance, "read_marks", read_marks)
 
     def complete(report):
         return report.scan_cursor[KEY]["status"] == "complete"
@@ -210,6 +215,8 @@ def test_checkpoint_history_is_bounded_and_removed_with_the_candidate_directory(
         retention.apply(now=start + timedelta(days=day))
         assert set(_checkpoints(home)) <= set(_referenced(retention_scan_budget.load_scan_cursor(home)[KEY]))
         assert 1 <= len(_checkpoints(home)) <= 2
+        # 分片索引按内容寻址：每片最多新写一份，被取代的索引在下一片回收，不随周期累积。
+        assert len([name for name in _checkpoint_files(home) if name.endswith(".index")]) <= 3
 
     for child in _records(path).rglob("*"):
         if child.is_file():
@@ -219,7 +226,12 @@ def test_checkpoint_history_is_bounded_and_removed_with_the_candidate_directory(
     _records(path).rmdir()
     path.unlink()
     options = {"commit_transition": lambda operation: operation()} if branch == "transition" else {}
-    report = retention.apply(now=start + timedelta(days=3), **options)
+    for _ in range(SLICE_LIMIT):
+        report = retention.apply(now=start + timedelta(days=3), **options)
+        if KEY not in report.scan_cursor:
+            break
+        # 每个周期最多256个分片日志，按条目预算分片删除；删完前游标只留清理状态。
+        assert report.scan_cursor[KEY] == {"status": "cleanup"}
     assert KEY not in report.scan_cursor
     assert KEY not in retention_scan_budget.load_scan_cursor(home)
     assert _checkpoints(home) == []

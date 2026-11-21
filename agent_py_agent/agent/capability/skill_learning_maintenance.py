@@ -26,6 +26,7 @@ from .skill_learning_publish import (
     _cfg_lookup,
     _historical_adoptions,
     _owned_record,
+    _recheck_displacement_locked,
     _registered_capacity_available,
     _retire_third_strike_locked,
     _rollback_to_proven_stable_locked,
@@ -613,8 +614,13 @@ def _select_cap_victim_locked(
     return eligible[0][1]
 
 
+def _displacement_proof(snapshot, protected):
+    """置换前复核用的保护快照；未携带快照的调用方只核对它给出的名单与置换对象的登记版本。"""
+    return snapshot if snapshot is not None else {"protected_ids": tuple(sorted(protected))}
+
+
 def _restore_with_admission_locked(
-    store, registry, name, *, now, max_skills, evict_seconds, protected, protection_complete,
+    store, registry, name, *, now, max_skills, evict_seconds, protected, protection_complete, snapshot=None,
 ):
     current = registry.skills.get(name)
     if current is None or name in registry.blocked_names or owner_layout_exempt(current):
@@ -639,6 +645,8 @@ def _restore_with_admission_locked(
             victim = _select_cap_victim_locked(store, registry, managed, protected=protected, exclude_names={name})
             if victim is None or live > max_skills:
                 raise SkillLearningGateError(CODE_LIMIT_REACHED, {"limit": max_skills, "live": live, "all_protected": victim is None})
+            # 与新建路径同一复核：锁内点查置换对象，并确认发现之后各来源没有出现对它的新引用。
+            _recheck_displacement_locked(store, registry, victim, _displacement_proof(snapshot, protected))
             store._transition_displace_restore_locked(registry, target=name, victim=victim, now=now)
             return store.load_registry().skills[name]
     _, record = store._transition_restore_locked(registry, name, now=now)
@@ -659,6 +667,7 @@ def admit_restore_locked(
             max_skills=defaults["self_learning_max_skills"].default if max_skills is None else max_skills,
             evict_seconds=defaults["self_learning_evict_seconds"].default if evict_seconds is None else evict_seconds,
             protected=set(protected_ids), protection_complete=protection_complete,
+            snapshot=getattr(protected_ids, "snapshot", None),
         )
     except SkillLearningStoreError as exc:
         return False, exc.code
@@ -700,6 +709,7 @@ def control_learning(
             next_record = _restore_with_admission_locked(
                 store, registry, name, now=ts, max_skills=eff_max, evict_seconds=eff_evict,
                 protected=protected, protection_complete=protection_complete,
+                snapshot=getattr(protected_ids, "snapshot", None),
             )
             if store.read_version(name, next_record.revision) is None:
                 path = store.skill_path(name, record=next_record)
@@ -1051,6 +1061,7 @@ def maintain_learning(
 
     budget, budget_ms = _make_budget(cfg, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms)
     protected = {str(item) for item in protected_ids}
+    displacement_snapshot = getattr(protected_ids, "snapshot", None)
     changed: list[str] = []
     evicted: list[str] = []
     would_cool: list[str] = []
@@ -1384,6 +1395,20 @@ def maintain_learning(
                     victim = _select_cap_victim_locked(store, registry, partial_managed, protected=protected)
                     if victim is None:
                         break
+                    try:
+                        _recheck_displacement_locked(
+                            store, registry, victim, _displacement_proof(displacement_snapshot, protected),
+                        )
+                    except SkillLearningGateError:
+                        # 发现之后来源已变或置换对象已被引用：停在容量阶段，下一片用新的保护快照重选。
+                        next_cur = _checkpoint_cursor(
+                            store,
+                            registry,
+                            phase="lifecycle",
+                            after_name=after_name,
+                            started_at=started_at,
+                        )
+                        return _result(backlog=True, next_cursor=next_cur)
                     try:
                         registry, _ = store._transition_archive_locked(
                             registry,
