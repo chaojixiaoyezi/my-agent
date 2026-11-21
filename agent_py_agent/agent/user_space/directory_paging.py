@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 
+from ..common import nofollow_fs
 from ..common.nofollow_fs import open_directory_beneath
 
 _SCAN_STREAMS: OrderedDict = OrderedDict()
@@ -30,7 +31,8 @@ def directory_page(root: Path, parts: tuple, cursor: dict, limit: int, *,
 
     if limit <= 0:
         return [], cursor, False
-    if not _native_directory_supported() and not require_dir_fd:
+    # 严格描述符打开不可用（含缺 dir_fd 的 POSIX）且调用方允许时，统一走可移植分页，续点格式不变。
+    if not require_dir_fd and not (_native_directory_supported() and nofollow_fs._supports_dir_fd()):
         from ..common.nofollow_fs import (
             NoFollowPathError,
             _portable_directory,

@@ -42,6 +42,7 @@ class CoordinatorLease:
         self.control_plane = None
         self._lifecycle_gate = threading.RLock()
         self._closing = False
+        self._drain_admitted = False
         self._commit_pins = set()
         self._commit_changed = threading.Condition(self._lifecycle_gate)
 
@@ -215,6 +216,38 @@ def retire_coordinator_commit(lease, pin):
             raise CoordinatorUnavailable("COORDINATOR_COMMIT_PIN_INVALID")
         lease._commit_pins.remove(pin)
         lease._commit_changed.notify_all()
+
+
+# LLM: drain准入是原C停止新出生的第一步；在原生命周期门内落标记，之后的取证/封存不再与服务期回执退役交错。
+# 函数用途: 标记本lease已进入drain；非原lease对象不构成服务期退役许可，直接忽略。
+def admit_coordinator_drain(lease):
+    if type(lease) is not CoordinatorLease:
+        return
+    with lease._lifecycle_gate:
+        lease._drain_admitted = True
+
+
+# LLM: 只读本进程原登记lease；未绑代（启动/接手取证中）、closing或已进入drain均不是服务期。
+# 函数用途: 返回仍在正常服务期的原C lease，否则None；默认模式不做I/O。
+def serving_coordinator(root):
+    lease = _HELD_COORDINATORS.get(Path(os.path.abspath(root)))
+    if (not _is_registered_coordinator_lease(lease) or lease._closing
+            or lease._drain_admitted or not lease.c_run_id):
+        return None
+    return lease
+
+
+# LLM: 非阻塞取原生命周期门，争用即放弃本次删除，不与持门等待文件锁的路径形成环；门内复核仍在服务期。
+# 函数用途: 给服务期单次最终退役提供与drain准入、登记发布和封存互斥的短窗口。
+@contextmanager
+def coordinator_serving_window(lease):
+    if not lease._lifecycle_gate.acquire(blocking=False):
+        yield False
+        return
+    try:
+        yield serving_coordinator(lease.root) is lease
+    finally:
+        lease._lifecycle_gate.release()
 
 
 bind_coordinator_requirement(coordinator_executor_required)

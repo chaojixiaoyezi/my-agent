@@ -1,14 +1,17 @@
 """用真实来源凭据、线程和 SQLite 验证用量投影提交。"""
+import json
 import multiprocessing
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, get_ident
+from threading import Barrier, Event, Thread, get_ident
 from time import monotonic, sleep
 
 import pytest
 
 from agent_py_agent.agent.common import json_io
 from agent_py_agent.agent.common.json_io import locked_json_path
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.store_usage import ModelUsageStore
 from agent_py_agent.agent.conversation.usage_sources import UsageIntent
 
@@ -234,3 +237,359 @@ def test_deadline_includes_file_lock_contention(tmp_path):
         os.close(handle)
     with locked_json_path(path, deadline_s=monotonic() + 1):
         pass
+
+
+def test_append_returns_while_its_projection_snapshot_is_held(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "channel": "internal"})
+    usage = store.model_usage
+    snapshot = usage._usage_source_snapshot
+    entered, release, returned = Event(), Event(), Event()
+    readers, failures = [], []
+
+    def held(identifier, **options):
+        readers.append(get_ident())
+        entered.set()
+        assert release.wait(10)
+        return snapshot(identifier, **options)
+
+    def append():
+        try:
+            usage.append_once({"event_id": "held", "thread_id": thread.thread_id, "request_id": "held",
+                               "model_calls": {"schema": "model_call_summary.v1", "total_tokens": 1}, "now": 1000})
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            returned.set()
+
+    usage._usage_source_snapshot = held
+    caller = Thread(target=append)
+    caller.start()
+    try:
+        assert entered.wait(10), "the projection read never started"
+        # The canonical append is durable; the caller must not wait for the projection read it elected.
+        assert returned.wait(5), "append_once waited for projection I/O"
+        assert not release.is_set() and not failures
+        assert caller.ident not in readers
+    finally:
+        release.set()
+        caller.join(10)
+    index = usage._source_index()
+    _finish(index, timeout=10)
+    lines = usage._path(thread.thread_id).read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["event_id"] for line in lines] == ["held"]
+    with locked_json_path(index.path, deadline_s=monotonic() + 5):
+        assert [(row[0], row[4]) for row in _rows(index)] == [(thread.thread_id, 1)]
+
+
+def _append(usage, thread, event_id):
+    return usage.append_once({"event_id": event_id, "thread_id": thread.thread_id, "request_id": event_id,
+                              "model_calls": {"schema": "model_call_summary.v1", "total_tokens": 1}, "now": 1000})
+
+
+def _held_snapshots(usage):
+    """Hold the first projection snapshot on the drain worker until released; later reads pass through."""
+    snapshot = usage._usage_source_snapshot
+    entered, release = Event(), Event()
+
+    def held(identifier, **options):
+        if not release.is_set():
+            entered.set()
+            assert release.wait(10)
+        return snapshot(identifier, **options)
+
+    usage._usage_source_snapshot = held
+    return entered, release
+
+
+def test_reader_waits_for_the_drain_of_a_completed_append(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "channel": "internal"})
+    usage = store.model_usage
+    _append(usage, thread, "first")
+    assert usage.wait_window_sources(10)
+    # A fresh owner index needs a full inventory; the maintenance lane completes it before the measured append.
+    _settle(usage._source_index(), usage)
+    assert [row[0] for row in usage.window_source_plan().rows()] == [thread.thread_id]
+
+    entered, release = _held_snapshots(usage)
+    _append(usage, thread, "second")
+    assert entered.wait(10), "the projection read never started"
+    rows, failures = [], []
+
+    def read():
+        try:
+            rows.extend(usage.window_source_plan().rows())
+        except BaseException as error:
+            failures.append(error)
+
+    reader = Thread(target=read)
+    reader.start()
+    try:
+        # The append returned with its intent still pending; the reader waits for that drain instead of failing.
+        reader.join(0.2)
+        assert reader.is_alive() and not failures
+    finally:
+        release.set()
+        reader.join(10)
+    assert not failures
+    assert rows == [(thread.thread_id, tuple(usage.revision(thread.thread_id)))]
+
+
+def test_back_to_back_appends_keep_coverage_without_a_rescan(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.usage_sources import UsageSourceIndex
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "channel": "internal"})
+    usage = store.model_usage
+    _append(usage, thread, "first")
+    assert usage.wait_window_sources(10)
+    _settle(usage._source_index(), usage)
+    slices = []
+    prepare = UsageSourceIndex.prepare
+
+    def counted(self, *args, **kwargs):
+        slices.append(kwargs.get("limit"))
+        return prepare(self, *args, **kwargs)
+
+    monkeypatch.setattr(UsageSourceIndex, "prepare", counted)
+    entered, release = _held_snapshots(usage)
+    _append(usage, thread, "second")
+    assert entered.wait(10), "the projection read never started"
+    # The next append starts before the drainer has read anything for the previous one.
+    _append(usage, thread, "third")
+    release.set()
+    assert usage.wait_window_sources(10)
+    # Each writer's own directory changes stay inside its recorded stamps, so completeness carries over without a rescan.
+    assert slices == []
+    assert [row[0] for row in usage.window_source_plan().rows()] == [thread.thread_id]
+
+
+@pytest.mark.parametrize("first_slice", ["examines_nothing", "truncated"])
+def test_repair_budget_survives_a_drain_window_that_ends_early(tmp_path, monkeypatch, first_slice):
+    from agent_py_agent.agent.conversation.usage_sources import UsageSourceIndex
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "channel": "internal"})
+    usage = store.model_usage
+    prepare, reports = UsageSourceIndex.prepare, []
+
+    def first_window_ends_early(self, source, *, limit, deadline=None):
+        if reports:
+            report = prepare(self, source, limit=limit, deadline=deadline)
+        elif first_slice == "examines_nothing":
+            # The window ends inside the slice's own setup, before any source is examined.
+            report = {"coverage": "partial", "sources_examined": 0, "cursor": {"phase": 0, "epoch": 1}, "errors": []}
+        else:
+            # The window ends after part of the inventory.
+            report = prepare(self, source, limit=min(limit, 4), deadline=deadline)
+        reports.append(report)
+        return report
+
+    monkeypatch.setattr(UsageSourceIndex, "prepare", first_window_ends_early)
+    # The fresh owner index needs a full inventory, and this single intent carries one repair slice of budget.
+    _append(usage, thread, "first")
+    assert usage.wait_window_sources(10)
+    assert reports[0]["coverage"] == "partial" and reports[0]["sources_examined"] < 16
+    assert len(reports) >= 2 and reports[-1]["coverage"] == "complete", reports
+    assert [row[0] for row in usage.window_source_plan().rows()] == [thread.thread_id]
+
+
+def test_repair_that_never_examines_a_source_returns_to_maintenance(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.usage_sources import UsageSourceIndex
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "channel": "internal"})
+    usage = store.model_usage
+    reports = []
+
+    def examines_nothing(self, source, *, limit, deadline=None):
+        reports.append(limit)
+        return {"coverage": "partial", "sources_examined": 0, "cursor": {"phase": 0, "epoch": 1}, "errors": []}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(UsageSourceIndex, "prepare", examines_nothing)
+        _append(usage, thread, "first")
+        # Slices that examine nothing are not progress: the drainer retires after one retry window.
+        assert usage.wait_window_sources(5), "the drainer kept a pool worker for a repair that never advanced"
+        assert reports
+        with pytest.raises(ValueError):
+            usage.window_source_plan()
+    # The durable intent and the partial coverage stay for the maintenance lane, which completes them.
+    _settle(usage._source_index(), usage)
+    assert [row[0] for row in usage.window_source_plan().rows()] == [thread.thread_id]
+
+
+def test_coalesced_appends_keep_one_repair_slice_each(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    threads = [store.threads.get_or_create({"canonical_user_id": "owner", "channel": "internal",
+                                            "channel_conversation_id": f"conversation-{n}"}) for n in range(6)]
+    assert len({thread.thread_id for thread in threads}) == 6
+    usage = store.model_usage
+    entered, release = _held_snapshots(usage)
+    _append(usage, threads[0], "event-0")
+    assert entered.wait(10), "the projection read never started"
+    # The fresh owner index needs a full inventory; these intents queue behind the held drain as one batch.
+    for number, thread in enumerate(threads[1:], start=1):
+        _append(usage, thread, f"event-{number}")
+    release.set()
+    assert usage.wait_window_sources(10)
+    assert sorted(row[0] for row in usage.window_source_plan().rows()) == sorted(t.thread_id for t in threads)
+
+
+def test_repair_yields_to_an_inflight_writer_without_spending_its_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import store_usage
+
+    store = ConversationStore(tmp_path / "conversations")
+    settled, added, inflight = (store.threads.get_or_create({
+        "canonical_user_id": "owner", "channel": "internal", "channel_conversation_id": name,
+    }) for name in ("settled", "added", "inflight"))
+    usage = store.model_usage
+    _append(usage, settled, "settled")
+    assert usage.wait_window_sources(10)
+    _settle(usage._source_index(), usage)
+    held_path = usage._path(inflight.thread_id)
+    entered, release = Event(), Event()
+    recover = store_usage.recover_pending
+
+    def held(path, *args, **kwargs):
+        if path == held_path and not release.is_set():
+            entered.set()
+            assert release.wait(10)
+        return recover(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_usage, "recover_pending", held)
+    writer = Thread(target=_append, args=(usage, inflight, "inflight"))
+    writer.start()
+    try:
+        # This writer holds its ledger lock with a published intent while the next append forces a rescan.
+        assert entered.wait(10)
+        _append(usage, added, "added")
+        sleep(0.2)
+    finally:
+        release.set()
+        writer.join(10)
+    assert usage.wait_window_sources(10)
+    expected = sorted(thread.thread_id for thread in (settled, added, inflight))
+    assert sorted(row[0] for row in usage.window_source_plan().rows()) == expected
+
+
+def _settle(index, store, *, limit=128, attempts=64):
+    reports = []
+    for _ in range(attempts):
+        reports.append(index.prepare(store, limit=limit, deadline=monotonic() + 2))
+        if reports[-1]["coverage"] == "complete":
+            return reports
+    pytest.fail(f"usage source coverage did not settle: {reports[-3:]}")
+
+
+def _sources(tmp_path, identifiers):
+    store = _store(tmp_path / "usage")
+    index = store._source_index()
+    for identifier in identifiers:
+        (index.directory / f"{identifier}.jsonl").touch()
+    _settle(index, store)
+    return store, index
+
+
+def _canonical_rows(tmp_path, directory):
+    """Rows of a fresh sequential rebuild over a copy of the same canonical inventory."""
+    copy = tmp_path / "canonical" / "usage"
+    shutil.copytree(directory, copy, ignore=shutil.ignore_patterns(".*"))
+    store = _store(copy)
+    index = store._source_index()
+    _settle(index, store)
+    return _rows(index)
+
+
+def _damage(path, raw):
+    """Rewrite a published token in place, as a torn write would: same file identity, unreadable payload."""
+    with open(path, "r+b") as handle:
+        handle.truncate(0)
+        handle.write(raw)
+    info = path.stat()
+    return raw, (info.st_dev, info.st_ino)
+
+
+def _assert_quarantined(index, token, evidence):
+    raw, identity = evidence
+    moved = index.quarantine_directory / f"{token}.json"
+    assert not (index.pending_directory / moved.name).exists()
+    assert moved.read_bytes() == raw and (moved.stat().st_dev, moved.stat().st_ino) == identity
+
+
+@pytest.mark.parametrize("damage", ["truncated", "other_thread"])
+def test_mixed_batch_isolates_one_damaged_token_and_full_rebuild_restores_coverage(tmp_path, damage):
+    store, index = _sources(tmp_path, ("thread-a", "thread-b", "thread-x"))
+    first = UsageIntent(index.begin("thread-a"), "thread-a", index.stamps(), store)
+    bad = UsageIntent(index.begin("thread-x"), "thread-x", index.stamps(), store)
+    raw = b'{"thread_id": "thr' if damage == "truncated" else b'{"thread_id": "thread-a"}'
+    evidence = _damage(index.pending_directory / f"{bad.token}.json", raw)
+    last = UsageIntent(index.begin("thread-b"), "thread-b", index.stamps(), store)
+    # The damaged member neither rolls back nor blocks its valid siblings.
+    assert index.apply_intents([first, bad, last], deadline=monotonic() + 2) == [first.token, last.token]
+    assert not _tokens(index)
+    _assert_quarantined(index, bad.token, evidence)
+    # Its proof obligation now belongs to a full canonical rebuild; coverage stays unknown until that completes.
+    with pytest.raises(ValueError, match="incomplete"):
+        index.plan(since=0, until=float("inf"))
+    reports = _settle(index, store, limit=1)
+    assert len(reports) > 3 and not [report for report in reports if report["errors"]]
+    assert _rows(index) == _canonical_rows(tmp_path, index.directory)
+    assert index.plan(since=0, until=float("inf")).generation
+    _assert_quarantined(index, bad.token, evidence)
+
+
+def test_maintenance_isolates_a_damaged_token_and_settles_its_valid_siblings(tmp_path):
+    store, index = _sources(tmp_path, ("thread-a", "thread-b", "thread-x"))
+    # Publishers that exited before submitting leave valid tokens around one torn token.
+    valid = [index.begin("thread-a"), index.begin("thread-b")]
+    bad = index.begin("thread-x")
+    evidence = _damage(index.pending_directory / f"{bad}.json", b"")
+    with pytest.raises(ValueError, match="incomplete"):
+        index.plan(since=0, until=float("inf"))
+    reports = _settle(index, store, limit=1)
+    assert [report["cursor"] for report in reports].count({"isolated_intent": True}) == 1
+    assert not [report for report in reports if report["errors"]]
+    assert not _tokens(index)
+    assert sorted(path.stem for path in index.quarantine_directory.iterdir()) == [bad]
+    assert all(not (index.pending_directory / f"{token}.json").exists() for token in valid)
+    _assert_quarantined(index, bad, evidence)
+    assert _rows(index) == _canonical_rows(tmp_path, index.directory)
+
+
+def _exit_after_isolation_commit(directory):
+    store = _store(directory)
+    index = store._source_index()
+
+    def exit_before_move(_tokens):
+        os._exit(17)
+
+    index._quarantine_tokens = exit_before_move
+    index.prepare(store, limit=1, deadline=monotonic() + 10)
+
+
+def test_restart_between_isolation_commit_and_move_isolates_again_and_rebuilds(tmp_path):
+    store, index = _sources(tmp_path, ("thread-a", "thread-x"))
+    bad = index.begin("thread-x")
+    evidence = _damage(index.pending_directory / f"{bad}.json", b'{"thread_id": ')
+    child = multiprocessing.get_context("spawn").Process(target=_exit_after_isolation_commit, args=(index.directory,))
+    child.start()
+    try:
+        child.join(30)
+        assert child.exitcode == 17
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+        child.close()
+    # The rebuild obligation was committed before the move; the damaged token is still the visible evidence.
+    assert [path.stem for path in _tokens(index)] == [bad]
+    with index.read_connection() as connection:
+        assert (index._get(connection, "complete"), index._get(connection, "scan")) == ("0", "{}")
+    with pytest.raises(ValueError, match="incomplete"):
+        index.plan(since=0, until=float("inf"))
+    restarted = _store(index.directory)
+    _settle(restarted._source_index(), restarted, limit=1)
+    _assert_quarantined(index, bad, evidence)
+    assert _rows(index) == _canonical_rows(tmp_path, index.directory)

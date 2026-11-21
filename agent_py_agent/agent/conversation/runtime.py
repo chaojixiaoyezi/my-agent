@@ -3696,9 +3696,10 @@ def _select_successful_completion_batch(
 # 函数用途: 判断普通唤醒能否共同消费；不同任务或消息键分别准入，不吞未消费的兄弟来源。
 def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
     reason = str(primary.reason or "").strip().lower()
+    # Goal 续跑每片按自身 wake 记账；已记账的前驱与接替它的后继可能同时待处理，不能并批代确认后继。
     if (
         not reason
-        or reason in {"scheduled_job_due", "subagent_runner_finished"}
+        or reason in {"scheduled_job_due", "subagent_runner_finished", "thread_goal_continue"}
         or primary.wake_signal_id == sibling.wake_signal_id
         or primary.thread_id != sibling.thread_id
         or primary.root_task_id != sibling.root_task_id
@@ -5022,6 +5023,9 @@ def _execute_wake_signal(
     if _is_legacy_per_source_audit_capacity_signal(signal):
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
+    recovered = _accounted_goal_wake_report(scheduler, signal, lifecycle_reason, reason, now)
+    if recovered is not None:
+        return _WakeExecution(recovered, path=WAKE_ATTEMPT_PATH_REDELIVERY)
     if signal.wake_signal_id in scheduler._quota_fallback_wakes:
         return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now), path=WAKE_ATTEMPT_PATH_QUOTA_FALLBACK)
     scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
@@ -5112,6 +5116,29 @@ def _retire_cancelled_task_wake(
         scheduler.scheduler_service.release(claim, now=now)
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
     return True
+
+
+# LLM: 本 wake 的 Goal 片已记账（裁决冻结或已被后续裁决取代）时不再运行模型；合成报告只驱动原完成入口，
+#   由 continue_goal_after_report 按冻结裁决补做发布或提示并确认本 wake。读不到目标时沿原路径执行。
+# 函数用途: 记账后、发布或确认前中断时，经正常待处理唤醒发现恢复同一续跑义务。
+def _accounted_goal_wake_report(
+    scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, lifecycle_reason: str, reason: str, now: float,
+) -> BackgroundMainAgentReport | None:
+    if lifecycle_reason != "thread_goal_continue":
+        return None
+    from .goal_progress_fuse import frozen_goal_disposition
+
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    try:
+        goal = scheduler.store.goals.load(signal.thread_id, goal_id=str(metadata.get("goal_id") or "").strip())
+    except Exception:
+        return None
+    if goal is None or frozen_goal_disposition(goal, signal.wake_signal_id) is None:
+        return None
+    return BackgroundMainAgentReport(
+        signal.thread_id, signal.root_task_id, reason, "", "", "", now,
+        delivery_status="suppressed", delivery_reason=_GOAL_DISPOSITION_RECOVERY_REASON,
+    )
 
 
 # LLM: 调用方先准确回读pending；未发送认证通知须由原claim内重投，已sent只补canonical，其它原冻结回复保持原路径。
@@ -5360,10 +5387,18 @@ def _complete_wake_report(
                     raise
     scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
     scheduler._wake_retry_after.pop(signal.wake_signal_id, None)
-    if scheduler.scheduler_service is not None:
+    # Goal 裁决恢复报告没有正文；原片报告已在首次完成时记入等待中的定时执行，不能被空报告覆盖。
+    if scheduler.scheduler_service is not None and report.delivery_reason != _GOAL_DISPOSITION_RECOVERY_REASON:
         scheduler.scheduler_service.repository.record_waiting_delivery(report, now=time.time())
-    scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
     cutoff_owns_next = cutoff is not None and cutoff.status in {"pending", "claimed"}
+    # Goal 续跑先记账并应用本片裁决（后继沿同一 Goal 键显式接替仍待确认的本 wake），之后才确认本 wake；
+    # 裁决已冻结却未能应用时本 wake 留在待处理队列，下次经正常发现按冻结裁决重放，不重跑模型、不重复记账。
+    if lifecycle_reason == "thread_goal_continue" and not cutoff_owns_next and continue_goal_after_report(
+        _background_goal_dependencies(scheduler), signal, report=report, now=now,
+    ) == "retry":
+        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+        return None
+    scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
     if cutoff_owns_next:
         publish_pending(scheduler.runtime.agent, scheduler.store, str(signal.root_task_id or ""))
     elif lifecycle_reason == WAKE_REASON and report.goal_continuation_allowed:
@@ -5374,10 +5409,6 @@ def _complete_wake_report(
         complete_named_audit_task_if_settled(
             scheduler.runtime.agent,
             str(signal.root_task_id or "").strip(),
-        )
-    if lifecycle_reason == "thread_goal_continue" and not cutoff_owns_next:
-        continue_goal_after_report(
-            _background_goal_dependencies(scheduler), signal, report=report, now=now,
         )
     if lifecycle_reason == "subagent_runner_finished" and report.goal_continuation_allowed and not cutoff_owns_next:
         _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
@@ -5391,6 +5422,8 @@ def _complete_wake_report(
 
 # 额度通知报告的 reason。_finish_scheduler_wake_claim 按它识别「这一轮已因额度用完收尾」，不看通知正文。
 _QUOTA_NOTICE_REPORT_REASON = "provider_quota_exhausted"
+# Goal 裁决恢复报告的 delivery_reason。_complete_wake_report 按它识别「本片已记账、未运行模型」，不覆盖原片交付记录。
+_GOAL_DISPOSITION_RECOVERY_REASON = "goal_disposition_recovery"
 
 
 # LLM: 只沿原额度耗尽分路使用固定通知；地址选择不等于送达，写入和 wake_handled 仍取真实回执。

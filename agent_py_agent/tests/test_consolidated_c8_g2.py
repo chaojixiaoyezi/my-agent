@@ -2046,6 +2046,8 @@ def seed_usage(call):
         "model_calls": {"schema": "model_call_summary.v1", "physical_model_attempt_count": 1, "backends": ["https://user:TEST_URL_SECRET@usage.example.test/v1?key=TEST_QUERY_SECRET"],
             "backend_attempt_counts": {"https://user:TEST_URL_SECRET@usage.example.test/v1?key=TEST_QUERY_SECRET": 1}},
         "now": call.clock()})
+    # 追加返回时来源投影可能仍在后台排空；种子返回前等它退役，前后快照只比较发现过程。
+    assert store.model_usage.wait_window_sources(5)
     call.context.host.conversation_store = store
     return store
 

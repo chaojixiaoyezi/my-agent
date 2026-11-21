@@ -26,6 +26,7 @@ def test_investigation_reads_one_usage_window(usage_case, monkeypatch):
                 case.owner, case.space, None, tid, 1, None, (), (), 'business-context.v1'))
         tasks.append(task.task_id)
         baseline._append_usage(case, 'agent-a', task.task_id, f'batch-event-{index}', 10)
+    baseline._settle_usage(store)
     original = store.model_usage.events_window_report
     values = {'bytes': 0, 'reads': 0}
 
@@ -179,6 +180,7 @@ def test_usage_identity_reads_are_request_local_and_distinct(usage_case, monkeyp
     store = case.host.conversation_store
     for index in range(4):
         baseline._append_usage(case, 'agent-a', case.task_ids['agent-a'], f'identity-event-{index}', 10)
+    baseline._settle_usage(store)
     points, lists = Counter(), Counter()
     original_task_load = store.session_tasks.load
     original_thread_require = store.threads.require

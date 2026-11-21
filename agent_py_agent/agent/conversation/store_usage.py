@@ -23,6 +23,7 @@ from ..common.json_io import (
     locked_json_path,
     seal_private_jsonl_tail_unlocked,
 )
+from ..concurrency.daemon_executor import DurableDaemonThreadPoolExecutor
 from ..contracts.model_call_latency import MODEL_LATENCY_FIELDS
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
@@ -122,6 +123,10 @@ def reset_unknown_purpose_key_counts() -> None:
         _UNKNOWN_PURPOSE_KEYS["overflow_count"] = 0
 
 
+# 投影排空的复用守护池：工作由持久凭据兜底，进程退出或调度失败时遗留凭据由原维护修复，不让线程随每次发布生灭。
+_USAGE_SOURCE_DRAINS = DurableDaemonThreadPoolExecutor(thread_name_prefix="usage-source-drain")
+
+
 class UsageProjectionCombiner:
     """每条索引路径只有一个排空者，提交凭据由原文件保存。"""
 
@@ -137,6 +142,7 @@ class UsageProjectionCombiner:
     def __init__(self):
         self._pending: deque[UsageIntent] = deque()
         self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)
         self._active = False
 
     @classmethod
@@ -161,36 +167,55 @@ class UsageProjectionCombiner:
             if self._active:
                 return
             self._active = True
-        self._run(background=False)
+        self._schedule(None, time.monotonic() + self._retry_seconds)
 
-    def _run(self, *, background, repair=None):
-        retry_until = time.monotonic() + self._retry_seconds
+    def _schedule(self, repair, retry_until):
+        # 当选排空者只在复用守护池上运行：提交者发布持久凭据后即返回，不在自己的栈上读快照、提交或清理凭据。
         try:
-            while True:
-                progressed, repair = self._drain_window(repair)
-                with self._lock:
-                    # 队列复核与退役共用提交锁，迟到的提交会接棒或留给已选排空者。
-                    if not self._pending and repair is None:
-                        self._active = False
-                        return
-                    if not background:
-                        break
-                    if progressed:
-                        retry_until = time.monotonic() + self._retry_seconds
-                    elif time.monotonic() >= retry_until:
-                        self._pending.clear()
-                        self._active = False
-                        return
-                if not progressed:
-                    time.sleep(self._window_seconds)
-            worker = threading.Thread(target=self._run, kwargs={'background': True, 'repair': repair},
-                                      name='usage-source-drain', daemon=True)
-            Context().run(worker.start)
+            _USAGE_SOURCE_DRAINS.submit(Context().run, self._run, repair, retry_until)
         except BaseException:
-            with self._lock:
-                self._pending.clear()
-                self._active = False
+            # 调度失败只退役当选者；已发布的持久凭据仍是待提交证明，由原维护修复恢复。
+            self._retire()
             raise
+
+    def _retire(self):
+        with self._lock:
+            self._pending.clear()
+            self._release()
+
+    def _release(self):
+        # 调用方持提交锁：当选者退役并唤醒等待本进程追加结清的读者。
+        self._active = False
+        self._idle.notify_all()
+
+    def settled(self, timeout: float) -> bool:
+        """读者有界等待本进程当选排空者退役；超时后覆盖仍由持久凭据如实判定。"""
+        with self._idle:
+            return self._idle.wait_for(lambda: not self._active, timeout)
+
+    def _run(self, repair, retry_until):
+        # 每片排空后让出池线程；仍有工作就排到池队尾，各索引轮流前进。
+        try:
+            progressed, repair = self._drain_window(repair)
+            with self._lock:
+                # 队列复核与退役共用提交锁，迟到的提交会接棒或留给已选排空者。
+                if not self._pending and repair is None:
+                    self._release()
+                    return
+                if progressed:
+                    retry_until = time.monotonic() + self._retry_seconds
+                elif time.monotonic() >= retry_until:
+                    self._pending.clear()
+                    self._release()
+                    return
+            if not progressed:
+                time.sleep(self._window_seconds)
+        except BaseException as error:
+            self._retire()
+            if isinstance(error, Exception):
+                _log_usage_source_error(error)
+            raise
+        self._schedule(repair, retry_until)
 
     def _drain_window(self, repair):
         deadline = time.monotonic() + self._window_seconds
@@ -200,10 +225,17 @@ class UsageProjectionCombiner:
                 batch = [self._pending.popleft() for _ in range(min(len(self._pending), self._batch_limit))]
             if not batch:
                 if repair is not None:
-                    index, store = repair
-                    index.prepare(store, limit=self._repair_limit, deadline=deadline)
-                    repair = None
-                    progressed = True
+                    index, store, budget = repair
+                    report = index.prepare(store, limit=min(self._repair_limit, budget), deadline=deadline)
+                    cursor, examined = report['cursor'] or {}, report['sources_examined']
+                    # 让给在途写者（忙）、未开工（预算耗尽）或窗口用尽前未核到任何来源的修复片不耗修复量、不算进展，
+                    # 按原重试窗口退让。修复量按实际核查项扣减：被窗口截断的修复片只耗已核部分，覆盖仍部分时余量留到下一窗口；
+                    # 完整、未知（交原维护）或修复量用尽即结清。
+                    if not (report['coverage'] == 'partial' and (
+                            cursor.get('busy') or cursor.get('budget_exhausted') or not examined)):
+                        budget -= examined
+                        repair = (index, store, budget) if report['coverage'] == 'partial' and budget > 0 else None
+                        progressed = True
                 break
             store = batch[-1].store
             index = store._source_index()
@@ -219,10 +251,12 @@ class UsageProjectionCombiner:
                     break
                 # 批次可能已提交但清理未完成。原凭据和幂等来源更新负责恢复。
                 _log_usage_source_error(error)
-                repair = index, store
+                needs_repair = True
             else:
-                if index._needs_prepare or len(applied) != len(batch):
-                    repair = index, store
+                needs_repair = index._needs_prepare or len(applied) != len(batch)
+            if needs_repair:
+                # 合批不减修复量：每条需修复的凭据仍各得一个修复片的核查项（_repair_limit），与逐条提交时相同。
+                repair = index, store, len(batch) * self._repair_limit + (repair[2] if repair is not None else 0)
             progressed = True
         return progressed, repair
 
@@ -376,13 +410,13 @@ class ModelUsageStore:
                 token = sources.begin(thread_id)
             sources.update(thread_id, snapshot, before_stamp=before, token=token, store=self)
 
-    def _refresh_usage_source(self, thread_id, before, token):
+    def _refresh_usage_source(self, thread_id, before, token, after=None):
         try:
             combiner = self._usage_combiner
             if combiner is None:
                 combiner = UsageProjectionCombiner.for_path(self._source_index().path)
                 self._usage_combiner = combiner
-            combiner.submit(UsageIntent(token, thread_id, before, self))
+            combiner.submit(UsageIntent(token, thread_id, before, self, after_stamp=after))
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
             # 原事件已提交；可重建来源投影失败只失去覆盖，不能重复记费或阻断原模型回合。
             _log_usage_source_error(error)
@@ -391,22 +425,39 @@ class ModelUsageStore:
     def _usage_source_write(self, thread_id):
         path = self._path(thread_id)
         transition = path.with_name(f".{path.name}.append-once")
-        intent = None
+        intent, after = None, None
         try:
             with locked_file_transition(transition), locked_json_path(path):
                 # 修复者使用同一原始账本锁，不能在 canonical 追加前消费刚出生的凭据。
                 self._require_thread(thread_id)
                 intent = self._begin_usage_source(thread_id)
                 yield
+                after = self._usage_source_after_stamp(thread_id)
         finally:
             if intent is not None:
-                self._refresh_usage_source(thread_id, *intent)
+                self._refresh_usage_source(thread_id, *intent, after)
+
+    # LLM: 仍持原账本锁；本写者关闭时间索引连接可能移走SQLite旁文件，任一后续只读打开都会把它们建回。
+    #   先以只读界读把旁文件恢复成读者都会看到的稳态，再记录写后目录身份，异步排空者据此接续完整性。
+    # 函数用途: 返回本写者全部目录变更之后的来源目录身份；读不到时返回None，退回排空时观察。
+    def _usage_source_after_stamp(self, thread_id):
+        try:
+            self._index(thread_id).source_bounds()
+            return self._source_index().stamps()
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            return None
 
     def prepare_window_sources(self, *, limit=16, deadline=None):
         """仅维护写lane调用；每步最多推进一个目录项或一源128行，query绝不迁移。"""
         return self._source_index().prepare(self, limit=limit, deadline=deadline)
 
+    def wait_window_sources(self, timeout=UsageProjectionCombiner._retry_seconds):
+        """有界等待本进程当选排空者退役（已返回追加的投影及其修复）；不迁移，超时后覆盖仍由持久凭据判定。"""
+        return UsageProjectionCombiner.for_path(self._source_index().path).settled(timeout)
+
     def window_source_plan(self, *, since=0, until=float('inf')):
+        # 本进程已返回的追加可能仍在池上排空：读者至多等一个原重试窗口，提交者仍不等投影。
+        self.wait_window_sources()
         return self._source_index().plan(since=since, until=until)
 
     def _index(self, thread_id):

@@ -627,6 +627,8 @@ def test_real_usage_writer_ledger_and_sqlite_survive_retirement(tmp_path, entry_
         "model_calls": {"schema": "model_call_summary.v1", "physical_model_attempt_count": 1,
                         "accounted_input_tokens": 5, "output_tokens": 2,
                         "total_tokens": 7}, "now": 1.0})
+    # 追加返回时来源投影可能仍在后台读取本线程索引；退休前等它退役，字节与搬移比较只覆盖退休本身。
+    assert store.model_usage.wait_window_sources(5)
     usage = root / "model_usage"
     ledger = usage / f"{thread.thread_id}.jsonl"
     database = usage / f".{thread.thread_id}-usage.sqlite3"

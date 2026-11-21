@@ -7,6 +7,7 @@ import threading
 import time
 
 from .control_plane import GatewayControlPlane
+from .multiprocess_coordinator import admit_coordinator_drain
 from .multiprocess_drain_resources import DrainResource
 from .multiprocess_drain_sources import durable_drain_snapshot, durable_items, same_durable_snapshot
 from .multiprocess_stop_drain import STOP_DRAIN_KINDS, DrainInventory, InFlightItem, assess_drain
@@ -100,6 +101,8 @@ class GatewayDrainRuntime:
     # 函数用途: 停止本root的新资源出生，并保留实际池等待收尾。
     def stop_producers(self):
         self.require_original()
+        # 先在原lease生命周期门内落drain准入，后续快照/封存与服务期回执退役线性化。
+        admit_coordinator_drain(self._lease_origin)
         with self._gate:
             self._closing = True
             groups = tuple(self._resources.values())

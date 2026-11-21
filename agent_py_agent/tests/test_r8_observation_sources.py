@@ -113,6 +113,8 @@ def _legacy_usage(case, count, *, stamp=1000):
 
 
 def _finish_prepare(store, *, limit=4, maximum=1024):
+    # 本进程的来源投影排空者也是维护参与者；先等它退役，随后的有界维护与断言不与它并发。
+    assert store.wait_window_sources(5)
     reports = []
     for _ in range(maximum):
         report = store.prepare_window_sources(limit=limit)
@@ -186,10 +188,10 @@ def test_usage_pending_append_and_stale_source_cas_remain_unknown(tmp_path, monk
     arrived, release = threading.Event(), threading.Event()
     original = store._refresh_usage_source
     failures = []
-    def paused(identifier, before, token):
+    def paused(identifier, before, token, *writer_stamp):
         arrived.set()
         assert release.wait(10)
-        return original(identifier, before, token)
+        return original(identifier, before, token, *writer_stamp)
     monkeypatch.setattr(store, '_refresh_usage_source', paused)
     def run():
         try:
@@ -264,11 +266,11 @@ def _append_in_child(root, thread_id, arrived, release):
     store = ConversationStore(Path(root))
     usage = store.model_usage
     original = usage._refresh_usage_source
-    def paused(identifier, before, token):
+    def paused(identifier, before, token, *writer_stamp):
         arrived.set()
         if not release.wait(10):
             raise RuntimeError('parent did not release usage writer')
-        return original(identifier, before, token)
+        return original(identifier, before, token, *writer_stamp)
     usage._refresh_usage_source = paused
     usage.append_once({'event_id': 'child-event', 'thread_id': thread_id, 'request_id': 'child-request',
                        'model_calls': _decision_calls(finished=1, timed_out=0, input_tokens=1), 'now': 2000})
