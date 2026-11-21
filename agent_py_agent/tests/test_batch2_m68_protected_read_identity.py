@@ -19,7 +19,10 @@ from agent_py_agent.agent.gateway_parts.private_interaction_service import (
 )
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
 from agent_py_agent.agent.tooling.web_fetch_runtime import RawResponseParts
-from agent_py_agent.agent.user_space.task_credential_http import credential_authenticated_request
+from agent_py_agent.agent.user_space.task_credential_http import (
+    ProtectedReadResponse,
+    credential_authenticated_request,
+)
 from agent_py_agent.agent.user_space.task_credentials import (
     CredentialCardOptions,
     credential_path,
@@ -36,29 +39,29 @@ SECRET = "SyntheticProtectedReadSecret"
 class _Site:
     """Simulated origin. Protected paths refuse a request without Authorization; other paths are public."""
 
-    def __init__(self, protected=("/account",), redirects=None, refuse_api_key=False, probe_error=False):
+    def __init__(self, protected=("/account",), redirects=None, denial_redirect=None):
         self.protected, self.redirects = set(protected), dict(redirects or {})
-        self.refuse_api_key, self.probe_error = refuse_api_key, probe_error
+        self.denial_redirect = denial_redirect
         self.requests = []
 
     def __call__(self, request, **_kwargs):
         authorized = "Authorization" in request.headers
         self.requests.append((request.method, request.url, authorized))
-        if self.probe_error and not authorized:
-            raise OSError("simulated connection reset")
         final = self.redirects.get(urlsplit(request.url).path, request.url)
-        refused = (urlsplit(final).path in self.protected
-                   or (self.refuse_api_key and "X-Api-Key" in request.headers))
-        if refused and not authorized:
-            return RawResponseParts(401, {"WWW-Authenticate": 'Basic realm="m68"'}, b"", final)
+        if urlsplit(final).path in self.protected:
+            denial = RawResponseParts(401, {}, b"", self.denial_redirect or request.url)
+            return ProtectedReadResponse(
+                200, {"Content-Type": "application/json"}, b'{"status":"sample"}', final,
+                denial_request_url=request.url, denial_method=request.method, denial=denial,
+            )
         return RawResponseParts(200, {"Content-Type": "application/json"}, b'{"status":"sample"}', final)
 
 
-def _credential_wake(tmp_path, monkeypatch):
+def _credential_wake(tmp_path, monkeypatch, target=TARGET):
     """Real card, submitted secret and published credential wake; the current turn is that wake."""
     ctx = _dm_case(tmp_path)
     inputs = input_dependencies.input_dependency_access(ctx.agent)
-    ref, _ = request_credential_card(ctx.agent, url=TARGET, authentication="basic",
+    ref, _ = request_credential_card(ctx.agent, url=target, authentication="basic",
                                      options=CredentialCardOptions(access_scope="task"))
     row = read_json_object_report(credential_path(ctx.agent.home_paths.owner_home_dir, ref), context="test").payload
     input_dependencies.arm_input_dependency(ctx.agent, row["input_id"])
@@ -100,17 +103,16 @@ def _chain(ctx, inputs, input_id, outcome, call_id):
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 def test_protected_target_with_an_authentication_challenge_reaches_verified(tmp_path, monkeypatch, method):
-    ctx, inputs, input_id, ref = _credential_wake(tmp_path, monkeypatch)
+    target = TARGET + "?view=private-canary"
+    ctx, inputs, input_id, ref = _credential_wake(tmp_path, monkeypatch, target)
     site = _Site()
-    outcome = _read(ctx, ref, site, TARGET + "?view=private-canary", method=method)
+    outcome = _read(ctx, ref, site, target, method=method)
 
     report, event = _chain(ctx, inputs, input_id, outcome, "m68-protected")
     assert report["state"] == "verified"
     proof = report["protected_resource_check"]
     assert (proof["method"], proof["http_status"], proof["credential_ref"]) == (method, 200, ref)
-    # The authorized read, then one request for the same target that carries no credential header.
-    assert site.requests == [(method, TARGET + "?view=private-canary", True),
-                             (method, TARGET + "?view=private-canary", False)]
+    assert site.requests == [(method, target, True)]
     persisted = json.dumps(event)
     assert SECRET not in persisted and "private-canary" not in persisted and "/account" not in persisted
 
@@ -138,12 +140,12 @@ def test_other_protected_resource_is_not_the_intended_target(tmp_path, monkeypat
     assert _chain(ctx, inputs, input_id, outcome, "m68-admin")[0]["state"] == "woken"
 
 
-def test_public_target_without_protection_evidence_stays_woken(tmp_path, monkeypatch):
+def test_status_only_target_uses_one_business_request_and_stays_woken(tmp_path, monkeypatch):
     ctx, inputs, input_id, ref = _credential_wake(tmp_path, monkeypatch)
     site = _Site(protected=())
     outcome = _read(ctx, ref, site, TARGET)
 
-    assert site.requests == [("GET", TARGET, True), ("GET", TARGET, False)]
+    assert site.requests == [("GET", TARGET, True)]
     assert _chain(ctx, inputs, input_id, outcome, "m68-open-target")[0]["state"] == "woken"
 
 
@@ -158,21 +160,20 @@ def test_effective_response_from_another_resource_is_not_attested(tmp_path, monk
 
 def test_model_supplied_headers_cannot_supply_the_challenge(tmp_path, monkeypatch):
     ctx, inputs, input_id, ref = _credential_wake(tmp_path, monkeypatch)
-    # The target is public, but this site refuses an unauthorized request that carries an API key header.
-    site = _Site(protected=(), refuse_api_key=True)
+    site = _Site(protected=())
     outcome = _read(ctx, ref, site, TARGET, headers={"X-Api-Key": "model-supplied"})
 
-    assert site.requests == [("GET", TARGET, True), ("GET", TARGET, False)]
+    assert site.requests == [("GET", TARGET, True)]
     assert _chain(ctx, inputs, input_id, outcome, "m68-forged")[0]["state"] == "woken"
 
 
-def test_failed_challenge_keeps_the_read_and_withholds_the_attestation(tmp_path, monkeypatch):
+def test_effective_denial_of_a_different_resource_leaves_the_read_unattested(tmp_path, monkeypatch):
     ctx, inputs, input_id, ref = _credential_wake(tmp_path, monkeypatch)
-    site = _Site(probe_error=True)
+    site = _Site(denial_redirect=TARGET + "?record=other")
     outcome = _read(ctx, ref, site, TARGET)
 
     assert "sample" in outcome.output
-    assert site.requests == [("GET", TARGET, True), ("GET", TARGET, False)]
+    assert site.requests == [("GET", TARGET, True)]
     assert _chain(ctx, inputs, input_id, outcome, "m68-probe-error")[0]["state"] == "woken"
 
 
@@ -184,3 +185,13 @@ def test_ordinary_credentialed_read_sends_no_challenge(tmp_path, monkeypatch):
 
     assert "protected_resource_check" not in outcome.result_envelope
     assert site.requests == [("GET", TARGET, True)]
+
+
+def test_protection_for_a_different_query_selected_record_is_excluded(tmp_path, monkeypatch):
+    ctx, inputs, input_id, ref = _credential_wake(tmp_path, monkeypatch, TARGET + "?record=one")
+    site = _Site()
+    other = TARGET + "?record=two"
+    outcome = _read(ctx, ref, site, other)
+
+    assert site.requests == [("GET", other, True)]
+    assert _chain(ctx, inputs, input_id, outcome, "m68-other-query")[0]["state"] == "woken"

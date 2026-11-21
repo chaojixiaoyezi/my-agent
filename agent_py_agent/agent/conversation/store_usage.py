@@ -432,20 +432,13 @@ class ModelUsageStore:
                 self._require_thread(thread_id)
                 intent = self._begin_usage_source(thread_id)
                 yield
-                after = self._usage_source_after_stamp(thread_id)
+                try:
+                    after = self._source_index().stamps()
+                except (OSError, ValueError):
+                    pass  # The drainer will verify coverage if the writer cannot capture its stamp.
         finally:
             if intent is not None:
                 self._refresh_usage_source(thread_id, *intent, after)
-
-    # LLM: 仍持原账本锁；本写者关闭时间索引连接可能移走SQLite旁文件，任一后续只读打开都会把它们建回。
-    #   先以只读界读把旁文件恢复成读者都会看到的稳态，再记录写后目录身份，异步排空者据此接续完整性。
-    # 函数用途: 返回本写者全部目录变更之后的来源目录身份；读不到时返回None，退回排空时观察。
-    def _usage_source_after_stamp(self, thread_id):
-        try:
-            self._index(thread_id).source_bounds()
-            return self._source_index().stamps()
-        except (OSError, ValueError, RuntimeError, sqlite3.Error):
-            return None
 
     def prepare_window_sources(self, *, limit=16, deadline=None):
         """仅维护写lane调用；每步最多推进一个目录项或一源128行，query绝不迁移。"""

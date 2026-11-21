@@ -33,6 +33,7 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.store_layout import ConversationStorage
 from agent_py_agent.agent.conversation.store_wakes import WakeStore
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -437,3 +438,80 @@ def test_recovery_report_keeps_the_recorded_slice_delivery(tmp_path, monkeypatch
     monkeypatch.setattr(restarted.scheduler_service.repository, "record_waiting_delivery", spy)
     assert [report.delivery_reason for report in restarted.tick(now=4000.0)] == ["goal_disposition_recovery"]
     assert len(recorded) == 1
+
+
+def test_empty_goal_slice_survives_accounting_outage_and_restart(tmp_path, monkeypatch):
+    calls = []
+    _agent, store, scheduler, goal, first = _scheduled_goal(tmp_path, calls, "")
+
+    def unavailable(_request):
+        raise OSError("simulated accounting outage")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store.goals, "record_continuation_fuse", unavailable)
+        scheduler.tick(now=14.0)
+
+    assert _pending_ids(store, goal) == [first.wake_signal_id]
+    _agent, reopened, restarted = _open_scheduler(tmp_path, calls, "")
+    assert len(restarted.tick(now=4000.0)) == 1
+    assert _fuse_state(reopened, goal)["processed_wake_ids"] == [first.wake_signal_id]
+    pending = _pending_ids(reopened, goal)
+    assert len(pending) == 1 and pending[0] != first.wake_signal_id
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("notice_failure", ["false", "error"])
+def test_unconfirmed_withheld_notice_keeps_goal_wake_pending(tmp_path, monkeypatch, notice_failure):
+    calls = []
+    _agent, store, scheduler, goal, first = _scheduled_goal(tmp_path, calls, "")
+
+    def unavailable(*_args, **_kwargs):
+        if notice_failure == "error":
+            raise OSError("simulated notice outage")
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(background_goal, "_disposition_action",
+                      lambda *_args: ("withheld", "report_withholds_continuation"))
+        patch.setattr(goal_progress_fuse, "push_goal_withheld_notice", unavailable)
+        scheduler.tick(now=14.0)
+    assert _pending_ids(store, goal) == [first.wake_signal_id]
+    assert not pending_host_notices(store, goal.thread_id)
+
+    _agent, reopened, restarted = _open_scheduler(tmp_path, calls, "")
+    restarted.tick(now=4000.0)
+    assert len(pending_host_notices(reopened, goal.thread_id)) == 1
+    assert not _pending_ids(reopened, goal)
+    assert len(calls) == 1
+
+
+def test_failed_exact_goal_read_cannot_reexecute_accounted_empty_slice(tmp_path, monkeypatch):
+    calls = []
+    _agent, store, scheduler, goal, first = _scheduled_goal(tmp_path, calls, "")
+    _interrupt_publication(monkeypatch, scheduler, 14.0)
+
+    def remove_settlement_snapshot(data):
+        delivery = data["metadata"].get("owner_delivery", {})
+        if "goal_slice_settlement" in delivery:
+            data["metadata"].pop("owner_delivery")
+        return data
+
+    # An already-accounted wake created by an older runtime has only the Goal disposition.
+    update_json_file_atomic(store.wakes._find_path(first.wake_signal_id), remove_settlement_snapshot,
+                            require_existing=True)
+    _agent, reopened, restarted = _open_scheduler(tmp_path, calls, "")
+    load = reopened.goals.load
+
+    def unavailable(thread_id, *, goal_id=None, **filters):
+        if goal_id == goal.goal_id and not filters:
+            raise OSError("simulated disposition read interruption")
+        return load(thread_id, goal_id=goal_id, **filters)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reopened.goals, "load", unavailable)
+        restarted.tick(now=4000.0)
+    assert _pending_ids(reopened, goal) == [first.wake_signal_id]
+    assert len(calls) == 1
+    assert len(restarted.tick(now=8000.0)) == 1
+    assert _fuse_state(reopened, goal)["processed_wake_ids"] == [first.wake_signal_id]
+    assert len(calls) == 1

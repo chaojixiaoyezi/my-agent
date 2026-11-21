@@ -32,7 +32,10 @@ from agent_py_agent.agent.gateway_parts.private_interaction_service import (
 )
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
 from agent_py_agent.agent.tooling.web_fetch_runtime import RawResponseParts
-from agent_py_agent.agent.user_space.task_credential_http import credential_authenticated_request
+from agent_py_agent.agent.user_space.task_credential_http import (
+    ProtectedReadResponse,
+    credential_authenticated_request,
+)
 from agent_py_agent.agent.user_space.task_credentials import (
     CredentialCardOptions,
     credential_path,
@@ -182,10 +185,16 @@ def _verified_credential_case(tmp_path, monkeypatch):
                      turn_trigger=lifecycle_wake_turn_trigger(wake.reason, wake.to_dict(), ()))
     ctx.agent._current_run_params = params
 
+    business_requests = []
+
     def protected_transport(request, **_kwargs):
+        business_requests.append(request.url)
         assert request.authorization_origin == "https://m68.example.com:443"
         assert request.headers["Authorization"].startswith("Basic ")
-        return RawResponseParts(200, {"Content-Type": "application/json"}, b'{"status":"sample"}', request.url)
+        return ProtectedReadResponse(
+            200, {"Content-Type": "application/json"}, b'{"status":"sample"}', request.url,
+            denial_request_url=url, denial_method="GET", denial=RawResponseParts(401, {}, b"", url),
+        )
 
     web = _web_tool()
     web.raw_fetcher = protected_transport
@@ -194,6 +203,7 @@ def _verified_credential_case(tmp_path, monkeypatch):
     )
     outcome = web.execute({"url": url, "credential_ref": ref})
     assert outcome.ok, outcome.output
+    assert business_requests == [url]
     result = ToolResult("m68-call", "web_fetch", "succeeded", handler_executed=True,
                         metadata={"handler_details": outcome.result_envelope})
     record = {"tool": result.tool_name, "id": result.call_id, "ok": result.ok,

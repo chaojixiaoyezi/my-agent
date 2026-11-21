@@ -39,11 +39,11 @@ from .process_session_records import (
 from .process_session_store import (
     PROCESS_LOST_REASON,
     ProcessSessionStore,
-    ProcessSessionTransaction,
     _activation_exit_confirmed,
     _archive_session_if_unchanged,
     _completion_obligation_finished,
     _record_ttl_expired,
+    _unlink_session_if_unchanged,
     process_session_store_root,
 )
 
@@ -177,8 +177,12 @@ class _Pass:
                                or (phase == "reap_hosts" and not _valid_reap_after(reap_after)))
         if self.invalid_cursor:
             self.result["cursor"] = {"next_prune_at": 0.0, "log_offset": 0, "phase": "prune"}
-        elif phase == "reap_hosts" and isinstance(request.cursor.get("reap_directory"), dict):
-            cursor["reap_directory"] = request.cursor["reap_directory"]
+        else:
+            for key in ("prune_directory", "reap_directory"):
+                if isinstance(request.cursor.get(key), dict):
+                    cursor[key] = request.cursor[key]
+            if request.cursor.get("archive_reap_completed") is True:
+                cursor["archive_reap_completed"] = True
         if not self.invalid_cursor and phase != "reap_hosts" and self.ledger_generation is None and offset:
             # 无代际的旧续点只能重放，不能把当前台账前缀直接认作已消费。
             self.result["cursor"].update(log_offset=0, phase="logs")
@@ -307,16 +311,36 @@ def _commit_lost_host(p, record):
     p.request.run_write(operation)
 
 
+def _read_maintenance_record(p, parts, name):
+    try:
+        session_id = validate_session_id(name.removesuffix(".json"))
+        remaining = p.budget.max_bytes - p.result["bytes"]
+        raw = read_bytes_beneath(p.root, (*parts, name), max_bytes=remaining)
+        if raw is None:
+            return None, 0, False
+        p.result["bytes"] += len(raw)
+        record = validate_process_record(json.loads(raw))
+        if record["session_id"] != session_id:
+            raise ValueError("managed process filename and record identity differ")
+        return record, len(raw), False
+    except ManagedFileReadLimitExceeded as exc:
+        if p.result["bytes"] and exc.observed_bytes <= p.budget.max_bytes:
+            return None, 0, True
+    except (OSError, TypeError, ValueError, RecursionError):
+        pass
+    p.skip("process_state_unknown")
+    p.error("process_session_scan_failed")
+    return None, 0, False
+
+
 def _reap_hosts(p):
-    """分片检查活跃目录，未知实例留在原处，随下次到期维护重新核对。"""
+    """Check active host records within the lane budget."""
     cursor = p.result["cursor"]
     position = cursor.get("reap_directory", {})
     while p.available():
-        # 活跃目录原先按路径枚举；严格描述符打开不可用的平台沿用目录分页的可移植续读。
         try:
             name, resume, visited, complete = lane_directory_entry(p.root, (), position, require_dir_fd=False)
         except (TypeError, ValueError):
-            # 续点或目录项无法续读时只结束本轮回收并上报，下次到期从头重扫，不阻塞后续独立阶段。
             cursor.pop("reap_directory", None)
             p.skip("process_state_unknown")
             p.error("process_session_scan_failed")
@@ -325,87 +349,64 @@ def _reap_hosts(p):
         if complete:
             cursor.pop("reap_directory", None)
             return True
-        if name is None or not (name.startswith("bg-") and name.endswith(".json")):
-            cursor["reap_directory"] = position = resume
-            continue
-        # 读取失败只遗留该行，不阻止其余候选按续点前进。
-        try:
-            session_id = validate_session_id(name.removesuffix(".json"))
-            remaining = p.budget.max_bytes - p.result["bytes"]
-            raw = read_bytes_beneath(p.root, (name,), max_bytes=remaining)
-            record = None
-            if raw is not None:
-                p.result["bytes"] += len(raw)
-                record = validate_process_record(json.loads(raw))
-                if record["session_id"] != session_id:
-                    raise ValueError("managed process filename and record identity differ")
-        except ManagedFileReadLimitExceeded as exc:
-            if p.result["bytes"] and exc.observed_bytes <= p.budget.max_bytes:
-                return False  # 下一片有完整字节额度时再读这条。
-            p.skip("process_state_unknown")
-            p.error("process_session_scan_failed")
-        except (OSError, TypeError, ValueError, RecursionError):
-            p.skip("process_state_unknown")
-            p.error("process_session_scan_failed")
-        else:
+        if name is not None and name.startswith("bg-") and name.endswith(".json"):
+            record, _, retry = _read_maintenance_record(p, (), name)
+            if retry:
+                return False
             if record is not None and record["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS:
                 _commit_lost_host(p, record)
         cursor["reap_directory"] = position = resume
+        if not visited:
+            return False
     return False
 
 
-# 初读只枚举已完成的历史，归档位置证明通知义务此前已结清；实际删除仍在原根目录事务中重读。
-# 函数用途: 每小时通过原目录事务清理 finished/ 中安全过期的终态记录。
+def _archived_record_expired(record, now):
+    return (record["status"] in PROCESS_TERMINAL_STATUSES
+            and not record.get("retain_until_consumed")
+            and (record.get("activation_scope") is None or (
+                not record.get("stop_requested") and _activation_exit_confirmed(record)))
+            and _completion_obligation_finished(record, lambda _notice: True)
+            and _record_ttl_expired(record, 86400.0, now))
+
+
 def _prune(p):
-    if p.request.now < p.result["cursor"]["next_prune_at"]:
-        return True
+    """Page history independently and retire one revalidated file at a time."""
+    cursor = p.result["cursor"]
     history = p.root / "finished"
+    position = cursor.get("prune_directory", {})
     try:
         if not _real_directories(history):
             p.skip("unsafe_path")
             return False
     except FileNotFoundError:
-        records, errors = [], []
+        pass
     else:
-        # 冷维护不占用按 owner 定界的热缓存，也不为历史读口创建第二把目录锁。
-        records, errors = ProcessSessionTransaction(history).list_records()
-    busy = False
-    for error in errors:
-        if error.get("error_type") == "BlockingIOError":
-            p.skip("lock_busy")
-            busy = True
+        parts = ("finished",)
+        cursor["prune_directory"] = position
+        while p.available():
+            name, resume, visited, complete = lane_directory_entry(p.root, parts, position, require_dir_fd=False)
+            p.result["items"] += visited
+            if complete:
+                break
+            if name is not None and not name.startswith(".") and name.endswith(".json"):
+                record, size, retry = _read_maintenance_record(p, parts, name)
+                if retry:
+                    return False
+                if record is not None and _archived_record_expired(record, p.request.now):
+                    def retire():
+                        with p.transaction():
+                            return _unlink_session_if_unchanged(p.root, record, record_root=history)
+                    if p.request.run_write(retire):
+                        p.result["deleted_items"] += 1
+                        p.result["freed_bytes"] += size
+            cursor["prune_directory"] = position = resume
+            if not visited:
+                return False
         else:
-            p.skip("process_state_unknown")
-            p.error("process_session_scan_failed")
-    if busy:
-        return False
-    # 坏历史行只上报并原样保留，从不被选为可删；其余完整记录照常按各自 TTL 核对。检查点照常前进，
-    # 坏行在下次到期时有界重查，活跃目录回收和后续独立阶段不再等待它被修复。
-    candidates = [row for row in records
-                  if row["status"] in PROCESS_TERMINAL_STATUSES
-                  and not row.get("retain_until_consumed")
-                  and (row.get("activation_scope") is None or (
-                      not row.get("stop_requested") and _activation_exit_confirmed(row)))
-                  and _completion_obligation_finished(row, lambda _notice: True)
-                  and _record_ttl_expired(row, 86400.0, p.request.now)]
-    if candidates:
-        # 阶段已在扫描前准入；原 prune 不能拆分，不能在慢扫后反复放弃而永久无法清积压。
-        sizes = {}
-        for row in candidates:
-            try:
-                sizes[row["session_id"]] = os.lstat(history / (row["session_id"] + ".json")).st_size
-            except FileNotFoundError:
-                continue
-
-        def operation():
-            with p.transaction() as transaction:
-                return transaction.prune_finished(None, max_age_seconds=86400.0, now=p.request.now, finished_only=True)
-
-        removed = p.request.run_write(operation)
-        p.result["deleted_items"] += len(removed)
-        p.result["freed_bytes"] += sum(sizes.get(sid, 0) for sid in removed)
-        p.result["items"] += 1  # 原 prune 是一个不可分割的目录事务批次。
-    p.result["cursor"]["next_prune_at"] = p.request.now + _PROCESS_SESSION_LANE_PRUNE_INTERVAL_SECONDS
+            return False
+    cursor.pop("prune_directory", None)
+    cursor["next_prune_at"] = p.request.now + _PROCESS_SESSION_LANE_PRUNE_INTERVAL_SECONDS
     return True
 
 
@@ -709,14 +710,33 @@ def maintain_process_sessions_lane(request: StorageLaneRequest) -> dict:
             return p.result
         phase = p.phase
         if phase == "prune":
+            cursor = p.result["cursor"]
             due = request.now >= p.result["cursor"]["next_prune_at"]
-            if not p.available() or not _prune(p):
+            if not p.available():
                 return p.result
-            p.set_phase("reap_hosts" if due else "launch_locks")
+            if due:
+                # Give the active directory a turn even when the archive's page is unfinished.
+                try:
+                    _prune(p)
+                except BlockingIOError:
+                    p.skip("lock_busy")
+                except (OSError, TypeError, ValueError):
+                    p.skip("process_state_unknown")
+                    p.error("process_session_scan_failed")
+            if cursor.get("archive_reap_completed") and "prune_directory" in cursor:
+                return p.result
+            reaped = cursor.pop("archive_reap_completed", False)
+            p.set_phase("reap_hosts" if due and not reaped else "launch_locks")
             phase = p.phase
         if phase == "reap_hosts":
-            if not p.available() or not _reap_hosts(p):
+            if not p.available():
                 return p.result
+            if not _reap_hosts(p):
+                if "prune_directory" in p.result["cursor"]:
+                    p.set_phase("prune")
+                return p.result
+            if "prune_directory" in p.result["cursor"]:
+                p.result["cursor"]["archive_reap_completed"] = True
             p.set_phase("launch_locks")
             phase = p.phase
         for step, directory, following in (("launch_locks", root / ".launches", "root_locks"),
@@ -735,6 +755,8 @@ def maintain_process_sessions_lane(request: StorageLaneRequest) -> dict:
             if not _compact(p):
                 return p.result
             p.set_phase("prune")
+            if "prune_directory" in p.result["cursor"]:
+                return p.result
             p.result["complete"] = True
             generation = lane_cycle_generation(p.result["cursor"], wrapped=True)
             p.result["cycle_generation"] = p.result["cursor"]["cycle_generation"] = generation
